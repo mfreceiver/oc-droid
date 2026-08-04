@@ -17,14 +17,12 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
@@ -35,10 +33,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.runtime.snapshots.SnapshotStateMap
@@ -70,6 +65,7 @@ import cn.vectory.ocdroid.ui.isInterruptedQuestionPart
 import cn.vectory.ocdroid.ui.isStaleRunningPart
 import cn.vectory.ocdroid.ui.theme.AppTextStyles
 import cn.vectory.ocdroid.ui.theme.CardWidthScope
+import cn.vectory.ocdroid.ui.theme.Dimens
 import cn.vectory.ocdroid.util.FLICKER_TAG
 import cn.vectory.ocdroid.util.STREAMING_FLICKER_DEBUG
 import cn.vectory.ocdroid.util.flickerFilterOutCount
@@ -77,7 +73,6 @@ import cn.vectory.ocdroid.util.workdirBasename
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.isActive
-import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
 
@@ -351,310 +346,35 @@ internal fun ChatMessageList(
         if (!sessionId.isNullOrBlank()) sessionVM.loadSessionDiff(sessionId)
     }
 
-    // §flicker-fix (Issue 1): key the LazyListState by sessionId so a fresh
-    // state is created on session change. Without the key, the pager reusing
-    // a slot for a different session kept the old scroll offset for one frame.
-    //
-    // §review-D (gpter #3) — actual preservation scope: the Chat
-    // NavBackStackEntry's SaveableStateHolder restores the prior viewport
-    // ONLY for (a) HorizontalPager page-slot reuse on ROOT sessions (stable
-    // pager `key = session.id` keeps the slot alive across swipe / tab-tap),
-    // and (b) Chat→file-preview→back re-entry with the SAME sessionId. It
-    // does NOT reliably preserve scroll across sheet-select of a non-paged
-    // session, root↔sub-agent switches (sub-agents bypass the pager), post-
-    // fork re-entry, or other programmatic selects outside the pager page
-    // set — those paths re-create the state from this default initializer.
-    // The hoisted savedPositions/accessOrder LRU (see params above) is
-    // WRITE-ONLY today (its restore consumer was removed); it is retained
-    // for a future cross-session restore and does not affect this line.
-    val listState = rememberSaveable(sessionId, saver = LazyListState.Saver) { LazyListState() }
+    // §flicker-fix (Issue 1) + §wave1-c r2: the per-session LazyListState
+    // (rememberSaveable(sessionId, LazyListState.Saver)) + followBottom
+    // (saveable) + NavFab visibility / navJump guard / restore-in-flight guard
+    // + the FIVE pure scroll side-effects (position mirror / direction detect /
+    // bottom-track / navFab auto-hide / session-enter reset) now live in
+    // ScrollManager.kt (rememberScrollController). listState is aliased here
+    // for read-only use by the LazyColumn + the mixed effects below; the
+    // mutable scroll flags are accessed via `scroll.*`. The saveable slots are
+    // unchanged (same Saver / initializer / sessionId key) so Chat→preview→back
+    // and session re-entry scroll memory is byte-identical to before.
+    val scroll = rememberScrollController(
+        sessionId = sessionId,
+        savedPositions = savedPositions,
+        accessOrder = accessOrder,
+    )
+    val listState = scroll.listState
     // §Wave5b-Q13: capture the PARENT's scroll checkpoint SYNCHRONOUSLY at the
-    // click site, before delegating to sessionVM.openSubAgent. The checkpoint
-    // is built from the LIVE listState (first visible item's key + index +
-    // offset) so the parent's exact viewport is recoverable when the user
-    // later returns via returnToParent. Oracle explicitly forbade reading
-    // from the async savedPositions mirror — it cannot guarantee the last
-    // pre-navigation frame.
-    //
-    // The lambda is allocated per-composition; `listState` is a stable
-    // rememberSaveable reference so the capture always reads CURRENT values
-    // at click time. No `remember` wrapper: every recomposition would rebuild
-    // it anyway (Compose-friendly allocation; no effect-key churn).
+    // click site (oracle ruling — the async savedPositions mirror cannot be
+    // trusted). Delegates storage + navigation to the ChatScaffold-owned
+    // [onOpenSubAgentNavigate] callback.
     val onOpenSubAgent: (String) -> Unit = { childSessionId ->
-        val firstVisibleKey = listState.layoutInfo.visibleItemsInfo.firstOrNull()?.key?.toString()
-        val checkpoint = cn.vectory.ocdroid.ui.ScrollCheckpoint(
-            anchorKey = firstVisibleKey,
-            fallbackIndex = listState.firstVisibleItemIndex,
-            offset = listState.firstVisibleItemScrollOffset,
-        )
-        // §chat-list-detail §11 / G6 (B5 BLOCK-fix): delegate storage +
-        // navigation to the ChatScaffold-owned callback. The checkpoint is
-        // captured SYNCHRONOUSLY here (oracle ruling — the async
-        // savedPositions mirror cannot guarantee the last pre-navigation
-        // frame); the callback forwards (childId, checkpoint) to
-        // sessionVM.openSubAgent, which writes the checkpoint to the parent
-        // route entry's SavedStateHandle INSIDE the success callback (NOT
-        // before the call) — so a failed fetch or a route change mid-fetch
-        // leaves no stale checkpoint. Replaces the legacy
-        // `sessionVM.openSubAgent(childId, checkpoint)` two-arg call (which
-        // stored the checkpoint in a global ChatState map and used the
-        // non-route selectSession path).
-        onOpenSubAgentNavigate(childSessionId, checkpoint)
+        onOpenSubAgentNavigate(childSessionId, scroll.captureCheckpoint())
     }
-    // §B1: followBottom is per-session saveable so it survives Chat→preview→back.
-    // A REAL sessionId change re-runs the initializer (default true); a re-entry
-    // with the SAME sessionId (e.g. returning from a file preview) restores the
-    // saved value (possibly false = the user was reading history). Previously a
-    // plain `remember`, which recreated true on every re-entry → returning from
-    // a preview yanked a history-reading user back to latest, defeating the
-    // saveable LazyListState above. The reselect path + NavFab onJump still
-    // explicitly set followBottom=true on a deliberate "go to latest" intent.
-    var followBottom by rememberSaveable(sessionId) { mutableStateOf(true) }
-    // §navfab-redesign: 单键"跳到最新"按钮的可见性。仅在用户"向新滑动"（从历史
-    // 往最新方向滚）时浮现；按一次、到底部、或静置 3s 后隐藏（见下方各 effect）。
-    var navFabVisible by remember { mutableStateOf(false) }
-    var navFabTick by remember { mutableIntStateOf(0) }
-    // §navfab-guard: NavFab 跳到最新动画进行中标志。置位期间方向检测器跳过——避免
-    // NavFab 自己的 animateScrollToItem(0)（每帧 delta<0）被误判为"用户向新滑动"
-    // 而重新点亮按钮（按下后闪烁/重现）。按下时 onJump 置位、动画 finally 清零。
-    var navJumping by remember { mutableStateOf(false) }
-    // §3-scroll-memory: per-session scroll-position memory is now HOISTED to
-    // ChatScaffold (above the HorizontalPager) so the pager disposing this
-    // composable on a currentSessionId flip no longer drops the cache. The
-    // `savedPositions` map + `accessOrder` LRU ledger are received as params.
-    // The mirror effect below continuously records the user's scroll offset
-    // against the active sessionId. NOTE (§B1): the restore CONSUMER was
-    // removed — savedPositions/accessOrder are currently WRITE-ONLY (kept for
-    // a future cross-session restore consumer; cleanup is out of scope here).
-    //
-    // §review-D (gpter #3) — guaranteed vs best-effort: with the restore
-    // consumer gone, the ACTUAL scroll-preservation guarantees are carried
-    // by the saveable LazyListState + saveable followBottom above. Those
-    // reliably preserve scroll for: (a) Sessions-page entry → forced jump
-    // to latest via pendingScrollRequest (NOT a restore); (b) HorizontalPager
-    // swipe + SessionTabStrip tap for ROOT sessions in the pager page set
-    // (stable `key = session.id` keeps each page's saveable slot alive);
-    // §B6: pager and tab strip deleted — historical context only;
-    // (c) Chat→file-preview→back re-entry with the SAME sessionId. They do
-    // NOT reliably cover sheet-select of a non-paged session, root↔sub-agent
-    // switches, post-fork re-entry, or programmatic selects outside the
-    // pager page set — those paths re-run the saveable initializer.
-    //
-    // 🟡 Lifecycle constraint (glmer 🟡-6) — RESOLVED by hoisting: the cache
-    // used to be bound to ChatMessageList's composition, so navigation away
-    // from the chat tab / config change wiped it. It now survives as long as
-    // ChatScreen stays in composition. NOT persisted across process death
-    // (acceptable: cold start lands on the latest-message view + the
-    // server-side message re-fetch seeds a fresh window). Capacity is bounded
-    // by MAX_SAVED_SESSIONS (LRU eviction) to avoid unbounded growth.
-    //
-    // 🟡 True LRU via accessOrder list (kimo 9.4 复审): SnapshotStateMap has
-    // **HashMap semantics — its iteration order is NOT insertion order** (per
-    // Compose source). A prior version used `savedPositions.keys.first()` to
-    // evict the "oldest" entry, but that actually removed an arbitrary (hash-
-    // bucket) entry — a pseudo-LRU bug. We now keep a parallel
-    // `mutableStateListOf<String>` (`SnapshotStateList`, which IS index-stable
-    // and preserves order) as an explicit access-order ledger: every write or
-    // restore-read of a sessionId moves its id to the tail; eviction pops from
-    // the head. This gives true LRU semantics.
-    //
-    // pendingRestoreSession is a legacy guard flag retained because the mirror
-    // + direction-detector effects below still key their programmatic-scroll
-    // suppression on it. With the restore consumer gone it is effectively
-    // always null; the writes/reads here are no-ops but kept to avoid
-    // disturbing those guards (cleanup is out of scope for §B1).
-    var pendingRestoreSession by remember { mutableStateOf<String?>(null) }
+
     // This intentionally excludes streaming text values. A token delta changes the
     // overlay map about every 100ms, but it is not a navigation event; using it as
     // a scroll-effect key created a scroll/layout feedback loop.
     val isStreaming = sessionIsRunning || streamingReasoningPart != null || streamingPartTexts.isNotEmpty()
 
-    // §Q4: The former snapshotFlow atBottom tracker that continuously set
-    // followBottom is REMOVED. It caused a feedback latch: programmatic
-    // scrollToItem(0) → index 0 → snapshotFlow emits atBottom=true →
-    // followBottom=true → next contentVersion tick auto-scrolls again.
-    // followBottom is updated by the unified bottom-position tracker below
-    // (canScrollBackward + index + offset) and the direction detector (tab
-    // visibility). Latch-safe via atExactBottom guard.
-
-    // #3 — continuously mirror the current scroll offset against the active
-    // session id. There is no "before session change" hook in Compose, so a
-    // reactive mirror is the simplest robust way to ensure the latest offset
-    // is on file the instant the user navigates into a sub-session.
-    //
-    // 🔴 Race fix (glmer 🔴-1 + kimo 🔴-1): when `sessionId` changes this
-    // LaunchedEffect re-launches, and `snapshotFlow` emits its *current* value
-    // on the first collection — which is still the *previous* session's scroll
-    // position (the listState hasn't moved yet). Writing that stale position to
-    // `savedPositions[newSessionId]` clobbered the new session's true history,
-    // so parent→sub→parent returned to the sub-session's position instead of
-    // the parent's. Two guards fix this:
-    //   (1) `.drop(1)` — skip the first emit on each (re)launch, so the stale
-    //       position carried over from the previous session is never recorded
-    //       against the new sessionId.
-    //   (2) `pendingRestoreSession == sessionId` — skip writes while a restore
-    //       is in flight. The contentVersion effect performs a programmatic
-    //       `scrollToItem` to apply the saved position; those synthetic scroll
-    //       events must NOT be recorded as user positions. The effect clears
-    //       `pendingRestoreSession` once restore completes, after which real
-    //       user scrolls resume being mirrored. Belt-and-suspenders with (1).
-    // The "same-session streaming follow-to-bottom" semantic is preserved —
-    // real user scrolls in the active session keep updating the cached offset.
-    LaunchedEffect(listState, sessionId) {
-        if (sessionId == null) return@LaunchedEffect
-        snapshotFlow {
-            listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset
-        }
-            .drop(1)
-            .collect { pos ->
-                // Guard (2): restore-in-flight → don't record programmatic scrolls.
-                if (pendingRestoreSession == sessionId) return@collect
-                savedPositions[sessionId] = pos
-                // 🟡 True LRU: move this id to the tail of the access ledger.
-                // remove returns false if absent — harmless; either way add()
-                // appends a fresh tail entry (a duplicate would corrupt the
-                // invariant, so we always remove-then-add).
-                accessOrder.remove(sessionId)
-                accessOrder.add(sessionId)
-                // Evict from the head (oldest) while over capacity. We iterate
-                // on accessOrder (index-stable SnapshotStateList), NOT on
-                // savedPositions.keys (HashMap order — see class doc above).
-                while (savedPositions.size > MAX_SAVED_SESSIONS && accessOrder.isNotEmpty()) {
-                    val oldest = accessOrder.removeAt(0)
-                    savedPositions.remove(oldest)
-                }
-            }
-    }
-
-    // ── 滚动方向检测 ─────────────────────────────────────────────────────
-    // §B6: onTabVisibilityChange 已删除（SessionTabStrip 已移除）。
-    // 滚动方向仍用于控制 followBottom 和 navFabVisible。
-    //
-    // **reverseLayout 语义**（见 LazyColumn reverseLayout=true）：
-    //   - index 0 = 最新消息，渲染在视觉**底部**。
-    //   - index 越大 = 越旧的消息，越靠视觉**顶部**。
-    //   - 因此 `firstVisibleItemIndex` **增大** = 用户在"向上滚"（看更旧的消息）。
-    //   - `firstVisibleItemIndex` **减小** = 用户在"向下滚"（看更新的消息）。
-    //
-    // 任务约定：向下滚（看更新）→ 隐藏 tab；向上滚（看更旧）→ 显示 tab。
-    //
-    // **防抖/误判防护**：
-    //   1. `delay(300)` —— 会话切换后给 auto-scroll-to-bottom（contentVersion
-    //      effect 里的 `animateScrollToItem(0)`）和 saved-position restore 一段
-    //      时间完成，避免它们造成的"大跳"被误判为用户手势方向。这段时间内
-    //      不采集方向（tab 保持上次状态，默认显示）。
-    //   2. `pendingRestoreSession == sessionId` —— 跳过 saved-position restore
-    //      期间的程序化滚动（与现有 savedPositions mirror 的同款 guard）。
-    //   3. `|delta| > 3` —— 单帧跨越超过 3 个 item 几乎必然是程序化滚动
-    //      （用户手势/fling 每帧至多跨 1-2 个 item），忽略。这是对 1 的双保险。
-    LaunchedEffect(listState, sessionId) {
-        if (sessionId == null) return@LaunchedEffect
-        // 等待会话切换后的程序化滚动（auto-scroll / restore）完成。
-        delay(300)
-        var prevIndex = listState.firstVisibleItemIndex
-        snapshotFlow { listState.firstVisibleItemIndex }
-            .collect { index ->
-                // §navfab-guard: NavFab 跳转动画期间忽略——避免程序化滚动被误判为手势。
-                if (navJumping) {
-                    prevIndex = index
-                    return@collect
-                }
-                // Guard: saved-position restore 期间的程序化滚动不计入方向判断。
-                if (pendingRestoreSession == sessionId) {
-                    prevIndex = index
-                    return@collect
-                }
-                // §glmer-1: skip when list is empty (slow load race — avoid
-                // false direction from initial -1→0 index jump).
-                if (listState.layoutInfo.totalItemsCount == 0) {
-                    prevIndex = index
-                    return@collect
-                }
-                val delta = index - prevIndex
-                prevIndex = index
-                // Guard: 单帧大跳（auto-scroll 残留 / 极端 fling 边界）。
-                val absDelta = if (delta < 0) -delta else delta
-                if (absDelta > 3) return@collect
-                when {
-                    delta > 0 -> {
-                        // §B6: onTabVisibilityChange 已删除。
-                        followBottom = false           // §Q4: user scrolled away from bottom
-                        // §navfab-redesign: 向旧滑动 → 隐藏"跳到最新"（仅向新滑动时浮现）。
-                        navFabVisible = false
-                    }
-                    delta < 0 -> {
-                        // §B6: onTabVisibilityChange 已删除。
-                        // §Q4: scrolled back to bottom.
-                        if (index == 0) {
-                            followBottom = true
-                            // §navfab-redesign: 到达底部 → 隐藏"跳到最新"按钮（已无目标）。
-                            navFabVisible = false
-                        } else {
-                            // §navfab-redesign: 向新滑动但未到底 → 浮现"跳到最新"按钮。
-                            navFabVisible = true
-                            navFabTick++
-                        }
-                    }
-                }
-            }
-    }
-
-    // §Q4-scroll-track: unified bottom-position tracker. Watches
-    // canScrollBackward + firstVisibleItemIndex + scrollOffset together so
-    // ANY position change triggers an update. Uses atExactBottom guard to
-    // distinguish "user genuinely at bottom" from "content grew above but
-    // user hasn't moved" (maxer S-1 fix).
-    //
-    // followBottom = if (canBack) atExactBottom else true:
-    //   canBack=false → true (absolute bottom)
-    //   canBack=true + atExactBottom → true (at bottom despite content above)
-    //   canBack=true + !atExactBottom → false (user scrolled away)
-    LaunchedEffect(listState, sessionId) {
-        if (sessionId == null) return@LaunchedEffect
-        delay(300)
-        snapshotFlow {
-            Triple(
-                listState.canScrollBackward,
-                listState.firstVisibleItemIndex,
-                listState.firstVisibleItemScrollOffset
-            )
-        }
-            .drop(1)
-            .collect { (canBack, index, offset) ->
-                if (pendingRestoreSession == sessionId) return@collect
-                if (listState.layoutInfo.totalItemsCount == 0) return@collect
-                val atExactBottom = index == 0 && offset <= 24
-                followBottom = if (canBack) atExactBottom else true
-            }
-    }
-
-    // §navfab-redesign: "跳到最新"按钮的可见性由方向检测器驱动（向新滑动时浮现、
-    // 到底部隐藏，见上）。此处只保留 3s 静置自动隐藏（navFabTick 在浮现/交互时 ++）。
-    LaunchedEffect(navFabTick) {
-        if (navFabVisible) {
-            delay(3000)
-            navFabVisible = false
-        }
-    }
-
-    // §B1: on session enter we NO LONGER force followBottom=true here. With
-    // followBottom now rememberSaveable(sessionId), the per-session default is
-    // owned by the saver: a fresh sessionId re-runs the initializer (true), and
-    // a re-entry with the SAME sessionId (preview return) restores the saved
-    // value (possibly false). Forcing followBottom=true on every composition
-    // restart would defeat the saveable LazyListState by yanking a history-
-    // reading user back to latest on every preview return. Only the OTHER
-    // synchronous resets remain here — they are plain `remember` state, already
-    // fresh on re-entry, so re-stating them is harmless. The actual auto-follow
-    // scroll is deferred to the contentVersion effect (gated on followBottom).
-    LaunchedEffect(sessionId) {
-        pendingRestoreSession = null
-        // §navfab-redesign: 会话切换隐藏"跳到最新"按钮（新会话从默认跟底状态开始）。
-        navFabVisible = false
-        // §navfab-guard (gpter 🟡): 防御性重置程序化滚动守卫——兜底任何未预见的
-        // onJumpDone 未配对路径，避免 navJumping 卡 true 让方向检测器跨会话失效。
-        navJumping = false
-    }
 
     // §Wave5b-Q13: the unified scroll consumer is declared AFTER
     // [renderBlocks] below — it needs [lazyColumnKeys] which derives from
@@ -677,8 +397,8 @@ internal fun ChatMessageList(
         orchestratorVM.reselectFlow
             .filter { it == NavRoute.Chat }
             .collect {
-                followBottom = true
-                navFabVisible = false
+                scroll.followBottom = true
+                scroll.navFabVisible = false
                 if (listState.layoutInfo.totalItemsCount > 0) {
                     listState.scrollToItem(0)
                 }
@@ -706,7 +426,7 @@ internal fun ChatMessageList(
         //       val pendingScrollRequest is declared later in the body —
         //       inline read avoids a forward reference).
         val liveReq = chatState.pendingScrollRequest
-        val restoreInFlight = pendingRestoreSession == sessionId
+        val restoreInFlight = scroll.pendingRestoreSession == sessionId
         val restorePending = liveReq != null &&
             liveReq.targetSessionId == sessionId &&
             liveReq.behavior is ScrollBehavior.Restore
@@ -715,7 +435,7 @@ internal fun ChatMessageList(
             val key = sr.messageId?.let { "$it|${sr.id}" } ?: "streaming|${sr.id}"
             expandedParts[key] == true
         } == true
-        if (followBottom && !streamingReasoningExpanded &&
+        if (scroll.followBottom && !streamingReasoningExpanded &&
             (messages.isNotEmpty() || streamingReasoningPart != null)) {
             if (isStreaming) {
                 // Do not pull a history-reading user back when a new stream part
@@ -872,16 +592,16 @@ internal fun ChatMessageList(
                 snapshotFlow { listState.layoutInfo.totalItemsCount }
                     .first { it > 0 }
                 listState.scrollToItem(0)
-                followBottom = true
-                navFabVisible = false
+                scroll.followBottom = true
+                scroll.navFabVisible = false
             }
             is ScrollBehavior.Restore -> {
                 val cp = b.checkpoint
                 // Restore-in-flight guard: skip the savedPositions mirror +
                 // direction detector + content-version auto-follow while we
                 // programmatic-scroll to the restored position.
-                pendingRestoreSession = sessionId
-                followBottom = false
+                scroll.pendingRestoreSession = sessionId
+                scroll.followBottom = false
                 val keys = lazyColumnKeys
                 val itemCount = keys.size
                 if (itemCount > 0) {
@@ -898,11 +618,11 @@ internal fun ChatMessageList(
                         // followBottom so subsequent streaming sticks; otherwise
                         // stay disarmed (user is reading history).
                         if (resolved.index == 0 && resolved.offset <= 24) {
-                            followBottom = true
+                            scroll.followBottom = true
                         }
                     }
                 }
-                pendingRestoreSession = null
+                scroll.pendingRestoreSession = null
             }
         }
         // Compare-and-clear by requestId (a newer request supersedes this
@@ -914,17 +634,17 @@ internal fun ChatMessageList(
     //
     // §WT2-taskA (Q9 locked): the OUTER container is the single source of
     // the conversation area's 8dp top/bottom breathing space. The previous
-    // `LazyColumn.contentPadding = PaddingValues(vertical = 8.dp)` moved
+    // `LazyColumn.contentPadding = PaddingValues(vertical = Dimens.spacing2)` moved
     // INSIDE the list (scrollable padding) is removed in favour of an
-    // explicit `Modifier.padding(vertical = 8.dp)` HERE so the conversation
+    // explicit `Modifier.padding(vertical = Dimens.spacing2)` HERE so the conversation
     // REGION as a whole carries the 8dp T/B margin (½ × the 16dp L/R row
     // padding). Result: T/B = 8dp (outer), L/R = 16dp (per-row horizontal
     // padding in MessageRow / ToolRun / Fold / load-more /
-    // empty / loading rows — all carry `padding(horizontal = 16.dp, …)`).
+    // empty / loading rows — all carry `padding(horizontal = Dimens.spacing4, …)`).
     // first/last-item spacing is unchanged: previously (list-pad 8dp +
     // row-pad 4dp = 12dp) ↔ now (outer 8dp + row-pad 4dp = 12dp).
     // reverseLayout=true semantics + streaming auto-follow are untouched.
-    Box(modifier = Modifier.fillMaxSize().padding(vertical = 8.dp)) {
+    Box(modifier = Modifier.fillMaxSize().padding(vertical = Dimens.spacing2)) {
         // §watermark-B5: 大字号水平水印（去旋转），stamped BEHIND the message
         // list — replaces the old top-bar workdir-initial icon (see ChatTopBar)
         // AND the prior 45°-tilted displaySmall(24sp) watermark. Renders the
@@ -996,37 +716,27 @@ internal fun ChatMessageList(
         verticalArrangement = Arrangement.Top,
         // §WT2-taskA: horizontal-only (effectively zero) — the 8dp T/B is
         // now on the outer Box (see root container doc above). Rows carry
-        // their own `padding(horizontal = 16.dp, …)`, so no list-level
+        // their own `padding(horizontal = Dimens.spacing4, …)`, so no list-level
         // horizontal padding is needed either.
         contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp)
     ) {
         if (streamingReasoningPart != null) {
+            // §wave1-c r2: the standalone streaming-reasoning card presentation
+            // is extracted to StreamingOverlay.kt (StreamingReasoningOverlay).
+            // The expand-key ("${messageId}|${partId}", §R-1) + card-width logic
+            // move with it; only the streaming-text lookup stays here (it shares
+            // the streamingPartTexts map with the render-block pipeline above).
             val streamingKey = streamingReasoningPart.id
             val streamingText = streamingPartTexts[streamingKey] ?: ""
-            // §R-1 (maxer): use the SAME expand-key format as the inline
-            // ReasoningCard in MessageRow ("${messageId}|${partId}"), so the
-            // user's expand state survives the standalone→inline transition
-            // when the turn finalizes (streamingReasoningPart clears → the
-            // inline card takes over with the same expandedParts entry).
-            // Null-guard: messageId is always set here (the part.updated
-            // handler returns early when messageID is absent), but defend
-            // against a malformed Part regardless.
-            val streamingExpandKey = streamingReasoningPart.messageId
-                ?.let { "$it|$streamingKey" } ?: "streaming|$streamingKey"
             item(key = "streaming-reasoning") {
-                // §card-width: responsive 2/3 width (capped 480dp) for the
-                // standalone streaming reasoning card, matching MessageRow's cap.
-                CardWidthScope(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) { cardMax ->
-                    ReasoningCard(
-                        text = streamingText,
-                        title = streamingReasoningPart.toolReason,
-                        isStreaming = true,
-                        expandedParts = expandedParts,
-                        onToggleExpand = onToggleExpand,
-                        expandedKey = streamingExpandKey,
-                        modifier = Modifier.widthIn(max = cardMax)
-                    )
-                }
+                StreamingReasoningOverlay(
+                    streamingReasoningPart = streamingReasoningPart,
+                    streamingText = streamingText,
+                    expandedParts = expandedParts,
+                    onToggleExpand = onToggleExpand,
+                    modifier = Modifier.fillMaxWidth()
+                        .padding(horizontal = Dimens.spacing4, vertical = Dimens.spacing1),
+                )
             }
         }
         // §issue-1(1): 会话文件变更卡片。reverseLayout 下 item 顺序靠前 = 视觉靠下，
@@ -1218,7 +928,7 @@ internal fun ChatMessageList(
                 }
                 is RenderBlock.ToolRun -> {
                     CardWidthScope(
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = Dimens.spacing4, vertical = Dimens.spacing1)
                     ) { cardMax ->
                         Column(modifier = Modifier.fillMaxWidth(), horizontalAlignment = Alignment.Start) {
                             block.items.forEach { contextual ->
@@ -1247,7 +957,7 @@ internal fun ChatMessageList(
                     val folded = block.asFoldedToolRun()
                     val foldKey = foldKey(block.firstPartId)
                     CardWidthScope(
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = Dimens.spacing4, vertical = Dimens.spacing1)
                     ) { cardMax ->
                         Column(modifier = Modifier.fillMaxWidth(), horizontalAlignment = Alignment.Start) {
                             if (isCrossMessageFoldExpanded(folded, expandedParts)) {
@@ -1289,11 +999,11 @@ internal fun ChatMessageList(
                 // Manual history paging: click to fetch 5 older messages.
                 // Spinner while a fetch is in flight; otherwise a tappable label.
                 Box(
-                    modifier = Modifier.fillMaxWidth().padding(16.dp),
+                    modifier = Modifier.fillMaxWidth().padding(Dimens.spacing4),
                     contentAlignment = Alignment.Center
                 ) {
                     if (isLoadingMore) {
-                        CircularProgressIndicator(modifier = Modifier.size(24.dp))
+                        CircularProgressIndicator(modifier = Modifier.size(Dimens.iconStd))
                     } else {
                         Text(
                             text = stringResource(R.string.chat_load_more_history),
@@ -1301,7 +1011,7 @@ internal fun ChatMessageList(
                             color = MaterialTheme.colorScheme.primary,
                             modifier = Modifier
                                 .clickable(onClick = onLoadMore)
-                                .padding(horizontal = 16.dp, vertical = 8.dp)
+                                .padding(horizontal = Dimens.spacing4, vertical = Dimens.spacing2)
                         )
                     }
                 }
@@ -1311,16 +1021,16 @@ internal fun ChatMessageList(
         if (isLoading && messages.isEmpty()) {
             item {
                 Box(
-                    modifier = Modifier.fillMaxWidth().padding(32.dp),
+                    modifier = Modifier.fillMaxWidth().padding(Dimens.spacing7),
                     contentAlignment = Alignment.Center
                 ) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         CircularProgressIndicator(
-                            modifier = Modifier.size(32.dp),
+                            modifier = Modifier.size(Dimens.iconXl),
                             strokeWidth = 2.dp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
-                        Spacer(modifier = Modifier.height(12.dp))
+                        Spacer(modifier = Modifier.height(Dimens.spacing3))
                         Text(
                             text = stringResource(R.string.chat_loading),
                             style = MaterialTheme.typography.bodyMedium,
@@ -1334,7 +1044,7 @@ internal fun ChatMessageList(
         if (!isLoading && messages.isEmpty()) {
             item {
                 Box(
-                    modifier = Modifier.fillMaxWidth().padding(32.dp),
+                    modifier = Modifier.fillMaxWidth().padding(Dimens.spacing7),
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
@@ -1352,158 +1062,17 @@ internal fun ChatMessageList(
         // onJumpDone 在动画 finally 清除守卫。
         ChatMessageNavFab(
             listState = listState,
-            visible = navFabVisible,
+            visible = scroll.navFabVisible,
             onJump = {
-                navFabVisible = false
-                navJumping = true
-                followBottom = true
+                scroll.navFabVisible = false
+                scroll.navJumping = true
+                scroll.followBottom = true
             },
-            onJumpDone = { navJumping = false },
+            onJumpDone = { scroll.navJumping = false },
             modifier = Modifier
                 .align(Alignment.BottomEnd)
-                .padding(end = 16.dp, bottom = 16.dp),
+                .padding(end = Dimens.spacing4, bottom = Dimens.spacing4),
         )
     }
 }
 
-internal fun shouldRenderInFlightEmpty(
-    block: RenderBlock.Conversation,
-    sessionIsRunning: Boolean
-): Boolean = !block.message.isUser && block.parts.isEmpty() && sessionIsRunning &&
-    block.message.error?.message.isNullOrBlank() && !block.isDecorationOnly
-
-/**
- * §empty-msg: lightweight inline loading row rendered for an assistant message
- * shell that has arrived (message.updated) but whose first part has not —
- * `partsByMessage[id]` is empty and the session is still busy. Replaces the
- * bare timestamp bubble the prior logic rendered (which looked like an empty
- * reply). NOT rendered for completed messages whose parts are all blank —
- * those are filtered out of [ChatMessageList]'s `reversedMessages` entirely
- * by [isEffectivelyRenderableEmpty]. Padding mirrors MessageRow's
- * horizontal=16dp / vertical=4dp so the loading row paces with surrounding
- * turns; "生成中…" uses labelSmall + onSurfaceVariant for a quiet affordance.
- */
-@Composable
-private fun InFlightEmptyLoading(modifier: Modifier = Modifier) {
-    Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 4.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        CircularProgressIndicator(
-            modifier = Modifier.size(14.dp),
-            strokeWidth = 2.dp,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-        Spacer(modifier = Modifier.width(8.dp))
-        Text(
-            text = stringResource(R.string.chat_generating),
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-    }
-}
-
-// remove-message-persistence Task 4: the `GapDivider` composable (the clickable
-// divider rendered at the seam between the local message history and the
-// newly-fetched tail) was deleted along with the non-contiguous gap mechanism.
-// `RenderBlock.Gap` no longer exists; the items() block iterates only
-// Conversation / ToolRun / Fold. The `chat_gap_divider_*` string resources were
-// pruned with the rest of the cache/gap UI (final-review M1).
-
-/**
- * 🟡 (glmer 🟡-6) Maximum number of per-session scroll positions retained in
- * the hoisted `savedPositions` cache (owned by ChatScaffold, mutated inside
- * [ChatMessageList]). The cache is keyed by sessionId and lives for the
- * lifetime of the ChatScaffold composition (it survived the lift out of
- * ChatMessageList so the HorizontalPager disposing a page no longer wipes
- * it); without a cap a user that opens many sub-sessions would accumulate
- * entries forever. When the cap is exceeded the least-recently-used entry is
- * evicted — true LRU is implemented via the parallel `accessOrder`
- * SnapshotStateList ledger (see `savedPositions` declaration doc for why
- * SnapshotStateMap alone cannot do this). 30 is comfortably above typical
- * agent-task fan-out while bounding memory to a few KB.
- *
- * §review-D (gpter #3): the cache is currently WRITE-ONLY (its restore
- * consumer was removed — see the `savedPositions` param doc above). The cap
- * + LRU are retained so the future restore consumer lands on a bounded cache.
- */
-private const val MAX_SAVED_SESSIONS = 30
-
-// §ui-stream A1: TERMINAL_PART_STATES moved to ChatRenderBlockBuilder.kt
-// (internal) — it is now consumed by computeMessageStreaming there (baked
-// into RenderBlock.Conversation.isMessageStreaming), no longer referenced
-// anywhere in this file.
-
-// ── §Wave5b-Q13: pure helpers for the Restore consumer (lifted out of the
-//     @Composable body so they are JVM-testable without Robolectric). ──────
-
-/**
- * §Wave5b-Q13: builds the LazyColumn body's key list IN ORDER, mirroring the
- * branches of the LazyColumn above. The Restore consumer uses this to resolve
- * a captured [ScrollCheckpoint.anchorKey] → LazyColumn index (so
- * `scrollToItem(idx, offset)` lands on the same logical message the user was
- * viewing when they opened the sub-agent).
- *
- * The order MUST match the LazyColumn body's declaration order exactly:
- *  1. "streaming-reasoning" (if streamingReasoningPart != null)
- *  2. "session-diff" (if sessionDiff non-empty)
- *  3. renderBlocks.map { it.id } (in itemsIndexed order)
- *  4. "load-more" (if messages non-empty + hasMoreMessages + cursor present)
- *
- * Any future reordering of the LazyColumn body MUST be mirrored here.
- */
-internal fun lazyColumnKeyList(
-    streamingReasoningPart: Part?,
-    sessionDiff: List<cn.vectory.ocdroid.data.model.FileDiff>?,
-    renderBlocks: List<RenderBlock>,
-    messages: List<Message>,
-    hasMoreMessages: Boolean,
-    olderMessagesCursor: String?,
-): List<String> = buildList {
-    if (streamingReasoningPart != null) add("streaming-reasoning")
-    if (!sessionDiff.isNullOrEmpty()) add("session-diff")
-    addAll(renderBlocks.map { it.id })
-    if (messages.isNotEmpty() && hasMoreMessages && olderMessagesCursor != null) add("load-more")
-}
-
-/**
- * §Wave5b-Q13: the index + offset to pass to `listState.scrollToItem(idx,
- * offset)` for a Restore. Pure function — JVM-testable without a real
- * LazyListState.
- *
- * Resolution order:
- *  1. If [checkpoint.anchorKey] is non-null AND present in [currentKeys] →
- *     use that key's index, paired with [checkpoint.offset]. (Anchor wins
- *     because it survives message prepends / SSE appends / metadata-marker
- *     injection that shift indices without moving the user's logical
- *     position.)
- *  2. Otherwise → clamp [checkpoint.fallbackIndex] to
- *     `[0, currentKeys.size - 1]`, paired with [checkpoint.offset].
- *  3. If [currentKeys] is empty → returns `null` (the caller skips the
- *     scroll; the session has no renderable items yet).
- *
- * The offset is ALWAYS [checkpoint.offset] — the per-pixel offset within the
- * resolved item is independent of which item is resolved (it is the
- * pixel offset of the item's top edge from the viewport's top edge at
- * capture time, and the same pixel offset applies at restore).
- */
-internal data class ResolvedRestore(val index: Int, val offset: Int)
-
-internal fun resolveRestoreIndex(
-    checkpoint: cn.vectory.ocdroid.ui.ScrollCheckpoint,
-    currentKeys: List<String>,
-): ResolvedRestore? {
-    if (currentKeys.isEmpty()) return null
-    val anchorIdx = checkpoint.anchorKey?.let { key -> currentKeys.indexOf(key).takeIf { it >= 0 } }
-    val resolvedIndex = (anchorIdx ?: checkpoint.fallbackIndex)
-        .coerceIn(0, currentKeys.size - 1)
-    return ResolvedRestore(index = resolvedIndex, offset = checkpoint.offset)
-}
-
-// §R-19 Sprint 2 #7(b): markerLabelFor was lifted verbatim into the top-level
-// pure-functions file ChatFormatHelpers.kt (same package) so it can be covered
-// by JVM unit tests (this file is excluded from kover coverage as a
-// @Composable-heavy UI file — see PickerProviderFilter.kt for the same
-// extraction pattern).

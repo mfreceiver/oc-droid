@@ -3,7 +3,6 @@
   <ManuallySuppressedIssues/>
   <CurrentIssues>
     <ID>NoRawAlertDialogRule:ChatOverlayHost.kt:import androidx.compose.material3.AlertDialog</ID>
-    <ID>NoRawAlertDialogRule:ChatScaffold.kt:import androidx.compose.material3.AlertDialog</ID>
     <ID>NoRawAlertDialogRule:ChatServerManagementDialog.kt:import androidx.compose.material3.AlertDialog</ID>
     <ID>NoRawAlertDialogRule:Composer.kt:import androidx.compose.material3.AlertDialog</ID>
     <ID>NoRawAlertDialogRule:MessageCard.kt:import androidx.compose.material3.AlertDialog</ID>
@@ -50,14 +49,7 @@
     <ID>NoRawDpLiteralRule:ChatInputBar.kt:8.dp</ID>
     <ID>NoRawDpLiteralRule:ChatInputBar.kt:androidx.compose.ui.unit.dp</ID>
     <ID>NoRawDpLiteralRule:ChatMessageContent.kt:0.dp</ID>
-    <ID>NoRawDpLiteralRule:ChatMessageContent.kt:12.dp</ID>
-    <ID>NoRawDpLiteralRule:ChatMessageContent.kt:14.dp</ID>
-    <ID>NoRawDpLiteralRule:ChatMessageContent.kt:16.dp</ID>
     <ID>NoRawDpLiteralRule:ChatMessageContent.kt:2.dp</ID>
-    <ID>NoRawDpLiteralRule:ChatMessageContent.kt:24.dp</ID>
-    <ID>NoRawDpLiteralRule:ChatMessageContent.kt:32.dp</ID>
-    <ID>NoRawDpLiteralRule:ChatMessageContent.kt:4.dp</ID>
-    <ID>NoRawDpLiteralRule:ChatMessageContent.kt:8.dp</ID>
     <ID>NoRawDpLiteralRule:ChatMessageContent.kt:androidx.compose.ui.unit.dp</ID>
     <ID>NoRawDpLiteralRule:ChatMessageContent.kt:renderBlockTopPaddingDp(block, index).dp</ID>
     <ID>NoRawDpLiteralRule:ChatMessageNavFab.kt:androidx.compose.ui.unit.dp</ID>
@@ -89,9 +81,7 @@
     <ID>NoRawDpLiteralRule:ChatRenderUtils.kt:220.dp</ID>
     <ID>NoRawDpLiteralRule:ChatRenderUtils.kt:androidx.compose.ui.unit.dp</ID>
     <ID>NoRawDpLiteralRule:ChatScaffold.kt:0.dp</ID>
-    <ID>NoRawDpLiteralRule:ChatScaffold.kt:1.dp</ID>
     <ID>NoRawDpLiteralRule:ChatScaffold.kt:2.dp</ID>
-    <ID>NoRawDpLiteralRule:ChatScaffold.kt:8.dp</ID>
     <ID>NoRawDpLiteralRule:ChatScaffold.kt:androidx.compose.ui.unit.dp</ID>
     <ID>NoRawDpLiteralRule:ChatServerManagementDialog.kt:12.dp</ID>
     <ID>NoRawDpLiteralRule:ChatServerManagementDialog.kt:4.dp</ID>
@@ -235,10 +225,6 @@
     <ID>NoRawDpLiteralRule:VcsFileRow.kt:56.dp</ID>
     <ID>NoRawDpLiteralRule:VcsFileRow.kt:6.dp</ID>
     <ID>NoRawDpLiteralRule:VcsFileRow.kt:androidx.compose.ui.unit.dp</ID>
-    <ID>UiMustNotImportDataApiRule:AppStateSlices.kt:import cn.vectory.ocdroid.data.api.CommandInfo</ID>
-    <ID>UiMustNotImportDataApiRule:ChatFormatHelpers.kt:import cn.vectory.ocdroid.data.api.CommandInfo</ID>
-    <ID>UiMustNotImportDataApiRule:ChatInputBar.kt:import cn.vectory.ocdroid.data.api.CommandInfo</ID>
-    <ID>UiMustNotImportDataApiRule:ConnectionCoordinator.kt:import cn.vectory.ocdroid.data.api.CommandInfo</ID>
     <ID>UiMustNotImportDataApiRule:SessionSyncCoordinator.kt:import cn.vectory.ocdroid.data.api.NOISY_SSE_LOG_EVENTS</ID>
     <ID>UiMustNotImportDataApiRule:SseEventRouter.kt:import cn.vectory.ocdroid.data.api.NOISY_SSE_LOG_EVENTS</ID>
   </CurrentIssues>

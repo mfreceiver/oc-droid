@@ -17,7 +17,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.RectangleShape
 import androidx.compose.ui.unit.dp
-import cn.vectory.ocdroid.data.api.CommandInfo
+import cn.vectory.ocdroid.data.model.CommandInfo
 import cn.vectory.ocdroid.ui.theme.AppTextStyles
 
 // §phase3 (plan §5 task 6 step c): the legacy `ChatInputBar` composable +

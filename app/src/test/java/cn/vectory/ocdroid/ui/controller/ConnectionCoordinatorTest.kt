@@ -6,7 +6,7 @@ import cn.vectory.ocdroid.service.streaming.ServiceSseConnectionOwner
 
 import android.util.Log
 import cn.vectory.ocdroid.R
-import cn.vectory.ocdroid.data.api.CommandInfo
+import cn.vectory.ocdroid.data.model.CommandInfo
 import cn.vectory.ocdroid.data.model.HealthResponse
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository

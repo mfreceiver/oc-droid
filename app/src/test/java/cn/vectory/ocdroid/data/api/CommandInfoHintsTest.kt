@@ -1,5 +1,6 @@
 package cn.vectory.ocdroid.data.api
 
+import cn.vectory.ocdroid.data.model.CommandInfo
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull

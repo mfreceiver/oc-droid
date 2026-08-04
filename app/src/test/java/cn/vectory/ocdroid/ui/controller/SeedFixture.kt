@@ -1,6 +1,6 @@
 package cn.vectory.ocdroid.ui.controller
 
-import cn.vectory.ocdroid.data.api.CommandInfo
+import cn.vectory.ocdroid.data.model.CommandInfo
 import cn.vectory.ocdroid.data.model.AgentInfo
 import cn.vectory.ocdroid.data.model.ComposerImageAttachment
 import cn.vectory.ocdroid.data.model.HostProfile
