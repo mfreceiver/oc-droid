@@ -29,10 +29,16 @@ import org.robolectric.annotation.Config
  * oracle §5 flagged that "Compose saveable slot positionality is not caught by
  * check.sh": after [rememberScrollController] was extracted out of
  * `ChatMessageList`, a refactor that accidentally moves a [rememberSaveable]
- * call behind a conditional, or shifts the composable's call position in the
- * body, would silently break the [SaveableStateHolder]'s slot mapping — the old
- * saved state would no longer be applied, and scroll memory / follow-bottom
- * would reset on every Chat→preview→back / configuration change.
+ * call behind a conditional (or changes its input key) within
+ * [rememberScrollController] would silently break the [SaveableStateHolder]'s
+ * slot mapping — the old saved state would no longer be applied, and scroll
+ * memory / follow-bottom would reset on every Chat→preview→back /
+ * configuration change.
+ *
+ * Scope: these tests compose [rememberScrollController] DIRECTLY, so they cover
+ * slot positionality WITHIN that function. They do NOT cover the call position
+ * of [rememberScrollController] inside `ChatMessageList` (a shift there would
+ * need an integration test rendering the full scaffold).
  *
  * Pure unit tests (and `check.sh`) cannot detect this because they never
  * exercise the save/restore lifecycle. These tests use

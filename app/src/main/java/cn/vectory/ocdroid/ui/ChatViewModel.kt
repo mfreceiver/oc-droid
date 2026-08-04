@@ -138,7 +138,6 @@ class ChatViewModel @Inject constructor(
             slices = core.store.slices,
             sessionId = sessionId,
             resetLimit = resetLimit,
-            settingsManager = core.settingsManager,
             onCacheWindow = core.makeCacheHook(fp),
             emit = EventEmitter { event -> core.effectBus.tryEmitUiEvent(event) },
             // gpter 复审 final-fix: compound-key guard.

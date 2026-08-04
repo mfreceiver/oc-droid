@@ -30,7 +30,7 @@ app/src/main/java/cn/vectory/ocdroid/
 │   ├── api/                                 #   L1 Wire：Retrofit 接口 + SSE/TokenStream 客户端
 │   │   ├── OpenCodeApi.kt                   #     复合接口 = `interface OpenCodeApi : StandardApi, SlimApi`（本体仅保留 data class；~46 个端点方法在两个父接口；FQN `cn.vectory.ocdroid.data.api.OpenCodeApi` 冻结，见 §5）
 │   │   ├── StandardApi.kt / SlimApi.kt      #     legacy 34 法 / slim 12 法（v0.13.5 从 OpenCodeApi 拆出，byte-for-byte；proguard `-keep ...OpenCodeApi` 不变）
-│   │   ├── SSEClient.kt / SseLogFilter.kt
+│   │   ├── SSEClient.kt
 │   │   └── TokenStreamClient.kt
 │   ├── repository/                          #   L0 传输 + L2 端口 + L3 门面（扁平同包，禁子包）
 │   │   ├── http/                            #     L0：OkHttpClientFactory / SSL·TOFU / 拦截器 / SlimapiContract
@@ -47,7 +47,7 @@ app/src/main/java/cn/vectory/ocdroid/
 │   ├── controller/ (sse/)                   #   SessionSyncCoordinator / coordinators / SSE 分派
 │   ├── chat/ sessions/ files/ …             #   Compose 屏幕 + ViewModel
 │   └── theme/                               #   共享 UI 原语（AppBottomSheet / AppConfirmDialog / Dimens…）
-└── util/                                    # 工具（DebugLog / runSuspendCatching / TrafficLogger / SettingsManager）
+└── util/                                    # 工具（DebugLog / runSuspendCatching / TrafficLogger / SettingsManager / SseLogFilter）
 ```
 
 **约定**：`data/repository/` 一律**扁平同包 `internal`**，**禁子包**（避免 import churn；只有 `http/` 子包是历史既存）。新类型落 `data/repository/` 根，`internal class`。

@@ -257,7 +257,6 @@ internal class SendOrchestrator @Inject constructor(
             slices = store.slices,
             sessionId = sessionId,
             resetLimit = resetLimit,
-            settingsManager = settingsManager,
             onCacheWindow = { sid, window -> sessionSwitcher.writeSessionWindow(fp, sid, window) },
             emit = EventEmitter { event -> effectBus.tryEmitUiEvent(event) },
             expectedProfileId = fp,
