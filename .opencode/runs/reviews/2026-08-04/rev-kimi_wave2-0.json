@@ -1,0 +1,60 @@
+{
+  "bundle_id": "wave2-cleanup-2026-08-04",
+  "reviewer": "rev-kimi",
+  "verdict": "PASS_WITH_NITS",
+  "completion_assessment": "可进入 omni 统一 patch release v0.20.1 — 4/4 lane 任务定义全部完成，无阻塞项",
+  "diff_base": "7b0c971d",
+  "diff_head": "9ba3a5a6",
+  "branch": "wave2/cleanup",
+  "gate_evidence": {
+    "check_sh": "exit 0 (compile + testDebugUnitTest + :app:detekt, 4m31s)",
+    "detekt_standalone": "exit 0 (baseline 231 -> 229, 2 removed entries validated)",
+    "files_changed": 16,
+    "net_loc": -426
+  },
+  "dimensions": {
+    "correctness": "PASS — 死符号 rg 全仓零活引用；Lane1 内联 3 调用点与原 Slim/Standard 实现逐点等价（api 为 getter 故直读防陈旧）；Lane3 用 git diff --no-index 实证删除段与新文件体仅差 +1 空行，可见性全 internal 一致，零 store/repository/scope 引用（纯簇成立）；Lane4 零残留，rememberSaveable(sessionId, LazyListState.Saver) slot 与 4 个 pure effect key 元组逐字保留（ScrollManager L136/181/201/210）",
+    "completeness": "PASS — ServerCompatProfile 审计独立核验：10 @Volatile 属实，3 组复合不变量（isAtLeast fail-open / isSlimapiClientAccepted fail-closed-on-null / supportsSlimStatus sticky+reset 自愈）均 degrade-safe，写点分散化未引入新竞态，审计结论成立",
+    "discipline": "PASS — 4 commit 无 merge/tag，main 仍 7b0c971d；sse/ 目录 0 diff；SlimCommitToken/DEFAULT_SERVER/OCR 构造器冻结保持；SessionSwitcher 的 LinkedHashMap accessOrder 标志正确未动",
+    "risk": "LOW — 高风险点全部静态实证，未单纯依赖 check.sh 绿灯声明"
+  },
+  "findings": [
+    {
+      "id": "F1",
+      "severity": "yellow",
+      "desc": "refreshNonce 在 ChatScaffold 的 LRU-prune effect 被删后失去该 UI 消费点",
+      "resolution": "orchestrator 核实：refreshNonce 跨 9 文件仍有活引用（AppAction.kt/ChatState.kt/CrossSliceFieldsReducer.kt/HostProfileController.kt + 4 tests），非 vestigial，仅被删的 LRU cache 消费方消失。deferred Wave2.1。"
+    },
+    {
+      "id": "F2",
+      "severity": "yellow_nit",
+      "desc": "Lane3 SseFeedback 簇搬迁多 1 空行，严格 byte-identity 不成立（语义为零）"
+    },
+    {
+      "id": "F3",
+      "severity": "yellow_nit",
+      "desc": "Lane1 debug 日志 tag MessageSource->OpenCodeRepository 且去掉 xNextCursor/linkHeader 字段（verbose-gated，无行为影响）"
+    },
+    {
+      "id": "F4",
+      "severity": "yellow_nit",
+      "desc": "SessionSource/MessageSource 6 行墓碑文件可直删（现保留为包占位注释）"
+    },
+    {
+      "id": "F5",
+      "severity": "yellow_nit",
+      "desc": "Dimens.chatDividerStrokeWidth 命名略偏（kdoc 已注明）"
+    },
+    {
+      "id": "OBS1",
+      "severity": "info",
+      "desc": "Lane1 路由由 configure 中途快照改为调用时 live 读 slimConnection — 可达状态下等价（唯一受管写点、同 monitor、同值），且更贴合 ι-A 成功后发布纪律，消除中途异常致双态不一致。判定非静默行为变更"
+    }
+  ],
+  "high_risk_points_verified": {
+    "lane1_inline_equivalence": "slim/standard 分支参数与原 Slim/Standard impl 逐点等价",
+    "lane3_purity": "零 AppCore 实例成员引用，纯簇成立（git diff --no-index 实证）",
+    "lane4_scroll_invariants": "rememberSaveable slot/key/Saver + 4 pure effect key 元组逐字保留"
+  },
+  "timestamp": "2026-08-04"
+}
