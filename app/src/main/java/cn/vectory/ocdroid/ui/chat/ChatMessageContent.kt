@@ -70,6 +70,7 @@ import cn.vectory.ocdroid.ui.isInterruptedQuestionPart
 import cn.vectory.ocdroid.ui.isStaleRunningPart
 import cn.vectory.ocdroid.ui.theme.AppTextStyles
 import cn.vectory.ocdroid.ui.theme.CardWidthScope
+import cn.vectory.ocdroid.ui.theme.Dimens
 import cn.vectory.ocdroid.util.FLICKER_TAG
 import cn.vectory.ocdroid.util.STREAMING_FLICKER_DEBUG
 import cn.vectory.ocdroid.util.flickerFilterOutCount
@@ -914,17 +915,17 @@ internal fun ChatMessageList(
     //
     // §WT2-taskA (Q9 locked): the OUTER container is the single source of
     // the conversation area's 8dp top/bottom breathing space. The previous
-    // `LazyColumn.contentPadding = PaddingValues(vertical = 8.dp)` moved
+    // `LazyColumn.contentPadding = PaddingValues(vertical = Dimens.spacing2)` moved
     // INSIDE the list (scrollable padding) is removed in favour of an
-    // explicit `Modifier.padding(vertical = 8.dp)` HERE so the conversation
+    // explicit `Modifier.padding(vertical = Dimens.spacing2)` HERE so the conversation
     // REGION as a whole carries the 8dp T/B margin (½ × the 16dp L/R row
     // padding). Result: T/B = 8dp (outer), L/R = 16dp (per-row horizontal
     // padding in MessageRow / ToolRun / Fold / load-more /
-    // empty / loading rows — all carry `padding(horizontal = 16.dp, …)`).
+    // empty / loading rows — all carry `padding(horizontal = Dimens.spacing4, …)`).
     // first/last-item spacing is unchanged: previously (list-pad 8dp +
     // row-pad 4dp = 12dp) ↔ now (outer 8dp + row-pad 4dp = 12dp).
     // reverseLayout=true semantics + streaming auto-follow are untouched.
-    Box(modifier = Modifier.fillMaxSize().padding(vertical = 8.dp)) {
+    Box(modifier = Modifier.fillMaxSize().padding(vertical = Dimens.spacing2)) {
         // §watermark-B5: 大字号水平水印（去旋转），stamped BEHIND the message
         // list — replaces the old top-bar workdir-initial icon (see ChatTopBar)
         // AND the prior 45°-tilted displaySmall(24sp) watermark. Renders the
@@ -996,7 +997,7 @@ internal fun ChatMessageList(
         verticalArrangement = Arrangement.Top,
         // §WT2-taskA: horizontal-only (effectively zero) — the 8dp T/B is
         // now on the outer Box (see root container doc above). Rows carry
-        // their own `padding(horizontal = 16.dp, …)`, so no list-level
+        // their own `padding(horizontal = Dimens.spacing4, …)`, so no list-level
         // horizontal padding is needed either.
         contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp)
     ) {
@@ -1016,7 +1017,7 @@ internal fun ChatMessageList(
             item(key = "streaming-reasoning") {
                 // §card-width: responsive 2/3 width (capped 480dp) for the
                 // standalone streaming reasoning card, matching MessageRow's cap.
-                CardWidthScope(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)) { cardMax ->
+                CardWidthScope(modifier = Modifier.fillMaxWidth().padding(horizontal = Dimens.spacing4, vertical = Dimens.spacing1)) { cardMax ->
                     ReasoningCard(
                         text = streamingText,
                         title = streamingReasoningPart.toolReason,
@@ -1218,7 +1219,7 @@ internal fun ChatMessageList(
                 }
                 is RenderBlock.ToolRun -> {
                     CardWidthScope(
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = Dimens.spacing4, vertical = Dimens.spacing1)
                     ) { cardMax ->
                         Column(modifier = Modifier.fillMaxWidth(), horizontalAlignment = Alignment.Start) {
                             block.items.forEach { contextual ->
@@ -1247,7 +1248,7 @@ internal fun ChatMessageList(
                     val folded = block.asFoldedToolRun()
                     val foldKey = foldKey(block.firstPartId)
                     CardWidthScope(
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = Dimens.spacing4, vertical = Dimens.spacing1)
                     ) { cardMax ->
                         Column(modifier = Modifier.fillMaxWidth(), horizontalAlignment = Alignment.Start) {
                             if (isCrossMessageFoldExpanded(folded, expandedParts)) {
@@ -1289,11 +1290,11 @@ internal fun ChatMessageList(
                 // Manual history paging: click to fetch 5 older messages.
                 // Spinner while a fetch is in flight; otherwise a tappable label.
                 Box(
-                    modifier = Modifier.fillMaxWidth().padding(16.dp),
+                    modifier = Modifier.fillMaxWidth().padding(Dimens.spacing4),
                     contentAlignment = Alignment.Center
                 ) {
                     if (isLoadingMore) {
-                        CircularProgressIndicator(modifier = Modifier.size(24.dp))
+                        CircularProgressIndicator(modifier = Modifier.size(Dimens.iconStd))
                     } else {
                         Text(
                             text = stringResource(R.string.chat_load_more_history),
@@ -1301,7 +1302,7 @@ internal fun ChatMessageList(
                             color = MaterialTheme.colorScheme.primary,
                             modifier = Modifier
                                 .clickable(onClick = onLoadMore)
-                                .padding(horizontal = 16.dp, vertical = 8.dp)
+                                .padding(horizontal = Dimens.spacing4, vertical = Dimens.spacing2)
                         )
                     }
                 }
@@ -1311,16 +1312,16 @@ internal fun ChatMessageList(
         if (isLoading && messages.isEmpty()) {
             item {
                 Box(
-                    modifier = Modifier.fillMaxWidth().padding(32.dp),
+                    modifier = Modifier.fillMaxWidth().padding(Dimens.spacing7),
                     contentAlignment = Alignment.Center
                 ) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         CircularProgressIndicator(
-                            modifier = Modifier.size(32.dp),
+                            modifier = Modifier.size(Dimens.iconXl),
                             strokeWidth = 2.dp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
-                        Spacer(modifier = Modifier.height(12.dp))
+                        Spacer(modifier = Modifier.height(Dimens.spacing3))
                         Text(
                             text = stringResource(R.string.chat_loading),
                             style = MaterialTheme.typography.bodyMedium,
@@ -1334,7 +1335,7 @@ internal fun ChatMessageList(
         if (!isLoading && messages.isEmpty()) {
             item {
                 Box(
-                    modifier = Modifier.fillMaxWidth().padding(32.dp),
+                    modifier = Modifier.fillMaxWidth().padding(Dimens.spacing7),
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
@@ -1361,56 +1362,10 @@ internal fun ChatMessageList(
             onJumpDone = { navJumping = false },
             modifier = Modifier
                 .align(Alignment.BottomEnd)
-                .padding(end = 16.dp, bottom = 16.dp),
+                .padding(end = Dimens.spacing4, bottom = Dimens.spacing4),
         )
     }
 }
-
-internal fun shouldRenderInFlightEmpty(
-    block: RenderBlock.Conversation,
-    sessionIsRunning: Boolean
-): Boolean = !block.message.isUser && block.parts.isEmpty() && sessionIsRunning &&
-    block.message.error?.message.isNullOrBlank() && !block.isDecorationOnly
-
-/**
- * §empty-msg: lightweight inline loading row rendered for an assistant message
- * shell that has arrived (message.updated) but whose first part has not —
- * `partsByMessage[id]` is empty and the session is still busy. Replaces the
- * bare timestamp bubble the prior logic rendered (which looked like an empty
- * reply). NOT rendered for completed messages whose parts are all blank —
- * those are filtered out of [ChatMessageList]'s `reversedMessages` entirely
- * by [isEffectivelyRenderableEmpty]. Padding mirrors MessageRow's
- * horizontal=16dp / vertical=4dp so the loading row paces with surrounding
- * turns; "生成中…" uses labelSmall + onSurfaceVariant for a quiet affordance.
- */
-@Composable
-private fun InFlightEmptyLoading(modifier: Modifier = Modifier) {
-    Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 4.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        CircularProgressIndicator(
-            modifier = Modifier.size(14.dp),
-            strokeWidth = 2.dp,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-        Spacer(modifier = Modifier.width(8.dp))
-        Text(
-            text = stringResource(R.string.chat_generating),
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-    }
-}
-
-// remove-message-persistence Task 4: the `GapDivider` composable (the clickable
-// divider rendered at the seam between the local message history and the
-// newly-fetched tail) was deleted along with the non-contiguous gap mechanism.
-// `RenderBlock.Gap` no longer exists; the items() block iterates only
-// Conversation / ToolRun / Fold. The `chat_gap_divider_*` string resources were
-// pruned with the rest of the cache/gap UI (final-review M1).
 
 /**
  * 🟡 (glmer 🟡-6) Maximum number of per-session scroll positions retained in
@@ -1430,80 +1385,3 @@ private fun InFlightEmptyLoading(modifier: Modifier = Modifier) {
  * + LRU are retained so the future restore consumer lands on a bounded cache.
  */
 private const val MAX_SAVED_SESSIONS = 30
-
-// §ui-stream A1: TERMINAL_PART_STATES moved to ChatRenderBlockBuilder.kt
-// (internal) — it is now consumed by computeMessageStreaming there (baked
-// into RenderBlock.Conversation.isMessageStreaming), no longer referenced
-// anywhere in this file.
-
-// ── §Wave5b-Q13: pure helpers for the Restore consumer (lifted out of the
-//     @Composable body so they are JVM-testable without Robolectric). ──────
-
-/**
- * §Wave5b-Q13: builds the LazyColumn body's key list IN ORDER, mirroring the
- * branches of the LazyColumn above. The Restore consumer uses this to resolve
- * a captured [ScrollCheckpoint.anchorKey] → LazyColumn index (so
- * `scrollToItem(idx, offset)` lands on the same logical message the user was
- * viewing when they opened the sub-agent).
- *
- * The order MUST match the LazyColumn body's declaration order exactly:
- *  1. "streaming-reasoning" (if streamingReasoningPart != null)
- *  2. "session-diff" (if sessionDiff non-empty)
- *  3. renderBlocks.map { it.id } (in itemsIndexed order)
- *  4. "load-more" (if messages non-empty + hasMoreMessages + cursor present)
- *
- * Any future reordering of the LazyColumn body MUST be mirrored here.
- */
-internal fun lazyColumnKeyList(
-    streamingReasoningPart: Part?,
-    sessionDiff: List<cn.vectory.ocdroid.data.model.FileDiff>?,
-    renderBlocks: List<RenderBlock>,
-    messages: List<Message>,
-    hasMoreMessages: Boolean,
-    olderMessagesCursor: String?,
-): List<String> = buildList {
-    if (streamingReasoningPart != null) add("streaming-reasoning")
-    if (!sessionDiff.isNullOrEmpty()) add("session-diff")
-    addAll(renderBlocks.map { it.id })
-    if (messages.isNotEmpty() && hasMoreMessages && olderMessagesCursor != null) add("load-more")
-}
-
-/**
- * §Wave5b-Q13: the index + offset to pass to `listState.scrollToItem(idx,
- * offset)` for a Restore. Pure function — JVM-testable without a real
- * LazyListState.
- *
- * Resolution order:
- *  1. If [checkpoint.anchorKey] is non-null AND present in [currentKeys] →
- *     use that key's index, paired with [checkpoint.offset]. (Anchor wins
- *     because it survives message prepends / SSE appends / metadata-marker
- *     injection that shift indices without moving the user's logical
- *     position.)
- *  2. Otherwise → clamp [checkpoint.fallbackIndex] to
- *     `[0, currentKeys.size - 1]`, paired with [checkpoint.offset].
- *  3. If [currentKeys] is empty → returns `null` (the caller skips the
- *     scroll; the session has no renderable items yet).
- *
- * The offset is ALWAYS [checkpoint.offset] — the per-pixel offset within the
- * resolved item is independent of which item is resolved (it is the
- * pixel offset of the item's top edge from the viewport's top edge at
- * capture time, and the same pixel offset applies at restore).
- */
-internal data class ResolvedRestore(val index: Int, val offset: Int)
-
-internal fun resolveRestoreIndex(
-    checkpoint: cn.vectory.ocdroid.ui.ScrollCheckpoint,
-    currentKeys: List<String>,
-): ResolvedRestore? {
-    if (currentKeys.isEmpty()) return null
-    val anchorIdx = checkpoint.anchorKey?.let { key -> currentKeys.indexOf(key).takeIf { it >= 0 } }
-    val resolvedIndex = (anchorIdx ?: checkpoint.fallbackIndex)
-        .coerceIn(0, currentKeys.size - 1)
-    return ResolvedRestore(index = resolvedIndex, offset = checkpoint.offset)
-}
-
-// §R-19 Sprint 2 #7(b): markerLabelFor was lifted verbatim into the top-level
-// pure-functions file ChatFormatHelpers.kt (same package) so it can be covered
-// by JVM unit tests (this file is excluded from kover coverage as a
-// @Composable-heavy UI file — see PickerProviderFilter.kt for the same
-// extraction pattern).
