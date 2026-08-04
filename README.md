@@ -107,7 +107,7 @@ app/src/main/java/cn/vectory/ocdroid/
 
 ## 兼容的 OpenCode 服务端版本
 
-当前适配 **OpenCode Server [v1.17.12](https://github.com/anomalyco/opencode/releases)**。
+当前适配 **OpenCode Server [v1.18.13](https://github.com/anomalyco/opencode/releases)**。
 
 ## License
 

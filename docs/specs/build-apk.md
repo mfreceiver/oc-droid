@@ -179,7 +179,7 @@ TAG="v0.14.5"
 # 2) push main + tag → CI/CD 触发
 git push origin main && git push origin "$TAG"
 # ⇒ CI/CD 自动：签名构建(release keystore from Gitea Secrets)
-#   → 上传 APK + AAB + mapping.txt + SHA256SUMS
+#   → 上传 APK + SHA256SUMS（不上传 mapping.txt）
 #   → 更新 release notes → 企微通知
 ```
 
@@ -201,5 +201,5 @@ git push origin main && git push origin "$TAG"
 | Debug APK | `app/build/outputs/apk/debug/app-debug.apk`（约 26 MB，调试密钥签名）✓ |
 | Release 签名 | 已配置（`signingConfigs.release` 读 `local.properties`，凭证经 `pass` + `setup-signing.sh` 注入）；**v0.13.5 新 key**（cert SHA-256 `15:6C:58:B7…:F1:7A`）✓ |
 | Release APK | `APK/oc-droid-0.13.5-7aa1daf.apk`（约 12 MB，新 release 密钥签名；apksigner 验签通过）✓ ⚠️ 与 v0.13.4 及更早不签名兼容 |
-| 服务端 | OpenCode Server v1.17.12（本机 `0.0.0.0:4096`）✓ |
+| 服务端 | OpenCode Server v1.18.13（本机 `0.0.0.0:4096`）✓ |
 

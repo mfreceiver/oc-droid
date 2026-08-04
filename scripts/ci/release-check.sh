@@ -5,7 +5,9 @@
 # (项目未显式开启 android.buildTypes.release.unitTests);test 代码与变体无关,debug 足够 CI 验证。
 # 签名:workflow 从 Gitea Secrets 解出 keystore → 写 local.properties → gradle signingConfigs.release 自动用。
 # 版本:go-around 模式 git 派生;tag 触发,传 -PreleaseVersion=<tag去v>。
-# 产物:artifacts/(APK + mapping.txt + SHA256SUMS)。不生成 AAB —— 项目不上架 Play Store。
+# 产物:artifacts/(APK + SHA256SUMS)。不生成 AAB —— 项目不上架 Play Store。
+# mapping.txt:R8 混淆仍会在 app/build/outputs/mapping/release/ 生成(供本机反混淆崩栈),
+#              但不再拷入 artifacts/、不作为 release 资产上传(用户不需要)。
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 # tag 触发时 GITHUB_REF=refs/tags/vX.Y.Z;workflow_dispatch 兜底取最近 tag。
@@ -18,6 +20,5 @@ echo "==> release-check: tag=$TAG version=$VERSION-$SHORT"
 echo "==> 归档产物"
 mkdir -p artifacts
 cp "APK/oc-droid-$VERSION-$SHORT.apk" artifacts/
-cp app/build/outputs/mapping/release/mapping.txt artifacts/mapping.txt 2>/dev/null || true
 ( cd artifacts && sha256sum * > SHA256SUMS )
-echo "✅ release-check 通过 → artifacts/ 含 APK + mapping + SHA256SUMS"
+echo "✅ release-check 通过 → artifacts/ 含 APK + SHA256SUMS"
