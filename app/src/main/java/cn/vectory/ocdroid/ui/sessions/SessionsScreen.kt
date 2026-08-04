@@ -36,7 +36,7 @@ import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.data.model.SlimSessionLastError
-import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.data.repository.FileVcsRepository
 import cn.vectory.ocdroid.ui.ComposerViewModel
 import cn.vectory.ocdroid.ui.ConnectionPhase
 import cn.vectory.ocdroid.ui.ConnectionState
@@ -82,7 +82,7 @@ fun SessionsScreen(
      *  `viewModel.core.repository`). Injected via the activity-scoped
      *  [FilesViewModel] at the call site; passed in directly here so this
      *  composable does not reach into `.core`. */
-    repository: OpenCodeRepository,
+    repository: FileVcsRepository,
     onSwitchToChat: () -> Unit = {},
     /**
      * §chat-list-detail §12 B0.5: the ONE entry on the new route-driven

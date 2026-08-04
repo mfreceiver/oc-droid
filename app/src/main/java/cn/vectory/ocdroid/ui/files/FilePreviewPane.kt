@@ -61,7 +61,7 @@ import androidx.core.content.FileProvider
 import cn.vectory.ocdroid.R
 import com.mikepenz.markdown.m3.Markdown
 import cn.vectory.ocdroid.data.model.FileContent
-import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.data.repository.FileVcsRepository
 import cn.vectory.ocdroid.ui.theme.LocalMarkdownFontSizes
 import cn.vectory.ocdroid.ui.theme.markdownTypography
 import cn.vectory.ocdroid.ui.util.DataUriImageTransformer
@@ -86,7 +86,7 @@ private enum class MarkdownPreviewMode {
 internal fun FilePreviewPane(
     path: String,
     fileContent: FileContent,
-    repository: OpenCodeRepository,
+    repository: FileVcsRepository,
     sessionDirectory: String? = null,
     isRefreshing: Boolean = false,
     onRefresh: () -> Unit = {},
@@ -267,7 +267,7 @@ internal fun FilePreviewPane(
 private fun PreviewMarkdown(
     content: String,
     filePath: String,
-    repository: OpenCodeRepository,
+    repository: FileVcsRepository,
     sessionDirectory: String?
 ) {
     var resolvedContent by remember(content, filePath) { mutableStateOf<String?>(null) }

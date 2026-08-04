@@ -7,7 +7,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import cn.vectory.ocdroid.data.model.FileContent
 import cn.vectory.ocdroid.data.model.FileNode
-import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.data.repository.FileVcsRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import javax.inject.Inject
@@ -41,7 +41,7 @@ data class FilesUiState(
 
 @HiltViewModel
 class FilesViewModel @Inject constructor(
-    val repository: OpenCodeRepository,
+    val repository: FileVcsRepository,
     // §F5: 文件长按分享需 FileProvider + startActivity，注入 Application Context。
     @ApplicationContext private val appContext: Context
 ) : ViewModel() {
@@ -214,7 +214,7 @@ class FilesViewModel @Inject constructor(
      * §R18 P1-5: [isDirectory] is a caller-provided hint that selects between
      * the file-content path and the directory-tree path WITHOUT relying on
      * content emptiness:
-     *  - `true`  → skip [OpenCodeRepository.getFileContent] entirely and go
+     *  - `true`  → skip [getFileContent] entirely and go
      *              straight to [loadDirectoryPreview]. Used when the caller
      *              already has a [FileNode] (or equivalent signal) and wants
      *              to avoid both the empty-file-vs-directory ambiguity and a
@@ -222,7 +222,7 @@ class FilesViewModel @Inject constructor(
      *  - `false` → trust the file response unconditionally (an empty file is
      *              still a file).
      *  - `null`  → probe mode for deep-link entries that only have a path
-     *              string. We issue a single [OpenCodeRepository.getFileContent]
+     *              string. We issue a single [getFileContent]
      *              call; success with `type != "directory"` resolves as a file
      *              (covers text, binary, image, video, and any future file
      *              type — even when content is empty/blank), otherwise we fall

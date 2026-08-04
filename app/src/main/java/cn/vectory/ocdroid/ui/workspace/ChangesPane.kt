@@ -39,7 +39,7 @@ import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.FileDiff
 import cn.vectory.ocdroid.data.model.VcsInfo
 import cn.vectory.ocdroid.data.model.VcsStatusEntry
-import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.data.repository.FileVcsRepository
 import cn.vectory.ocdroid.ui.theme.AppBottomSheet
 import cn.vectory.ocdroid.ui.theme.Dimens
 
@@ -70,7 +70,7 @@ import cn.vectory.ocdroid.ui.theme.Dimens
 @Composable
 fun ChangesPane(
     diffs: List<FileDiff>,
-    repository: OpenCodeRepository,
+    repository: FileVcsRepository,
     workdir: String?,
     selectedFile: String?,
     onSelectFile: (String?) -> Unit,
@@ -147,7 +147,7 @@ fun ChangesPane(
 private fun SessionDiffSegment(
     diffs: List<FileDiff>,
     selectedFile: String?,
-    repository: OpenCodeRepository,
+    repository: FileVcsRepository,
     workdir: String?,
     onSelectFile: (String?) -> Unit,
 ) {
@@ -187,7 +187,7 @@ private fun SessionDiffSegment(
     // session-diff endpoint already returns patches; the working-tree
     // segment uses repository directly). Kept on the signature so both
     // segments share the same call-site contract.
-    @Suppress("UNUSED_PARAMETER") fun unusedAnchor(r: OpenCodeRepository, w: String?) = Unit
+    @Suppress("UNUSED_PARAMETER") fun unusedAnchor(r: FileVcsRepository, w: String?) = Unit
     unusedAnchor(repository, workdir)
 }
 
@@ -195,7 +195,7 @@ private fun SessionDiffSegment(
 private fun WorkingTreeSegment(
     state: VcsLoadState,
     workdir: String?,
-    repository: OpenCodeRepository,
+    repository: FileVcsRepository,
     selectedFile: String?,
     onSelectFile: (String?) -> Unit,
 ) {
@@ -266,7 +266,7 @@ private fun WorkingTreeSegment(
 private fun WorkingTreeLoadedBody(
     info: VcsInfo,
     status: List<VcsStatusEntry>,
-    repository: OpenCodeRepository,
+    repository: FileVcsRepository,
     workdir: String?,
     selectedFile: String?,
     onSelectFile: (String?) -> Unit,
@@ -444,7 +444,7 @@ private fun GroupedVcsStatusList(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun VcsDiffSheet(
-    repository: OpenCodeRepository,
+    repository: FileVcsRepository,
     workdir: String?,
     file: String,
     onDismiss: () -> Unit,

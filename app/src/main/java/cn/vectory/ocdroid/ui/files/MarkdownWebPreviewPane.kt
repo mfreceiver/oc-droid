@@ -42,7 +42,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import com.mikepenz.markdown.m3.Markdown
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.BuildConfig
-import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.data.repository.FileVcsRepository
 import cn.vectory.ocdroid.ui.theme.LocalMarkdownFontSizes
 import cn.vectory.ocdroid.ui.theme.markdownTypography
 import cn.vectory.ocdroid.util.MarkdownFontSizes
@@ -58,7 +58,7 @@ private const val webPreviewLogTag = "MarkdownWebPreview"
 internal fun MarkdownWebPreviewPane(
     content: String,
     filePath: String,
-    repository: OpenCodeRepository,
+    repository: FileVcsRepository,
     sessionDirectory: String?,
     onOpenNative: () -> Unit,
     onOpenSource: () -> Unit
@@ -91,7 +91,7 @@ internal fun MarkdownWebPreviewPane(
 private fun ResolvedMarkdownWebPreview(
     content: String,
     filePath: String,
-    repository: OpenCodeRepository,
+    repository: FileVcsRepository,
     sessionDirectory: String?,
     onOpenNative: () -> Unit,
     onOpenSource: () -> Unit
