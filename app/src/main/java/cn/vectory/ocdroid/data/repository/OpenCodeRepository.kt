@@ -16,8 +16,10 @@ import cn.vectory.ocdroid.data.repository.http.hostPortFromUrl
 import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.TrafficLogger
 import cn.vectory.ocdroid.util.TrafficTracker
+import cn.vectory.ocdroid.util.exponentialBackoffMs
 import cn.vectory.ocdroid.util.runSuspendCatching
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
@@ -604,15 +606,9 @@ class OpenCodeRepository @Inject constructor(
             trustAll = trustAll,
             updateTrustAll = true,
         )
-        // ι-P1: rebuild session source to match the new connection mode.
-        // lite-v2-dev: SlimSessionSource retained (skeleton list endpoint still exists);
-        // SlimMessageSource retired (slimStateMachine deleted → no watermark read).
-        // Both slim and legacy use StandardMessageSource for message paging now.
-        sessionSource = if (slim) SlimSessionSource({ api }, { parseErrorCode(it) }, { retryAfterHeaderToMs(it) }) else StandardSessionSource({ api })
-        // ι-P2: message source — lite-v2-dev always uses StandardMessageSource.
-        // The slim message paging path (getMessagesPaged slim branch) now routes
-        // through getSlimapiMessagesSkeleton directly (no /since watermark).
-        messageSource = StandardMessageSource({ api })
+        // Wave2-cleanup: sessionSource/messageSource routing layer removed.
+        // getSessions/getSessionsForDirectory branch on serverCompatProfile.slimConnection
+        // directly; getMessagesPagedImpl calls api.getMessages() inline.
         // ι-A (capability read-model): 发布能力 mode 仅在整条 ssl/host/client/readiness
         // 事务全成功后。configure() 是 fail-forward（不回滚旧 networkGraph.hostConfig），
         // 但能力模型只反映"最近一次成功 live 的 mode"，与 readiness 同语义。
@@ -693,33 +689,6 @@ class OpenCodeRepository @Inject constructor(
     // and authoritative committer have been deleted. expandMessagesFullBatch
     // below is now a direct N×/full loop (no batch engine). Message paging in
     // slim mode uses getSlimapiMessagesSkeleton directly.
-
-    /**
-     * ι-P1: session 域端口—Standard 或 Slim 双实现,由 [configure] 在 client 重建后选束。
-     * 默认 [StandardSessionSource]（legacy）与未 configure 行为一致。
-     *
-     * ι-4: @Volatile — 此为并发路由位([configure] @Synchronized monitor 内写,
-     * [getSessions]/[getSessionsForDirectory] 无锁读);volatile 保证 reader 线程
-     * 可见最新选束,接替原 isSlimMode(读 networkGraph.hostConfig._slim @Volatile)的并发路由职责。
-     * (rev-4/rev-10 stage 收尾加固)
-     */
-    @Volatile
-    private var sessionSource: SessionSource = StandardSessionSource({ api })
-
-    /**
-     * ι-P2: message 域端口—Standard 或 Slim 双实现,由 [configure] 在 client 重建后选束。
-     * 默认 [StandardMessageSource]（legacy）与未 configure 行为一致。
-     * §11.1 fix-9 P2 KDoc cleanup: [SlimMessageSource] 经注入 lambda 访问共享态
-     * （slimSessionUpdatedAt 只读 watermark + apiProvider token-bound +
-     * requireSlimTokenCurrent token guard）。**bumpBookmark 回调已移除**（stage A:
-     * `/since` 仅作 staging；watermark 由 [SlimAuthoritativeCommitter] 推进）。
-     * 锁与 bookmark 状态留 OCR（I5 保持），SlimMessageSource 不持锁 / 不持状态机对象。
-     *
-     * ι-4: @Volatile — 同 [sessionSource]，并发路由位（configure monitor 内写、
-     * [getMessagesPaged] 等无锁读），volatile 保证 reader 可见最新选束。
-     */
-    @Volatile
-    private var messageSource: MessageSource = StandardMessageSource({ api })
 
     // §R18 Phase 2-E step 2: the deprecated setCurrentDirectory /
     // getCurrentDirectory forwarding helpers were removed. Non-file routes
@@ -1006,7 +975,11 @@ class OpenCodeRepository @Inject constructor(
      * branch is left untouched (no slim envelope on that path).
      */
     suspend fun getSessions(limit: Int? = null): Result<List<Session>> =
-        sessionSource.getSessions(limit)
+        if (serverCompatProfile.slimConnection)
+            getSlimapiSessionsDelegate(api, null, null, limit, { parseErrorCode(it) }, { retryAfterHeaderToMs(it) })
+                .mapCatching { it.sessions }
+        else
+            runSuspendCatching { api.getSessions(limit) }
 
     /**
      * Fetches the root sessions whose [Session.directory] exactly matches
@@ -1025,7 +998,11 @@ class OpenCodeRepository @Inject constructor(
      * [getSlimapiSessions]; legacy branch untouched.
      */
     suspend fun getSessionsForDirectory(directory: String, limit: Int? = null): Result<List<Session>> =
-        sessionSource.getSessionsForDirectory(directory, limit)
+        if (serverCompatProfile.slimConnection)
+            getSlimapiSessionsDelegate(api, listOf(directory), true, limit, { parseErrorCode(it) }, { retryAfterHeaderToMs(it) })
+                .mapCatching { it.sessions }
+        else
+            runSuspendCatching { api.getSessions(limit = limit, directory = directory, roots = true) }
 
     /**
      * Fetches a single session by ID. Used to resolve a child/sub-agent session
@@ -1228,20 +1205,10 @@ class OpenCodeRepository @Inject constructor(
 
     /**
      * Shared implementation for [getMessagesPaged] and
-     * [getMessagesPagedUnanchored]. ι-P2: now a thin forwarder to the
-     * [messageSource] port (Standard / Slim 双实现，由 [configure] 选束）。
-     * [anchored] selects the slim watermark: `true` reads the cached slim SSE
-     * watermark ([getMessagesPaged]); `false` forces `since=0L`
-     * ([getMessagesPagedUnanchored]). The watermark lookup + bookmark bump +
-     * response cursor reading all live inside the [MessageSource]
-     * implementation's [runSuspendCatching] block, so a watermark-read or
-     * bookmark-bump failure stays in the `Result.failure` channel and there is
-     * no reconfigure race between the public wrapper and the impl. Token
-     * threading (I15) and bookmark / lock ownership (I5) are preserved verbatim
-     * via the injected lambdas on [SlimMessageSource] — the slim branch's
-     * `isSlimMode` check is now expressed as the source selection in
-     * [configure], read exactly once per host switch under the same
-     * `@Synchronized` monitor.
+     * [getMessagesPagedUnanchored]. Wave2-cleanup: inlined StandardMessageSource
+     * logic directly — no routing layer. The [anchored] param is accepted for
+     * signature compatibility but has no effect on the legacy path (watermark
+     * is a slim-only concept). Token threading (I15) preserved verbatim.
      */
     private suspend fun getMessagesPagedImpl(
         sessionId: String,
@@ -1249,8 +1216,19 @@ class OpenCodeRepository @Inject constructor(
         before: String?,
         token: SlimCommitToken,
         anchored: Boolean,
-    ): Result<MessagesPage> =
-        messageSource.getMessagesPaged(sessionId, limit, before, token, anchored)
+    ): Result<MessagesPage> = runSuspendCatching {
+        val response = api.getMessages(sessionId, limit, before)
+        if (!response.isSuccessful) throw IOException("HTTP ${response.code()}")
+        val items = response.body() ?: emptyList()
+        val nextCursor = extractNextCursor(
+            xNextCursor = response.headers()["X-Next-Cursor"],
+            linkHeader = response.headers()["Link"],
+        )
+        if (DebugLog.verboseDiagEnabled) {
+            DebugLog.d("OpenCodeRepository", "getMessagesPagedImpl sid=$sessionId limit=$limit before=$before items=${items.size} nextCursor=${nextCursor?.take(20)}")
+        }
+        MessagesPage(items = items, nextCursor = nextCursor)
+    }
 
 
 
@@ -2134,3 +2112,129 @@ private fun JsonElement.safeArray(): JsonArray? = this as? JsonArray
 private fun JsonElement.safePrimitive(): JsonPrimitive? = this as? JsonPrimitive
 
 // SlimapiPermissionEntry.toPermissionRequest() moved to SlimAggregationOutcome.kt
+
+// ── Wave2-cleanup: inlined from MessageSource.kt ──────────────────────
+
+/**
+ * §pagination-header-fallback (2026-07-26): extracts the next-page cursor from
+ * EITHER the slimapi's `X-Next-Cursor` response header OR opencode's RFC 5988
+ * `Link: <...?before=<opaque>; rel="next"` header.
+ *
+ * The slimapi translates opencode's `Link` into `X-Next-Cursor` for its own
+ * routes (`/slimapi/messages/{sid}`). But when the standard path calls opencode
+ * directly (`GET /session/{sid}/message`), only the `Link` header is present —
+ * `X-Next-Cursor` is absent, so the cursor was null and pagination was dead.
+ *
+ * This helper closes that gap: try `X-Next-Cursor` first (slimapi), fall back to
+ * parsing the `Link` header (direct opencode). The `before` query-param value is
+ * extracted VERBATIM (no percent-decoding) — opencode's cursor is an opaque
+ * base64url JSON envelope that must round-trip byte-for-byte.
+ */
+private fun extractNextCursor(
+    xNextCursor: String?,
+    linkHeader: String?,
+): String? {
+    if (xNextCursor != null) return xNextCursor
+    if (linkHeader == null) return null
+    // RFC 5988 Link header: comma-separated entries, each `<url>; rel="..."`.
+    // opencode advertises: `Link: <...?before=<opaque>&limit=N>; rel="next"`
+    for (raw in linkHeader.split(",")) {
+        val segment = raw.trim()
+        val urlStart = segment.indexOf('<')
+        val urlEnd = segment.indexOf('>')
+        if (urlStart < 0 || urlEnd < 0 || urlEnd <= urlStart) continue
+        val url = segment.substring(urlStart + 1, urlEnd)
+        val attrs = segment.substring(urlEnd + 1)
+        // Check rel="next" (case-insensitive, may be multi-token).
+        if (!attrs.contains("rel=", ignoreCase = true)) continue
+        val relValue = attrs.substringAfter("rel=", "")
+            .trim()
+            .removePrefix("\"")
+            .substringBefore("\"")
+            .lowercase()
+        if ("next" !in relValue.split(" ")) continue
+        // Extract the `before` query param from the URL — VERBATIM (no decode).
+        // The cursor is opaque base64url; parse_qs/unquote would corrupt it.
+        val query = url.substringAfter("?", "")
+        for (param in query.split("&")) {
+            if (param.startsWith("before=")) {
+                val value = param.substring("before=".length)
+                // §rev-gpt: an empty `before=` (no value) is NOT a valid
+                // cursor — return null so hasMore stays false instead of
+                // triggering an invalid/repeated load-more request.
+                if (value.isNotEmpty()) return value
+            }
+            // Also handle bare `?before` (no `=`) → not a valid cursor.
+        }
+    }
+    return null
+}
+
+// ── Wave2-cleanup: inlined from SessionSource.kt ──────────────────────
+
+/**
+ * Extracted delegate — mirrors [OpenCodeRepository.getSlimapiSessions] body
+ * verbatim. Encapsulates the slimapi sessions Retrofit call + non-2xx error
+ * decoding + the v0.9.0 `503 transform_busy` Retry-After backoff (mirrors
+ * ≤3 attempts, Retry-After header honored with
+ * exponential-backoff fall-back, only `503 + transform_busy` retries; every
+ * other status fails immediately preserving prior behavior).
+ *
+ * **One-shot errorBody discipline**:
+ * the sidecar's coded envelope is read EXACTLY ONCE via the injected
+ * [parseErrorCode] (OkHttp buffers errorBody for one-shot consumption); the
+ * parsed `code` is then used for BOTH the retry decision AND WARN-level
+ * observability logging. Reading the body twice (once to branch, once to log)
+ * silently swallows the log because the second read returns null.
+ *
+ * [parseErrorCode] / [retryAfterHeaderToMs] are injected so this top-level
+ * delegate reuses the OCR `internal fun`s (single source of truth) without
+ * the delegate holding an OCR reference.
+ */
+private suspend fun getSlimapiSessionsDelegate(
+    api: OpenCodeApi,
+    directories: List<String>?,
+    roots: Boolean?,
+    limit: Int?,
+    parseErrorCode: (retrofit2.Response<*>) -> String?,
+    retryAfterHeaderToMs: (String?) -> Long,
+    search: String? = null,
+): Result<SlimSessionsPage> = runSuspendCatching {
+    var lastException: retrofit2.HttpException? = null
+    for (attempts in 1..3) {
+        val resp = api.getSlimapiSessions(directories, roots, limit, search)
+        if (resp.isSuccessful) {
+            val sessions = resp.body() ?: emptyList()
+            val headers = resp.headers()
+            return@runSuspendCatching SlimSessionsPage(
+                sessions = sessions,
+                complete = headers?.get("X-Complete")?.toBooleanStrictOrNull(),
+            )
+        }
+        // Non-2xx: read the sidecar's coded envelope ONCE (errorBody is
+        // one-shot). The parsed code drives BOTH the 503+transform_busy
+        // retry decision AND the WARN observability log.
+        val code = parseErrorCode(resp)
+        if (resp.code() == 503 && code == SlimapiErrorCodes.TRANSFORM_BUSY && attempts < 3) {
+            val retryAfterMs = retryAfterHeaderToMs(resp.headers()["Retry-After"])
+            val delayMs = if (retryAfterMs > 0L) retryAfterMs else backoffMs(attempts)
+            delay(delayMs)
+            continue
+        }
+        // Non-503 / non-transform_busy / final attempt → observability + fail.
+        if (code != null) {
+            DebugLog.w("OpenCodeRepository", "slimapi sessions failed: $code")
+        }
+        lastException = retrofit2.HttpException(resp)
+        break
+    }
+    throw lastException ?: throw AssertionError("unreachable")
+}
+
+/** Exponential backoff for sessions 503 retry: 200ms, 400ms with ±30% jitter. */
+private fun backoffMs(attempt: Int): Long {
+    val base = exponentialBackoffMs(attempt - 1, 200L, Int.MAX_VALUE)
+    val jitterRange = (base * 0.30).toLong()
+    val jitter = (Math.random() * (2.0 * jitterRange + 1.0)).toLong() - jitterRange
+    return (base + jitter).coerceAtLeast(0L)
+}
