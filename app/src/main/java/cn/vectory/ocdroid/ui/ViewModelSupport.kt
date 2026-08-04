@@ -46,9 +46,10 @@ internal val ssePayloadJson = Json {
     encodeDefaults = true
 }
 
-// R-09: NOISY_SSE_LOG_EVENTS 已下沉到 data/api/SseLogFilter.kt（消除 data 层对 ui
-// 层的反向依赖）。UI 侧使用处（MainViewModelSyncActions）改为正向 import
-// cn.vectory.ocdroid.data.api.NOISY_SSE_LOG_EVENTS。
+// R-09 / Wave2.2: NOISY_SSE_LOG_EVENTS lives in util/SseLogFilter.kt — `util` is
+// the leaf package both `data.api` and `ui` may depend on, so neither layer
+// direction violates the Wave0 UiMustNotImportDataApiRule boundary. UI call
+// sites import cn.vectory.ocdroid.util.NOISY_SSE_LOG_EVENTS.
 
 internal object MainViewModelTimings {
     const val sessionPageSize = 10

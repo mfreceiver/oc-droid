@@ -26,7 +26,7 @@
 | 文件 | 职责 |
 |---|---|
 | [`data/api/SSEClient.kt`](../../app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt) | OkHttp `EventSource` 封装、退避、心跳看门狗、frame→`SSEEvent` 解码 |
-| [`data/api/SseLogFilter.kt`](../../app/src/main/java/cn/vectory/ocdroid/data/api/SseLogFilter.kt) | 噪音 event-type 名单（仅日志） |
+| [`util/SseLogFilter.kt`](../../app/src/main/java/cn/vectory/ocdroid/util/SseLogFilter.kt) | 噪音 event-type 名单（仅日志） |
 | [`data/model/SSE.kt`](../../app/src/main/java/cn/vectory/ocdroid/data/model/SSE.kt) | `SSEEvent` / `SSEPayload` wire 形状 |
 | [`service/streaming/ServiceSseConnectionOwner.kt`](../../app/src/main/java/cn/vectory/ocdroid/service/streaming/ServiceSseConnectionOwner.kt) | Service-lifetime 唯一 collector、transport-readiness、服务级重试预算 |
 | [`service/streaming/SseRecoveryPolicy.kt`](../../app/src/main/java/cn/vectory/ocdroid/service/streaming/SseRecoveryPolicy.kt) | 服务级重试时间表（30s / 2m / 5m + ±20% 抖动） |
@@ -179,7 +179,7 @@ slimapi `/slimapi/events` 输出 wrapped `SSEEvent{directory,payload}` 形状—
 
 `payload.type` 拿到后：
 
-1. **日志节流**（仅日志）：若 `type ∈ NOISY_SSE_LOG_EVENTS`（[`SseLogFilter.kt`](../../app/src/main/java/cn/vectory/ocdroid/data/api/SseLogFilter.kt)）
+1. **日志节流**（仅日志）：若 `type ∈ NOISY_SSE_LOG_EVENTS`（[`SseLogFilter.kt`](../../app/src/main/java/cn/vectory/ocdroid/util/SseLogFilter.kt)）
    则不写 DebugLog.d。当前名单：
    - `message.part.delta`、`message.part.updated`（per-token 流式，每秒数十到数百次）
    - `server.heartbeat`、`server.connected`
@@ -225,12 +225,12 @@ slimapi `/slimapi/events` 输出 wrapped `SSEEvent{directory,payload}` 形状—
 | ✅ `session.created` / `session.updated` | session 列表 upsert / invalidateTree（跨客户端归档/创建同步）；触发 SessionListActions 重排。 | [`AppAction.kt:69`](../../app/src/main/java/cn/vectory/ocdroid/ui/AppAction.kt)、[`AppStateSlices.kt:522`](../../app/src/main/java/cn/vectory/ocdroid/ui/AppStateSlices.kt) |
 | ✅ `message.appended` / `message.updated`（insert 分支） | 新消息追加到 in-memory sessionWindowCache（按 messageId 去重 replace，非 append）；驱动未读计数。 | [`SessionSwitcher.kt:264`](../../app/src/main/java/cn/vectory/ocdroid/ui/controller/SessionSwitcher.kt) `appendMessageIfCached`、[`ControllerEffect.kt:100`](../../app/src/main/java/cn/vectory/ocdroid/ui/controller/ControllerEffect.kt) |
 | ✅ `message.updated`（existing 分支） | 同 ID 字段更新（如 cost/tokens）。Server 1.17.11+ 行为；客户端按 messageId 替换。 | [`MessageActions.kt:251`](../../app/src/main/java/cn/vectory/ocdroid/ui/MessageActions.kt) |
-| ✅ `message.part.delta` / `message.part.updated` | per-token 流式增量；合并到当前 streaming 消息的 part。高频事件，仅日志节流。 | [`SessionSyncCoordinator`](../../app/src/main/java/cn/vectory/ocdroid/ui/controller/) fold、[`SseLogFilter.kt`](../../app/src/main/java/cn/vectory/ocdroid/data/api/SseLogFilter.kt) |
+| ✅ `message.part.delta` / `message.part.updated` | per-token 流式增量；合并到当前 streaming 消息的 part。高频事件，仅日志节流。 | [`SessionSyncCoordinator`](../../app/src/main/java/cn/vectory/ocdroid/ui/controller/) fold、[`SseLogFilter.kt`](../../app/src/main/java/cn/vectory/ocdroid/util/SseLogFilter.kt) |
 | ✅ `message.part.removed` | part 删除（revert 后）。 | [`SessionSyncCoordinator`](../../app/src/main/java/cn/vectory/ocdroid/ui/controller/) |
 | ✅ `question.asked` / `question.v2.asked` | 系统通知（dedup key `q:${question.id}`）；UI 也直接渲染 QuestionCardView。 | [`SseNotificationBridge.kt:217`](../../app/src/main/java/cn/vectory/ocdroid/service/streaming/SseNotificationBridge.kt)、[`AppLifecycleMonitor.handlePendingQuestion`](../../app/src/main/java/cn/vectory/ocdroid/di/AppLifecycleMonitor.kt) |
 | ✅ `permission.*` | 不发系统通知（由 30s poller 兜底，避免双发）；UI 渲染 PermissionCardView。 | [`SseNotificationBridge.kt:219-221`](../../app/src/main/java/cn/vectory/ocdroid/service/streaming/SseNotificationBridge.kt) |
 | ✅ `tool.*` / `patch.*` / `step-start` / `step-finish` | 折叠到 part 增量，触发渲染。 | [`SessionSyncCoordinator`](../../app/src/main/java/cn/vectory/ocdroid/ui/controller/) |
-| ✅ `plugin.added` / `catalog.updated` / `integration.updated` | 仅日志节流，无业务 reducer。 | [`SseLogFilter.kt`](../../app/src/main/java/cn/vectory/ocdroid/data/api/SseLogFilter.kt) |
+| ✅ `plugin.added` / `catalog.updated` / `integration.updated` | 仅日志节流，无业务 reducer。 | [`SseLogFilter.kt`](../../app/src/main/java/cn/vectory/ocdroid/util/SseLogFilter.kt) |
 | ○ `session.error`（无 sid 直推） | **未处理**（省流模式 G1-B）。应在无 sid 时展示全局 toast/notification。 | — |
 | ○ `event: resync`（SSE event 字段，非 payload.type） | **未处理**（迁移目标，§5.5） | — |
 | ○ `event:resync` 之外的 server-defined event names | 不依赖 SSE `event:` 字段做分派（OkHttp `onEvent(type, data)` 收到的 `type` 参数**被丢弃**——客户端只按 `data.payload.type` 走）。`resync` 是当前唯一需要按 SSE event 字段分派的例外。 | [`SSEClient.kt:139-144`](../../app/src/main/java/cn/vectory/ocdroid/data/api/SSEClient.kt) |
