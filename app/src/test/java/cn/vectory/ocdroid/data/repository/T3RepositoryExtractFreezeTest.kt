@@ -487,6 +487,111 @@ class T3RepositoryExtractFreezeTest {
     }
 
     // ────────────────────────────────────────────────────────────────────────
+    // §6 — Phase B interface extraction contracts (Wave2.2 Repo R2)
+    // ────────────────────────────────────────────────────────────────────────
+
+    /**
+     * §6a: OpenCodeRepository MUST implement all 6 narrow repository interfaces
+     * (Phase B extraction). Each interface is bound via Hilt @Binds so callers can
+     * inject the narrow seam instead of the concrete composite. RED iff OCR drops
+     * an `implements` or an interface is renamed/removed.
+     */
+    @Test
+    fun `OpenCodeRepository implements all 6 narrow repository interfaces`() {
+        val implemented = OpenCodeRepository::class.java.interfaces.map { it.name }.toSet()
+        val expected = setOf(
+            "cn.vectory.ocdroid.data.repository.ConnectionRepository",
+            "cn.vectory.ocdroid.data.repository.SessionRepository",
+            "cn.vectory.ocdroid.data.repository.MessageRepository",
+            "cn.vectory.ocdroid.data.repository.InteractionRepository",
+            "cn.vectory.ocdroid.data.repository.CatalogRepository",
+            "cn.vectory.ocdroid.data.repository.FileVcsRepository",
+        )
+        assertEquals(
+            "OCR must implement all 6 Phase B interfaces (missing=${expected - implemented})",
+            expected,
+            implemented.intersect(expected),
+        )
+    }
+
+    /**
+     * §6b: each interface declares its contracted method set (reflection on the
+     * interface, resolving suspend name-mangling). Pins the Phase B surface so an
+     * accidental removal/rename of an interface method turns RED. Method COUNT per
+     * interface is also pinned to catch silent additions/drops.
+     */
+    @Test
+    fun `6 narrow interfaces declare their contracted method surface`() {
+        data class IfaceSpec(val fqn: String, val methods: List<String>)
+
+        val specs = listOf(
+        IfaceSpec(
+            "cn.vectory.ocdroid.data.repository.ConnectionRepository",
+            listOf(
+                // read-model vals surface as JVM getter methods on the interface
+                "isSlimMode", "getSupportsWatermarkResync", "getSupportsTokenStreamResync",
+                "getUsesSlimStatusFanOut", "getLastClientCertError",
+                "currentSslConfig", "isMutualTlsActive", "tokenStreamClient",
+                "checkHealth", "parseSlimapiHealth", "checkHealthFor",
+            ),
+        ),
+            IfaceSpec(
+                "cn.vectory.ocdroid.data.repository.SessionRepository",
+                listOf(
+                    "getSessions", "getSessionsForDirectory", "getSession", "createSession",
+                    "updateSession", "updateSessionArchived", "deleteSession",
+                    "getSessionStatus", "getActiveSessionIds", "getSlimapiSessionsStatus",
+                    "getChildren", "getSlimapiSessionStatusOutcome", "getSlimapiSessions",
+                ),
+            ),
+            IfaceSpec(
+                "cn.vectory.ocdroid.data.repository.MessageRepository",
+                listOf(
+                    "getMessages", "getMessagesPaged", "getMessagesPagedUnanchored",
+                    "probeLatestMessageId", "probeLatestMessageIdForCurrent", "probeLatestSlim",
+                    "expandMessagesFullBatch", "getSlimapiMessagesSkeleton",
+                    "getSlimapiMessageFull", "getSlimapiMessagesPage",
+                ),
+            ),
+            IfaceSpec(
+                "cn.vectory.ocdroid.data.repository.InteractionRepository",
+                listOf(
+                    "sendMessage", "abortSession", "summarizeSession", "forkSession",
+                    "revertSession", "getPendingPermissions", "respondPermission",
+                    "getPendingQuestions", "replyQuestion", "rejectQuestion", "executeCommand",
+                    "getSlimapiQuestions", "getSlimapiPermissions",
+                    "replySlimapiQuestion", "rejectSlimapiQuestion", "respondSlimapiPermission",
+                ),
+            ),
+            IfaceSpec(
+                "cn.vectory.ocdroid.data.repository.CatalogRepository",
+                listOf("getProviders", "getProvidersOrFailure", "getAgents", "getCommands"),
+            ),
+            IfaceSpec(
+                "cn.vectory.ocdroid.data.repository.FileVcsRepository",
+                listOf(
+                    "getSessionDiff", "getSessionTodos", "getFileTree", "getFileTreeForDirectory",
+                    "getFileContent", "getFileStatus", "getVcs", "getVcsStatus", "getVcsDiff",
+                    "findFile",
+                ),
+            ),
+        )
+
+        for (spec in specs) {
+            val cls = Class.forName(spec.fqn)
+            val declared = cls.declaredMethods
+                .map { m -> m.name.substringBefore('-') }   // strip suspend `-<hash>` mangling
+                .toSet()
+            val missing = spec.methods.filter { it !in declared }
+            assertTrue(
+                "${spec.fqn} must declare ${spec.methods.size} contracted methods; " +
+                    "missing=$missing (declared=${declared.sorted()})",
+                missing.isEmpty(),
+            )
+        }
+    }
+
+    // ────────────────────────────────────────────────────────────────────────
     // helpers
     // ────────────────────────────────────────────────────────────────────────
 

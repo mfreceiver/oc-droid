@@ -90,7 +90,7 @@ class OpenCodeRepository @Inject constructor(
      * profile (the M2 invariant).
      */
     private val serverCompatProfile: ServerCompatProfile = ServerCompatProfile(),
-) {
+) : ConnectionRepository, SessionRepository, MessageRepository, InteractionRepository, CatalogRepository, FileVcsRepository {
     private val json = Json {
         ignoreUnknownKeys = true
         isLenient = true
@@ -397,7 +397,7 @@ class OpenCodeRepository @Inject constructor(
      * Returns the live [HostConfig.slim] value (volatile read), so it
      * reflects the most recent [configure] call.
      */
-     val isSlimMode: Boolean get() = connectionGateway.isSlimMode
+    override val isSlimMode: Boolean get() = connectionGateway.isSlimMode
 
     // ── ι-A capability access surface (forwarders → ServerCompatProfile) ──
     // L4+ 消费者（协调/service/UI，多数已持 repository 句柄，部分以函数参数接收）
@@ -412,16 +412,16 @@ class OpenCodeRepository @Inject constructor(
      *  裸 `isSlimMode` 做重同步门。lite-v2 起 [ServerCompatProfile] 只保留
      *  `slimConnection`（plan §4.4），本 forwarder 直接读它（语义等价：
      *  slim 连接即支持 skeleton/watermark 重同步）。 */
-    val supportsWatermarkResync: Boolean get() = connectionGateway.supportsWatermarkResync
+    override val supportsWatermarkResync: Boolean get() = connectionGateway.supportsWatermarkResync
 
     /** ι-A / lite-v2-dev: 是否支持 token-stream 重同步。lite-v2 起 v2 协议下
      *  `tokenStreamEnabled = slimConnection`（plan §2.5，不再 probe health
      *  features.tokenStream）；本 forwarder 直接读 slimConnection（语义等价）。 */
-    val supportsTokenStreamResync: Boolean get() = connectionGateway.supportsTokenStreamResync
+    override val supportsTokenStreamResync: Boolean get() = connectionGateway.supportsTokenStreamResync
 
     /** ι-A / lite-v2-dev: StatusAggregator 是否走 slim 扇出（vs legacy bulk
      *  `/session/status`）。lite-v2 起等价于 slimConnection（plan §4.4）。 */
-    val usesSlimStatusFanOut: Boolean get() = connectionGateway.usesSlimStatusFanOut
+    override val usesSlimStatusFanOut: Boolean get() = connectionGateway.usesSlimStatusFanOut
 
     private data class CandidateSsl(
         val config: SslConfig,
@@ -666,13 +666,13 @@ class OpenCodeRepository @Inject constructor(
      * the same monitor (v3-glmer R2).
      */
     @Synchronized
-    fun currentSslConfig(): SslConfig = connectionGateway.currentSslConfig()
+    override fun currentSslConfig(): SslConfig = connectionGateway.currentSslConfig()
 
     /**
      * 当前 live SSL 配置是否走 mTLS 路径（客户端证书已配置并加载）。
      * Mirror of [SslConfigFactory.sslConfigFor]'s mTLS-priority routing.
      */
-    fun isMutualTlsActive(): Boolean = connectionGateway.isMutualTlsActive()
+    override fun isMutualTlsActive(): Boolean = connectionGateway.isMutualTlsActive()
 
     /**
      * §tokenstream-mtls-fix: build a token-stream OkHttp client via THIS repository's
@@ -693,7 +693,7 @@ class OpenCodeRepository @Inject constructor(
      * Additive public method — does NOT change the constructor (the
      * [T3RepositoryExtractFreezeTest] JVM-arity freeze stays GREEN).
      */
-    fun tokenStreamClient(hostPort: String?): OkHttpClient =
+    override fun tokenStreamClient(hostPort: String?): OkHttpClient =
         connectionGateway.tokenStreamClient(hostPort)
 
     /**
@@ -712,7 +712,7 @@ class OpenCodeRepository @Inject constructor(
      * 据此显示「证书加载失败」而非泛化连接失败（防 fail-open 静默降级）。null = ok 或
      * 未配置 mTLS。
      */
-    val lastClientCertError: String? get() = connectionGateway.lastClientCertError
+    override val lastClientCertError: String? get() = connectionGateway.lastClientCertError
 
     // ── lite-v2-dev (plan §4.1): ExpandBatchEngine + SlimSyncEngine + ────────
     // authoritative commit stores RETIRED. The slim state machine, sync engine,
@@ -757,7 +757,7 @@ class OpenCodeRepository @Inject constructor(
      * 把斜杠+星号星号 当嵌套 KDoc 起始）；下文用 `/slimapi/health` 单独写。
      * M1 门闩对所有 `/slimapi/` 下路径生效，含 health。
      */
-    suspend fun checkHealth(): Result<HealthResponse> = connectionGateway.checkHealth()
+    override suspend fun checkHealth(): Result<HealthResponse> = connectionGateway.checkHealth()
 
     /**
      * R8 slim-mode foundation / M2 自检：从 `GET /slimapi/health` 响应 body 抽取
@@ -775,7 +775,7 @@ class OpenCodeRepository @Inject constructor(
      * 接受 [body] 字符串（来自 OkHttp `Response.body.string()`）；不可识别的
      * JSON 结构 → 各字段 null（容错，不抛——把决策交给上层 fail-closed）。
      */
-    fun parseSlimapiHealth(body: String): SlimapiHealthPayload = connectionGateway.parseSlimapiHealth(body)
+    override fun parseSlimapiHealth(body: String): SlimapiHealthPayload = connectionGateway.parseSlimapiHealth(body)
 
     /**
      * One-shot health probe against [baseUrl] with optional Basic Auth, WITHOUT
@@ -795,14 +795,14 @@ class OpenCodeRepository @Inject constructor(
      * **不能**探 `/global/health`——后者经 catch-all 透传到 opencode，sidecar
      * 挂时仍 200 误报健康（C3 反例）。默认 false 保持所有现有调用方字节不变。
      */
-    suspend fun checkHealthFor(
+    override suspend fun checkHealthFor(
         baseUrl: String,
-        username: String? = null,
-        password: String? = null,
-        hostPort: String? = null,
-        clientCert: ClientCertMaterial? = null,
-        slim: Boolean = false,
-        trustAll: Boolean = false,
+        username: String?,
+        password: String?,
+        hostPort: String?,
+        clientCert: ClientCertMaterial?,
+        slim: Boolean,
+        trustAll: Boolean,
     ): Result<HealthResponse> = connectionGateway.checkHealthFor(
         baseUrl = baseUrl,
         username = username,
@@ -829,7 +829,7 @@ class OpenCodeRepository @Inject constructor(
      * log as the other slim catch sites. The legacy `api.getSessions`
      * branch is left untouched (no slim envelope on that path).
      */
-    suspend fun getSessions(limit: Int? = null): Result<List<Session>> =
+    override suspend fun getSessions(limit: Int?): Result<List<Session>> =
         sessionGateway.getSessions(limit)
 
     /**
@@ -848,32 +848,32 @@ class OpenCodeRepository @Inject constructor(
      * `parseErrorCode` + `DebugLog.w` + rethrow pattern as [getSessions] /
      * [getSlimapiSessions]; legacy branch untouched.
      */
-    suspend fun getSessionsForDirectory(directory: String, limit: Int? = null): Result<List<Session>> =
+    override suspend fun getSessionsForDirectory(directory: String, limit: Int?): Result<List<Session>> =
         sessionGateway.getSessionsForDirectory(directory, limit)
 
     /**
      * Fetches a single session by ID. Used to resolve a child/sub-agent session
      * that may not be present in the cached [getSessions] list.
      */
-    suspend fun getSession(sessionId: String): Result<Session> =
+    override suspend fun getSession(sessionId: String): Result<Session> =
         sessionGateway.getSession(sessionId)
 
-    suspend fun createSession(title: String? = null, directory: String? = null): Result<Session> =
+    override suspend fun createSession(title: String?, directory: String?): Result<Session> =
         sessionGateway.createSession(title, directory)
 
-    suspend fun updateSession(sessionId: String, title: String): Result<Session> =
+    override suspend fun updateSession(sessionId: String, title: String): Result<Session> =
         sessionGateway.updateSession(sessionId, title)
 
-    suspend fun updateSessionArchived(sessionId: String, archived: Long): Result<Session> =
+    override suspend fun updateSessionArchived(sessionId: String, archived: Long): Result<Session> =
         sessionGateway.updateSessionArchived(sessionId, archived)
 
-    suspend fun deleteSession(sessionId: String): Result<Unit> =
+    override suspend fun deleteSession(sessionId: String): Result<Unit> =
         sessionGateway.deleteSession(sessionId)
 
-    suspend fun getSessionStatus(): Result<Map<String, SessionStatus>> =
+    override suspend fun getSessionStatus(): Result<Map<String, SessionStatus>> =
         sessionGateway.getSessionStatus()
 
-    suspend fun getActiveSessionIds(): Result<Set<String>> =
+    override suspend fun getActiveSessionIds(): Result<Set<String>> =
         sessionGateway.getActiveSessionIds()
 
     /**
@@ -908,36 +908,36 @@ class OpenCodeRepository @Inject constructor(
      *
      * Legacy (non-slim) mode always uses the standard API directly.
      */
-    suspend fun getSlimapiSessionsStatus(directory: String): Result<Map<String, SessionStatus>> =
+    override suspend fun getSlimapiSessionsStatus(directory: String): Result<Map<String, SessionStatus>> =
         sessionGateway.getSlimapiSessionsStatus(directory)
 
-    suspend fun getChildren(sessionId: String): Result<List<Session>> =
+    override suspend fun getChildren(sessionId: String): Result<List<Session>> =
         sessionGateway.getChildren(sessionId)
 
-    suspend fun getMessages(sessionId: String, limit: Int? = null): Result<List<MessageWithParts>> =
+    override suspend fun getMessages(sessionId: String, limit: Int?): Result<List<MessageWithParts>> =
         messageGateway.getMessages(sessionId, limit)
 
-    suspend fun getMessagesPaged(
+    override suspend fun getMessagesPaged(
         sessionId: String,
-        limit: Int? = null,
-        before: String? = null,
-        token: SlimCommitToken = captureSlimCommitToken(),
+        limit: Int?,
+        before: String?,
+        token: SlimCommitToken,
     ): Result<MessagesPage> = messageGateway.getMessagesPaged(sessionId, limit, before, token)
 
-    suspend fun getMessagesPagedUnanchored(
+    override suspend fun getMessagesPagedUnanchored(
         sessionId: String,
-        limit: Int? = null,
-        before: String? = null,
-        token: SlimCommitToken = captureSlimCommitToken(),
+        limit: Int?,
+        before: String?,
+        token: SlimCommitToken,
     ): Result<MessagesPage> = messageGateway.getMessagesPagedUnanchored(sessionId, limit, before, token)
 
-    suspend fun probeLatestMessageId(sessionId: String): Result<String?> =
+    override suspend fun probeLatestMessageId(sessionId: String): Result<String?> =
         messageGateway.probeLatestMessageId(sessionId)
 
-    suspend fun probeLatestMessageIdForCurrent(sessionId: String): ProbeResult =
+    override suspend fun probeLatestMessageIdForCurrent(sessionId: String): ProbeResult =
         messageGateway.probeLatestMessageIdForCurrent(sessionId)
 
-    suspend fun probeLatestSlim(sessionId: String): ProbeResult =
+    override suspend fun probeLatestSlim(sessionId: String): ProbeResult =
         messageGateway.probeLatestSlim(sessionId)
 
     /**
@@ -997,21 +997,21 @@ class OpenCodeRepository @Inject constructor(
      * dispose-driven cancel propagates cleanly — matches the
      * [expandBatchInternal] CE discipline (R-14, rev-grok finding).
      */
-    suspend fun getSlimapiSessionStatusOutcome(sessionId: String): StatusOutcome =
+    override suspend fun getSlimapiSessionStatusOutcome(sessionId: String): StatusOutcome =
         sessionGateway.getSlimapiSessionStatusOutcome(sessionId)
 
-    suspend fun sendMessage(
+    override suspend fun sendMessage(
         sessionId: String,
         text: String,
-        agent: String? = null,
-        model: Message.ModelInfo? = null,
-        attachments: List<ComposerImageAttachment> = emptyList()
+        agent: String?,
+        model: Message.ModelInfo?,
+        attachments: List<ComposerImageAttachment>,
     ): Result<Unit> = interactionGateway.sendMessage(sessionId, text, agent, model, attachments)
 
-    suspend fun abortSession(sessionId: String): Result<Unit> =
+    override suspend fun abortSession(sessionId: String): Result<Unit> =
         interactionGateway.abortSession(sessionId)
 
-    suspend fun summarizeSession(
+    override suspend fun summarizeSession(
         sessionId: String,
         model: Message.ModelInfo
     ): Result<Boolean> = interactionGateway.summarizeSession(sessionId, model)
@@ -1026,10 +1026,10 @@ class OpenCodeRepository @Inject constructor(
     class SummarizeServerRejectedException :
         Exception("Server rejected compaction (body=false)")
 
-    suspend fun forkSession(sessionId: String, messageId: String? = null): Result<Session> =
+    override suspend fun forkSession(sessionId: String, messageId: String?): Result<Session> =
         interactionGateway.forkSession(sessionId, messageId)
 
-    suspend fun revertSession(sessionId: String, messageId: String, partId: String? = null): Result<Session> =
+    override suspend fun revertSession(sessionId: String, messageId: String, partId: String?): Result<Session> =
         interactionGateway.revertSession(sessionId, messageId, partId)
 
     /**
@@ -1041,47 +1041,47 @@ class OpenCodeRepository @Inject constructor(
      *
      * legacy (`isSlimMode == false`): byte-for-byte unchanged.
      */
-    suspend fun getPendingPermissions(): Result<List<PermissionRequest>> =
+    override suspend fun getPendingPermissions(): Result<List<PermissionRequest>> =
         interactionGateway.getPendingPermissions()
 
-    suspend fun respondPermission(
+    override suspend fun respondPermission(
         sessionId: String,
         permissionId: String,
         response: PermissionResponse
     ): Result<Unit> = interactionGateway.respondPermission(sessionId, permissionId, response)
 
-    suspend fun getPendingQuestions(directory: String?): Result<List<QuestionRequest>> =
+    override suspend fun getPendingQuestions(directory: String?): Result<List<QuestionRequest>> =
         interactionGateway.getPendingQuestions(directory)
 
-    suspend fun replyQuestion(
+    override suspend fun replyQuestion(
         requestId: String,
         answers: List<List<String>>,
         directory: String?
     ): Result<Unit> = interactionGateway.replyQuestion(requestId, answers, directory)
 
-    suspend fun rejectQuestion(requestId: String, directory: String?): Result<Unit> =
+    override suspend fun rejectQuestion(requestId: String, directory: String?): Result<Unit> =
         interactionGateway.rejectQuestion(requestId, directory)
 
-    suspend fun getProviders(): Result<ProvidersResponse> = catalogGateway.getProviders()
+    override suspend fun getProviders(): Result<ProvidersResponse> = catalogGateway.getProviders()
 
-    suspend fun getProvidersOrFailure(): Result<ProvidersResponse> = catalogGateway.getProvidersOrFailure()
+    override suspend fun getProvidersOrFailure(): Result<ProvidersResponse> = catalogGateway.getProvidersOrFailure()
 
-    suspend fun getAgents(): Result<List<AgentInfo>> = catalogGateway.getAgents()
+    override suspend fun getAgents(): Result<List<AgentInfo>> = catalogGateway.getAgents()
 
-    suspend fun getCommands(): Result<List<CommandInfo>> = catalogGateway.getCommands()
+    override suspend fun getCommands(): Result<List<CommandInfo>> = catalogGateway.getCommands()
 
-    suspend fun executeCommand(
+    override suspend fun executeCommand(
         sessionId: String,
         command: String,
-        arguments: String = "",
-        agent: String? = null,
+        arguments: String,
+        agent: String?,
         directory: String?
     ): Result<Unit> = interactionGateway.executeCommand(sessionId, command, arguments, agent, directory)
 
-    suspend fun getSessionDiff(sessionId: String): Result<List<FileDiff>> =
+    override suspend fun getSessionDiff(sessionId: String): Result<List<FileDiff>> =
         fileVcsGateway.getSessionDiff(sessionId)
 
-    suspend fun getSessionTodos(sessionId: String): Result<List<TodoItem>> =
+    override suspend fun getSessionTodos(sessionId: String): Result<List<TodoItem>> =
         fileVcsGateway.getSessionTodos(sessionId)
 
     /**
@@ -1090,28 +1090,28 @@ class OpenCodeRepository @Inject constructor(
      * EXPLICITLY to the server via `?directory` + the `X-Opencode-Skip-Dir`
      * marker on the API method (no global state involved).
      */
-    suspend fun getFileTree(directory: String, path: String? = null): Result<List<FileNode>> =
+    override suspend fun getFileTree(directory: String, path: String?): Result<List<FileNode>> =
         fileVcsGateway.getFileTree(directory, path)
 
-    suspend fun getFileTreeForDirectory(directory: String, path: String? = null): Result<List<FileNode>> =
+    override suspend fun getFileTreeForDirectory(directory: String, path: String?): Result<List<FileNode>> =
         fileVcsGateway.getFileTreeForDirectory(directory, path)
 
-    suspend fun getFileContent(directory: String, path: String): Result<FileContent> =
+    override suspend fun getFileContent(directory: String, path: String): Result<FileContent> =
         fileVcsGateway.getFileContent(directory, path)
 
-    suspend fun getFileStatus(directory: String): Result<List<FileStatusEntry>> =
+    override suspend fun getFileStatus(directory: String): Result<List<FileStatusEntry>> =
         fileVcsGateway.getFileStatus(directory)
 
-    suspend fun getVcs(directory: String?): Result<VcsInfo> =
+    override suspend fun getVcs(directory: String?): Result<VcsInfo> =
         fileVcsGateway.getVcs(directory)
 
-    suspend fun getVcsStatus(directory: String?): Result<List<VcsStatusEntry>> =
+    override suspend fun getVcsStatus(directory: String?): Result<List<VcsStatusEntry>> =
         fileVcsGateway.getVcsStatus(directory)
 
-    suspend fun getVcsDiff(mode: String, directory: String?): Result<List<FileDiff>> =
+    override suspend fun getVcsDiff(mode: String, directory: String?): Result<List<FileDiff>> =
         fileVcsGateway.getVcsDiff(mode, directory)
 
-    suspend fun findFile(directory: String, query: String, limit: Int = 50): Result<List<String>> =
+    override suspend fun findFile(directory: String, query: String, limit: Int): Result<List<String>> =
         fileVcsGateway.findFile(directory, query, limit)
 
     /**
@@ -1177,21 +1177,21 @@ class OpenCodeRepository @Inject constructor(
      * 排序契约（§4.3.7）：sidecar 必须按 `time.created` 升序返回（tie 按 id）。
      * 客户端在 merge 处做防御性排序（N ≤ 200，成本可忽略）。
      */
-    suspend fun getSlimapiMessagesSkeleton(
+    override suspend fun getSlimapiMessagesSkeleton(
         sessionId: String,
         limit: Int,
-        before: String? = null,
+        before: String?,
     ): MessagesPage = messageGateway.getSlimapiMessagesSkeleton(sessionId, limit, before)
 
-    suspend fun getSlimapiMessageFull(
+    override suspend fun getSlimapiMessageFull(
         sessionId: String,
         messageId: String
     ): Result<MessageWithParts> = messageGateway.getSlimapiMessageFull(sessionId, messageId)
 
-    suspend fun expandMessagesFullBatch(
+    override suspend fun expandMessagesFullBatch(
         sessionId: String,
         messageIds: Set<String>,
-        @Suppress("UNUSED_PARAMETER") token: SlimCommitToken? = null,
+        @Suppress("UNUSED_PARAMETER") token: SlimCommitToken?,
     ): ExpandOutcome = messageGateway.expandMessagesFullBatch(sessionId, messageIds, token)
 
     /** §B1: extract Retry-After header value as capped ms (pure, no IO). */
@@ -1246,37 +1246,37 @@ class OpenCodeRepository @Inject constructor(
      * The raw list comes from response body; headers carry discovery metadata.
      * Case-insensitive header lookup, tolerant of absent headers (null).
      */
-    suspend fun getSlimapiSessions(
-        directories: List<String>? = null,
-        roots: Boolean? = null,
-        limit: Int? = null,
-        search: String? = null
+    override suspend fun getSlimapiSessions(
+        directories: List<String>?,
+        roots: Boolean?,
+        limit: Int?,
+        search: String?,
     ): Result<SlimSessionsPage> = sessionGateway.getSlimapiSessions(directories, roots, limit, search)
 
-    suspend fun getSlimapiQuestions(
-        directories: List<String>? = null,
+    override suspend fun getSlimapiQuestions(
+        directories: List<String>?,
         token: SlimCommitToken,
     ): Result<SlimAggregationOutcome<SlimapiQuestionEntry>> =
         interactionGateway.getSlimapiQuestions(directories, token)
 
-    suspend fun getSlimapiPermissions(
-        directories: List<String>? = null,
+    override suspend fun getSlimapiPermissions(
+        directories: List<String>?,
         token: SlimCommitToken,
     ): Result<SlimAggregationOutcome<SlimapiPermissionEntry>> =
         interactionGateway.getSlimapiPermissions(directories, token)
 
-    suspend fun replySlimapiQuestion(
+    override suspend fun replySlimapiQuestion(
         questionId: String,
         answers: List<List<String>>,
         @Suppress("UNUSED_PARAMETER") routeToken: String?
     ): Result<Unit> = interactionGateway.replySlimapiQuestion(questionId, answers, routeToken)
 
-    suspend fun rejectSlimapiQuestion(
+    override suspend fun rejectSlimapiQuestion(
         questionId: String,
         @Suppress("UNUSED_PARAMETER") routeToken: String?
     ): Result<Unit> = interactionGateway.rejectSlimapiQuestion(questionId, routeToken)
 
-    suspend fun respondSlimapiPermission(
+    override suspend fun respondSlimapiPermission(
         sessionId: String,
         permissionId: String,
         response: PermissionResponse,
@@ -1327,13 +1327,13 @@ class OpenCodeRepository @Inject constructor(
      * in RevertCutoffCoordinator resolves. The `mode` / `token` params are
      * ignored (kept for source-compat with the existing call site).
      */
-    suspend fun getSlimapiMessagesPage(
+    override suspend fun getSlimapiMessagesPage(
         sessionId: String,
         limit: Int,
         before: String?,
-        @Suppress("UNUSED_PARAMETER") mode: String = "skeleton",
-        @Suppress("UNUSED_PARAMETER") token: SlimCommitToken = captureSlimCommitToken(),
-    ): Result<MessagesPage> = getMessagesPaged(sessionId, limit, before)
+        @Suppress("UNUSED_PARAMETER") mode: String,
+        @Suppress("UNUSED_PARAMETER") token: SlimCommitToken,
+    ): Result<MessagesPage> = getMessagesPaged(sessionId, limit, before, token)
 }
 
 // SlimAggregationOutcome, SlimColdStartSnapshot moved to their own files

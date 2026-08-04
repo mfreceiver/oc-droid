@@ -52,7 +52,7 @@ class RevertCutoffCoordinator(private val core: AppCore) {
                             token = core.repository.captureSlimCommitToken(),
                         )
                     } else {
-                        core.repository.getMessagesPaged(sessionId, PAGE_SIZE, cursor)
+                        core.repository.getMessagesPaged(sessionId, PAGE_SIZE, cursor, token = core.repository.captureSlimCommitToken())
                     }
                     val page = pageResult.getOrElse {
                         terminalState = RevertCutoffState.Failed

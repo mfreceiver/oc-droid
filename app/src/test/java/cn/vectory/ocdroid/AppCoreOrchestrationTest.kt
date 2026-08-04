@@ -843,13 +843,13 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
         advanceUntilIdle()
 
         // No fetch issued (guard short-circuited).
-        coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any()) }
+        coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any(), any()) }
     }
 
     @Test
     fun `performGlobalColdStartRefresh clears chat slice and bumps refreshNonce`() = runTest {
         val msgs = listOf(MessageWithParts(info = Message(id = "u1", role = "user")))
-        coEvery { repository.getMessagesPaged(any(), any(), any()) } returns Result.success(MessagesPage(msgs, null))
+        coEvery { repository.getMessagesPaged(any(), any(), any(), any()) } returns Result.success(MessagesPage(msgs, null))
         coEvery { repository.getSessionTodos(any()) } returns Result.success(emptyList())
         val core = wire()
         core.writeChat {
@@ -1094,7 +1094,7 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
         // retry would call getMessagesPagedUnanchored which the relaxed mock
         // returns success for, suppressing the error). The P0-7 retry path
         // is covered by MessageActionsTest directly.
-        coEvery { repository.getMessagesPaged(any(), any(), any()) } returns Result.failure(IllegalStateException("500"))
+        coEvery { repository.getMessagesPaged(any(), any(), any(), any()) } returns Result.failure(IllegalStateException("500"))
         coEvery { repository.getSessionTodos(any()) } returns Result.success(emptyList())
         val core = wire()
         // Mark SSE as live to disable the P0-7 retry (we want to test the
@@ -1116,7 +1116,7 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
         coEvery { repository.probeLatestMessageIdForCurrent(any()) } returns
             cn.vectory.ocdroid.data.repository.ProbeResult(ok = true, messageID = "server-new", updatedAt = 200L)
         val fetched = listOf(MessageWithParts(info = Message(id = "new1", role = "user")))
-        coEvery { repository.getMessagesPaged(any(), any(), any()) } returns Result.success(MessagesPage(fetched, null))
+        coEvery { repository.getMessagesPaged(any(), any(), any(), any()) } returns Result.success(MessagesPage(fetched, null))
         val core = wire()
         core.writeChat {
             it.copy(currentSessionId = "s1", messages = listOf(Message(id = "anchor", role = "user")))
@@ -1198,7 +1198,7 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
         // Before the page returns, flip hostProfileStore so the live
         // core.currentProfileId() provider returns fp-B.
         val tail = listOf(MessageWithParts(info = Message(id = "stale-A", role = "user")))
-        coEvery { repository.getMessagesPaged(any(), any(), any()) } answers {
+        coEvery { repository.getMessagesPaged(any(), any(), any(), any()) } answers {
             every { hostProfileStore.currentProfile() } returns switchedProfile
             Result.success(MessagesPage(tail, null))
         }
@@ -1238,7 +1238,7 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
         // probe WAS fired (coVerify), not the merge result.
         coEvery { repository.probeLatestMessageIdForCurrent(any()) } returns
             cn.vectory.ocdroid.data.repository.ProbeResult(ok = true, messageID = "server-new", updatedAt = 200L)
-        coEvery { repository.getMessagesPaged(any(), any(), any()) } returns Result.success(MessagesPage(emptyList(), null))
+        coEvery { repository.getMessagesPaged(any(), any(), any(), any()) } returns Result.success(MessagesPage(emptyList(), null))
         val core = wire()
         core.writeChat {
             it.copy(currentSessionId = "s1", messages = listOf(Message(id = "anchor", role = "user")))
@@ -1276,7 +1276,7 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
         // legacy isConnected gate would correctly elide.
         coEvery { repository.probeLatestMessageIdForCurrent(any()) } returns
             cn.vectory.ocdroid.data.repository.ProbeResult(ok = true, messageID = "server-new", updatedAt = 200L)
-        coEvery { repository.getMessagesPaged(any(), any(), any()) } returns Result.success(MessagesPage(emptyList(), null))
+        coEvery { repository.getMessagesPaged(any(), any(), any(), any()) } returns Result.success(MessagesPage(emptyList(), null))
         val core = wire()
         core.writeChat {
             it.copy(currentSessionId = "s1", messages = listOf(Message(id = "anchor", role = "user")))

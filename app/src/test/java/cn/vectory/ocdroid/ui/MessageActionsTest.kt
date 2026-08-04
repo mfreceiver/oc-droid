@@ -90,7 +90,7 @@ class MessageActionsTest {
                 parts = listOf(Part(id = "p1", messageId = "a1", sessionId = "s1", type = "text", text = "hi"))
             )
         )
-        coEvery { repository.getMessagesPaged("s1", any(), any()) } returns Result.success(MessagesPage(msgs, null))
+        coEvery { repository.getMessagesPaged("s1", any(), any(), any()) } returns Result.success(MessagesPage(msgs, null))
         coEvery { repository.getSessionTodos("s1") } returns Result.success(emptyList())
         store.mutateChat { it.copy(currentSessionId = "s1") }
 
@@ -113,7 +113,7 @@ class MessageActionsTest {
 
     @Test
     fun `launchLoadMessages failure emits UiEvent Error and clears loading flag`() = runTest {
-        coEvery { repository.getMessagesPaged("s1", any(), any()) } returns Result.failure(IllegalStateException("500"))
+        coEvery { repository.getMessagesPaged("s1", any(), any(), any()) } returns Result.failure(IllegalStateException("500"))
         coEvery { repository.getSessionTodos("s1") } returns Result.success(emptyList())
         store.mutateChat { it.copy(currentSessionId = "s1") }
 
@@ -134,7 +134,7 @@ class MessageActionsTest {
 
     @Test
     fun `launchLoadMessages coalesces when isLoadingMessages already true`() = runTest {
-        coEvery { repository.getMessagesPaged(any(), any(), any()) } returns Result.success(MessagesPage(emptyList(), null))
+        coEvery { repository.getMessagesPaged(any(), any(), any(), any()) } returns Result.success(MessagesPage(emptyList(), null))
         coEvery { repository.getSessionTodos(any()) } returns Result.success(emptyList())
         store.mutateChat { it.copy(currentSessionId = "s1", isLoadingMessages = true) }
 
@@ -148,14 +148,14 @@ class MessageActionsTest {
         advanceUntilIdle()
 
         // No fetch issued — the in-flight load owns the flag.
-        coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any()) }
+        coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any(), any()) }
         assertTrue(slices.chat.value.isLoadingMessages) // still true (we did not touch it)
     }
 
     @Test
     fun `launchLoadMessages does not write messages for a non-current session`() = runTest {
         val msgs = listOf(MessageWithParts(info = Message(id = "x1", role = "user")))
-        coEvery { repository.getMessagesPaged("other", any(), any()) } returns Result.success(MessagesPage(msgs, null))
+        coEvery { repository.getMessagesPaged("other", any(), any(), any()) } returns Result.success(MessagesPage(msgs, null))
         coEvery { repository.getSessionTodos("other") } returns Result.success(emptyList())
         // currentSessionId points elsewhere — fetch returns but merge is skipped.
         store.mutateChat { it.copy(currentSessionId = "current") }
@@ -182,7 +182,7 @@ class MessageActionsTest {
     @Test
     fun `launchLoadMessages resetLimit=true clears streaming overlay when session finalized`() = runTest {
         val msgs = listOf(MessageWithParts(info = Message(id = "a1", role = "assistant")))
-        coEvery { repository.getMessagesPaged("s1", any(), any()) } returns Result.success(MessagesPage(msgs, null))
+        coEvery { repository.getMessagesPaged("s1", any(), any(), any()) } returns Result.success(MessagesPage(msgs, null))
         coEvery { repository.getSessionTodos("s1") } returns Result.success(emptyList())
         store.mutateChat {
             it.copy(
@@ -203,7 +203,7 @@ class MessageActionsTest {
     @Test
     fun `launchLoadMessages resetLimit=true preserves overlay when session is busy`() = runTest {
         val msgs = listOf(MessageWithParts(info = Message(id = "a1", role = "assistant")))
-        coEvery { repository.getMessagesPaged("s1", any(), any()) } returns Result.success(MessagesPage(msgs, null))
+        coEvery { repository.getMessagesPaged("s1", any(), any(), any()) } returns Result.success(MessagesPage(msgs, null))
         coEvery { repository.getSessionTodos("s1") } returns Result.success(emptyList())
         store.mutateChat {
             it.copy(
@@ -230,7 +230,7 @@ class MessageActionsTest {
             MessageWithParts(info = Message(id = "new1", role = "user", time = Message.TimeInfo(created = 200L))),
             MessageWithParts(info = Message(id = "new2", role = "assistant", time = Message.TimeInfo(created = 300L))),
         )
-        coEvery { repository.getMessagesPaged("s1", any(), any()) } returns Result.success(MessagesPage(fetched, null))
+        coEvery { repository.getMessagesPaged("s1", any(), any(), any()) } returns Result.success(MessagesPage(fetched, null))
         coEvery { repository.getSessionTodos("s1") } returns Result.success(emptyList())
         store.mutateChat { it.copy(currentSessionId = "s1", messages = listOf(older)) }
 
@@ -244,7 +244,7 @@ class MessageActionsTest {
     @Test
     fun `launchLoadMessages seeds olderMessagesCursor on resetLimit=true`() = runTest {
         val fetched = listOf(MessageWithParts(info = Message(id = "m1", role = "user")))
-        coEvery { repository.getMessagesPaged("s1", any(), any()) } returns Result.success(MessagesPage(fetched, nextCursor = "cursor-1"))
+        coEvery { repository.getMessagesPaged("s1", any(), any(), any()) } returns Result.success(MessagesPage(fetched, nextCursor = "cursor-1"))
         coEvery { repository.getSessionTodos("s1") } returns Result.success(emptyList())
         store.mutateChat { it.copy(currentSessionId = "s1") }
 
@@ -298,7 +298,7 @@ class MessageActionsTest {
         // 重建结果）。Verified 分支的跟随加载是 resetLimit=false——此时必须用 page.nextCursor
         // 重建 cursor/hasMore，否则"加载更多"按钮永不出现（从死按钮矫枉过正成无按钮）。
         val fetched = listOf(MessageWithParts(info = Message(id = "m1", role = "user")))
-        coEvery { repository.getMessagesPaged("s1", any(), any()) } returns Result.success(MessagesPage(fetched, nextCursor = "cursor-1"))
+        coEvery { repository.getMessagesPaged("s1", any(), any(), any()) } returns Result.success(MessagesPage(fetched, nextCursor = "cursor-1"))
         coEvery { repository.getSessionTodos("s1") } returns Result.success(emptyList())
         store.mutateChat {
             it.copy(
@@ -321,7 +321,7 @@ class MessageActionsTest {
         // §F3-rebuild 反向：用户已加载过历史、cursor 已建立——periodic reload(resetLimit=false)
         // 不得改写它（否则在途拉取会破坏分页位置）。
         val fetched = listOf(MessageWithParts(info = Message(id = "m1", role = "user")))
-        coEvery { repository.getMessagesPaged("s1", any(), any()) } returns Result.success(MessagesPage(fetched, nextCursor = "server-new-cursor"))
+        coEvery { repository.getMessagesPaged("s1", any(), any(), any()) } returns Result.success(MessagesPage(fetched, nextCursor = "server-new-cursor"))
         coEvery { repository.getSessionTodos("s1") } returns Result.success(emptyList())
         store.mutateChat {
             it.copy(
@@ -341,7 +341,7 @@ class MessageActionsTest {
     @Test
     fun `launchLoadMessages writes session todos after success`() = runTest {
         val todo = cn.vectory.ocdroid.data.model.TodoItem(id = "t1", content = "done", status = "completed", priority = "high")
-        coEvery { repository.getMessagesPaged("s1", any(), any()) } returns Result.success(MessagesPage(emptyList(), null))
+        coEvery { repository.getMessagesPaged("s1", any(), any(), any()) } returns Result.success(MessagesPage(emptyList(), null))
         coEvery { repository.getSessionTodos("s1") } returns Result.success(listOf(todo))
         store.mutateChat { it.copy(currentSessionId = "s1") }
 
@@ -367,7 +367,7 @@ class MessageActionsTest {
         launchLoadMoreMessages(scope, repository, slices, "s1")
         advanceUntilIdle()
 
-        coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any()) }
+        coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any(), any()) }
     }
 
     @Test
@@ -377,7 +377,7 @@ class MessageActionsTest {
         launchLoadMoreMessages(scope, repository, slices, "s1")
         advanceUntilIdle()
 
-        coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any()) }
+        coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any(), any()) }
     }
 
     @Test
@@ -392,7 +392,7 @@ class MessageActionsTest {
         // §history-load-fix: self-reentry (rapid double-click / fast scroll)
         // coalesces on the OWN flag (isLoadingMoreMessages), not the background
         // reload flag.
-        coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any()) }
+        coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any(), any()) }
     }
 
     @Test
@@ -406,7 +406,7 @@ class MessageActionsTest {
         val olderPage = listOf(
             MessageWithParts(info = Message(id = "old1", role = "user", time = Message.TimeInfo(created = 100L))),
         )
-        coEvery { repository.getMessagesPaged("s1", any(), eq("c1")) } returns Result.success(MessagesPage(olderPage, nextCursor = "c2"))
+        coEvery { repository.getMessagesPaged("s1", any(), eq("c1"), any()) } returns Result.success(MessagesPage(olderPage, nextCursor = "c2"))
         store.mutateChat {
             it.copy(
                 currentSessionId = "s1",
@@ -423,7 +423,7 @@ class MessageActionsTest {
         advanceUntilIdle()
 
         // The click was NOT swallowed: a fetch was issued...
-        coVerify(exactly = 1) { repository.getMessagesPaged("s1", any(), eq("c1")) }
+        coVerify(exactly = 1) { repository.getMessagesPaged("s1", any(), eq("c1"), any()) }
         // ...the older page was prepended...
         assertEquals(listOf("old1", "cur1"), slices.chat.value.messages.map { it.id })
         // ...loadMore's own flag cleared on completion...
@@ -438,7 +438,7 @@ class MessageActionsTest {
         val olderPage = listOf(
             MessageWithParts(info = Message(id = "old1", role = "user", time = Message.TimeInfo(created = 100L))),
         )
-        coEvery { repository.getMessagesPaged("s1", any(), eq("cursor-1")) } returns Result.success(MessagesPage(olderPage, nextCursor = "cursor-2"))
+        coEvery { repository.getMessagesPaged("s1", any(), eq("cursor-1"), any()) } returns Result.success(MessagesPage(olderPage, nextCursor = "cursor-2"))
         store.mutateChat {
             it.copy(currentSessionId = "s1", messages = listOf(existing), olderMessagesCursor = "cursor-1", hasMoreMessages = true)
         }
@@ -461,7 +461,7 @@ class MessageActionsTest {
             MessageWithParts(info = Message(id = "old1", role = "user", time = Message.TimeInfo(created = 50L))),
             MessageWithParts(info = Message(id = "overlap", role = "user", time = Message.TimeInfo(created = 100L))),
         )
-        coEvery { repository.getMessagesPaged(any(), any(), any()) } returns Result.success(MessagesPage(olderPage, nextCursor = null))
+        coEvery { repository.getMessagesPaged(any(), any(), any(), any()) } returns Result.success(MessagesPage(olderPage, nextCursor = null))
         store.mutateChat {
             it.copy(currentSessionId = "s1", messages = listOf(existing), olderMessagesCursor = "c1", hasMoreMessages = true)
         }
@@ -477,7 +477,7 @@ class MessageActionsTest {
 
     @Test
     fun `launchLoadMoreMessages failure clears loading flag and keeps hasMore for retry`() = runTest {
-        coEvery { repository.getMessagesPaged(any(), any(), any()) } returns Result.failure(IllegalStateException("timeout"))
+        coEvery { repository.getMessagesPaged(any(), any(), any(), any()) } returns Result.failure(IllegalStateException("timeout"))
         store.mutateChat {
             it.copy(currentSessionId = "s1", olderMessagesCursor = "c1", hasMoreMessages = true)
         }
@@ -493,7 +493,7 @@ class MessageActionsTest {
     @Test
     fun `launchLoadMoreMessages empty page keeps messages and updates cursor`() = runTest {
         val existing = Message(id = "cur1", role = "user")
-        coEvery { repository.getMessagesPaged(any(), any(), any()) } returns Result.success(MessagesPage(emptyList(), nextCursor = null))
+        coEvery { repository.getMessagesPaged(any(), any(), any(), any()) } returns Result.success(MessagesPage(emptyList(), nextCursor = null))
         store.mutateChat {
             it.copy(currentSessionId = "s1", messages = listOf(existing), olderMessagesCursor = "c1", hasMoreMessages = true)
         }
@@ -551,7 +551,7 @@ class MessageActionsTest {
         // sessionId guard alone passes (s1==s1); the fp guard catches the
         // cross-group collision.
         val msgs = listOf(MessageWithParts(info = Message(id = "g1-msg", role = "user")))
-        coEvery { repository.getMessagesPaged("s1", any(), any()) } returns Result.success(MessagesPage(msgs, null))
+        coEvery { repository.getMessagesPaged("s1", any(), any(), any()) } returns Result.success(MessagesPage(msgs, null))
         coEvery { repository.getSessionTodos("s1") } returns Result.success(emptyList())
         store.mutateChat { it.copy(currentSessionId = "s1") }
 
@@ -582,7 +582,7 @@ class MessageActionsTest {
     fun `gpter-final-fix launchLoadMessages writes when fp matches (happy path)`() = runTest {
         // Counterpart: fp matches → normal write proceeds.
         val msgs = listOf(MessageWithParts(info = Message(id = "m1", role = "user")))
-        coEvery { repository.getMessagesPaged("s1", any(), any()) } returns Result.success(MessagesPage(msgs, null))
+        coEvery { repository.getMessagesPaged("s1", any(), any(), any()) } returns Result.success(MessagesPage(msgs, null))
         coEvery { repository.getSessionTodos("s1") } returns Result.success(emptyList())
         store.mutateChat { it.copy(currentSessionId = "s1") }
 
@@ -607,7 +607,7 @@ class MessageActionsTest {
         // guard is a no-op (both sides "" → equal). Legacy callers and tests
         // that don't pass fp are unaffected.
         val msgs = listOf(MessageWithParts(info = Message(id = "m1", role = "user")))
-        coEvery { repository.getMessagesPaged("s1", any(), any()) } returns Result.success(MessagesPage(msgs, null))
+        coEvery { repository.getMessagesPaged("s1", any(), any(), any()) } returns Result.success(MessagesPage(msgs, null))
         coEvery { repository.getSessionTodos("s1") } returns Result.success(emptyList())
         store.mutateChat { it.copy(currentSessionId = "s1") }
 
@@ -631,7 +631,7 @@ class MessageActionsTest {
         val olderPage = listOf(
             MessageWithParts(info = Message(id = "g1-old", role = "user", time = Message.TimeInfo(created = 100L))),
         )
-        coEvery { repository.getMessagesPaged("s1", any(), eq("c1")) } returns Result.success(MessagesPage(olderPage, nextCursor = "c2"))
+        coEvery { repository.getMessagesPaged("s1", any(), eq("c1"), any()) } returns Result.success(MessagesPage(olderPage, nextCursor = "c2"))
         store.mutateChat {
             it.copy(currentSessionId = "s1", messages = listOf(existing), olderMessagesCursor = "c1", hasMoreMessages = true)
         }
@@ -662,7 +662,7 @@ class MessageActionsTest {
         val olderPage = listOf(
             MessageWithParts(info = Message(id = "old1", role = "user", time = Message.TimeInfo(created = 100L))),
         )
-        coEvery { repository.getMessagesPaged("s1", any(), eq("c1")) } returns Result.success(MessagesPage(olderPage, nextCursor = null))
+        coEvery { repository.getMessagesPaged("s1", any(), eq("c1"), any()) } returns Result.success(MessagesPage(olderPage, nextCursor = null))
         store.mutateChat {
             it.copy(currentSessionId = "s1", messages = listOf(existing), olderMessagesCursor = "c1", hasMoreMessages = true)
         }
@@ -702,7 +702,7 @@ class MessageActionsTest {
         // is discarded by the single-flight guard because the immediate load
         // is still in flight.
         val immediateLoadGate = kotlinx.coroutines.CompletableDeferred<Unit>()
-        coEvery { repository.getMessagesPaged("s1", any(), any()) } coAnswers {
+        coEvery { repository.getMessagesPaged("s1", any(), any(), any()) } coAnswers {
             immediateLoadGate.await()
             Result.success(MessagesPage(emptyList(), null))
         }
@@ -747,7 +747,7 @@ class MessageActionsTest {
         // single-flight guard and returned WITHOUT calling
         // repository.getMessagesPaged. Exactly ONE call observed — the
         // immediate load's. This is the bug: the delayed reload was swallowed.
-        coVerify(exactly = 1) { repository.getMessagesPaged("s1", any(), any()) }
+        coVerify(exactly = 1) { repository.getMessagesPaged("s1", any(), any(), any()) }
         assertTrue(
             "immediate load still in flight (delayed reload did not clear the flag)",
             slices.chat.value.isLoadingMessages,
@@ -774,7 +774,7 @@ class MessageActionsTest {
         // user message via the better-timed refresh — executes and surfaces
         // the new prompt.
         val freshMsgs = listOf(MessageWithParts(info = Message(id = "user-prompt", role = "user")))
-        coEvery { repository.getMessagesPaged("s1", any(), any()) } returns Result.success(MessagesPage(freshMsgs, null))
+        coEvery { repository.getMessagesPaged("s1", any(), any(), any()) } returns Result.success(MessagesPage(freshMsgs, null))
         coEvery { repository.getSessionTodos("s1") } returns Result.success(emptyList())
         store.mutateChat { it.copy(currentSessionId = "s1") }
 
@@ -804,7 +804,7 @@ class MessageActionsTest {
         // The delayed reload's launchLoadMessages call LANDED — repository
         // fetched exactly once (the fresh transcript), the slot is no longer
         // starved.
-        coVerify(exactly = 1) { repository.getMessagesPaged("s1", any(), any()) }
+        coVerify(exactly = 1) { repository.getMessagesPaged("s1", any(), any(), any()) }
         assertEquals(
             "fresh user message surfaced via the delayed targeted reload (the fix)",
             listOf("user-prompt"),
@@ -944,7 +944,7 @@ class MessageActionsTest {
         // fetch (getMessagesPaged) fails stale → P0-7 retries once via
         // getMessagesPagedUnanchored and recovers.
         val msgs = listOf(MessageWithParts(info = Message(id = "m1", role = "user")))
-        coEvery { repository.getMessagesPaged("s1", any(), any()) } returns
+        coEvery { repository.getMessagesPaged("s1", any(), any(), any()) } returns
             Result.failure(OpenCodeRepository.StaleSlimCommitException())
         coEvery { repository.getMessagesPagedUnanchored("s1", any(), any(), any()) } returns
             Result.success(MessagesPage(msgs, nextCursor = null))
@@ -972,7 +972,7 @@ class MessageActionsTest {
         // default parameters prevents exact-count verification via partial
         // matchers. The 4-param matcher test at :1181 independently pins
         // these exact counts (exactly=1 anchored + exactly=1 unanchored).
-        coVerify(atLeast = 1) { repository.getMessagesPaged("s1", any(), any()) }
+        coVerify(atLeast = 1) { repository.getMessagesPaged("s1", any(), any(), any()) }
         coVerify(atLeast = 1) { repository.getMessagesPagedUnanchored("s1", any(), any(), any()) }
         assertEquals(listOf("m1"), slices.chat.value.messages.map { it.id })
         assertTrue(emitted.filterIsInstance<UiEvent.Error>().isEmpty())
@@ -990,7 +990,7 @@ class MessageActionsTest {
         // so the P0-7 retry does not fire. The P0-7-specific behavior
         // (SSE-off → one extra retry) is covered by
         // `P0-7 SSE-off first-fetch failure retries once via unanchored`.
-        coEvery { repository.getMessagesPaged("s1", any(), any()) } returns
+        coEvery { repository.getMessagesPaged("s1", any(), any(), any()) } returns
             Result.failure(java.io.IOException("HTTP 503"))
         coEvery { repository.getSessionTodos("s1") } returns Result.success(emptyList())
         store.mutateChat { it.copy(currentSessionId = "s1") }
@@ -999,7 +999,7 @@ class MessageActionsTest {
         advanceUntilIdle()
 
         // Exactly 1 attempt — non-stale failures don't retry when SSE is live.
-        coVerify(exactly = 1) { repository.getMessagesPaged("s1", any(), any()) }
+        coVerify(exactly = 1) { repository.getMessagesPaged("s1", any(), any(), any()) }
         val err = emitted.filterIsInstance<UiEvent.Error>().single()
         assertEquals(R.string.error_load_messages_failed, err.resId)
         assertTrue("failure cause surfaced to the user", err.args.any { it.toString().contains("503") })
@@ -1015,7 +1015,7 @@ class MessageActionsTest {
         // with IOException, then the unanchored retry call to succeed.
         // Asserts: exactly 1 getMessagesPaged call AND at-least 1
         // getMessagesPagedUnanchored call (the P0-7 retry).
-        coEvery { repository.getMessagesPaged("s1", any(), any()) } returns
+        coEvery { repository.getMessagesPaged("s1", any(), any(), any()) } returns
             Result.failure(java.io.IOException("HTTP 503"))
         coEvery { repository.getMessagesPagedUnanchored("s1", any(), any(), any()) } returns
             Result.success(MessagesPage(emptyList(), null))
@@ -1042,7 +1042,7 @@ class MessageActionsTest {
         // pin captureSlimCommitToken to exactly 1 (and we have 2 — one per
         // fetch). The semantic check (1 first-fetch + retry happened) is
         // preserved by `atLeast = 1` on each.
-        coVerify(atLeast = 1) { repository.getMessagesPaged("s1", any(), any()) }
+        coVerify(atLeast = 1) { repository.getMessagesPaged("s1", any(), any(), any()) }
         coVerify(atLeast = 1) { repository.getMessagesPagedUnanchored("s1", any(), any(), any()) }
         // No error — the retry succeeded (empty success is the "no history"
         // legitimate state).
@@ -1058,7 +1058,7 @@ class MessageActionsTest {
         // §11.1 fix-9 P0-7: SSE-off + first-fetch failure + retry also
         // fails → UiEvent.Error fires (the user is notified that the
         // foreground load could not complete).
-        coEvery { repository.getMessagesPaged("s1", any(), any()) } returns
+        coEvery { repository.getMessagesPaged("s1", any(), any(), any()) } returns
             Result.failure(java.io.IOException("HTTP 503"))
         coEvery { repository.getMessagesPagedUnanchored("s1", any(), any(), any()) } returns
             Result.failure(java.io.IOException("HTTP 503 retry"))
@@ -1073,7 +1073,7 @@ class MessageActionsTest {
         scope.advanceUntilIdle()
         scope.runCurrent()
 
-        coVerify(atLeast = 1) { repository.getMessagesPaged("s1", any(), any()) }
+        coVerify(atLeast = 1) { repository.getMessagesPaged("s1", any(), any(), any()) }
         coVerify(atLeast = 1) { repository.getMessagesPagedUnanchored("s1", any(), any(), any()) }
         val err = emitted.filterIsInstance<UiEvent.Error>().single()
         assertEquals(R.string.error_load_messages_failed, err.resId)
@@ -1085,7 +1085,7 @@ class MessageActionsTest {
         // §11.1 fix-9 P0-7: when SSE transport IS live, the P0-7 retry
         // does NOT fire (the SSE digest relay will deliver updates; the
         // REST retry is unnecessary).
-        coEvery { repository.getMessagesPaged("s1", any(), any()) } returns
+        coEvery { repository.getMessagesPaged("s1", any(), any(), any()) } returns
             Result.failure(java.io.IOException("HTTP 503"))
         coEvery { repository.getSessionTodos("s1") } returns Result.success(emptyList())
         store.mutateChat { it.copy(currentSessionId = "s1") }
@@ -1098,7 +1098,7 @@ class MessageActionsTest {
         scope.advanceUntilIdle()
         scope.runCurrent()
 
-        coVerify(atLeast = 1) { repository.getMessagesPaged("s1", any(), any()) }
+        coVerify(atLeast = 1) { repository.getMessagesPaged("s1", any(), any(), any()) }
         coVerify(exactly = 0) { repository.getMessagesPagedUnanchored(any(), any(), any(), any()) }
         emitted.filterIsInstance<UiEvent.Error>().single()
         assertFalse(slices.chat.value.isLoadingMessages)
@@ -1113,7 +1113,7 @@ class MessageActionsTest {
         // is off — retrying a crash-inducing call would mask bugs (double the
         // crash before reporting). The failure surfaces UiEvent.Error
         // immediately on the first fetch.
-        coEvery { repository.getMessagesPaged("s1", any(), any()) } returns
+        coEvery { repository.getMessagesPaged("s1", any(), any(), any()) } returns
             Result.failure(RuntimeException("programming error"))
         coEvery { repository.getSessionTodos("s1") } returns Result.success(emptyList())
         store.mutateChat { it.copy(currentSessionId = "s1") }
@@ -1151,7 +1151,7 @@ class MessageActionsTest {
         // Result.failure(CE), the guard ensures structured concurrency is
         // preserved (coroutine cancels cleanly, no retry, no misleading
         // UiEvent.Error). This test pins that guard.
-        coEvery { repository.getMessagesPaged("s1", any(), any()) } returns
+        coEvery { repository.getMessagesPaged("s1", any(), any(), any()) } returns
             Result.failure(kotlinx.coroutines.CancellationException("cooperative cancel"))
         coEvery { repository.getSessionTodos("s1") } returns Result.success(emptyList())
         store.mutateChat { it.copy(currentSessionId = "s1") }
@@ -1185,7 +1185,7 @@ class MessageActionsTest {
         // count to EXACTLY one initial fetch + EXACTLY one retry (no infinite
         // loop, no double-retry). total fetch calls = 2 (1 getMessagesPaged
         // initial + 1 getMessagesPagedUnanchored retry).
-        coEvery { repository.getMessagesPaged("s1", any(), any()) } returns
+        coEvery { repository.getMessagesPaged("s1", any(), any(), any()) } returns
             Result.failure(java.io.IOException("HTTP 503"))
         coEvery { repository.getMessagesPagedUnanchored("s1", any(), any(), any()) } returns
             Result.success(MessagesPage(emptyList(), null))
@@ -1235,7 +1235,7 @@ class MessageActionsTest {
         // "Failed to load messages: canceled" toast. This pins the regression
         // that the first-request CE guard (covered by the P1-4 test above) did
         // NOT catch because it only inspects the initial fetch's cause.
-        coEvery { repository.getMessagesPaged("s1", any(), any()) } returns
+        coEvery { repository.getMessagesPaged("s1", any(), any(), any()) } returns
             Result.failure(java.io.IOException("HTTP 503"))
         coEvery { repository.getMessagesPagedUnanchored("s1", any(), any(), any()) } returns
             Result.failure(kotlinx.coroutines.CancellationException("canceled"))
@@ -1270,7 +1270,7 @@ class MessageActionsTest {
         // re-throws, so the coroutine cancels cleanly WITHOUT emitting
         // UiEvent.Error (which would mislead the user on a routine ViewModel
         // clear). Pins the §history-load-fix round-1 contract.
-        coEvery { repository.getMessagesPaged("s1", any(), any()) } throws
+        coEvery { repository.getMessagesPaged("s1", any(), any(), any()) } throws
             kotlinx.coroutines.CancellationException("viewModel cleared")
         store.mutateChat { it.copy(currentSessionId = "s1") }
 
@@ -1296,7 +1296,7 @@ class MessageActionsTest {
         // any mutation POST, so "don't auto-retry mutation POST" is enforced
         // structurally. This test pins that surface so a future edit cannot
         // silently introduce a mutation call here.
-        coEvery { repository.getMessagesPaged("s1", any(), any()) } returns
+        coEvery { repository.getMessagesPaged("s1", any(), any(), any()) } returns
             Result.success(MessagesPage(emptyList(), null))
         coEvery { repository.getSessionTodos("s1") } returns Result.success(emptyList())
         store.mutateChat { it.copy(currentSessionId = "s1") }
@@ -1305,7 +1305,7 @@ class MessageActionsTest {
         advanceUntilIdle()
 
         // Only read-side calls observed.
-        coVerify(atLeast = 1) { repository.getMessagesPaged("s1", any(), any()) }
+        coVerify(atLeast = 1) { repository.getMessagesPaged("s1", any(), any(), any()) }
         coVerify(atLeast = 1) { repository.getSessionTodos("s1") }
         // No mutation POST (sendMessage) was issued — not auto-retried, not
         // even called once. (mockk relaxed → an unstubbed sendMessage would

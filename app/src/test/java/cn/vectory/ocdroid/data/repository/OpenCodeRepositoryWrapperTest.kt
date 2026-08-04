@@ -203,7 +203,7 @@ class OpenCodeRepositoryWrapperTest {
     fun `getMessagesPaged surfaces HTTP failure as IOException`() = runBlocking {
         server.enqueue(MockResponse().setResponseCode(500))
 
-        val result = repository.getMessagesPaged("session-1", limit = 50, before = null)
+        val result = repository.getMessagesPaged("session-1", limit = 50, before = null, token = repository.captureSlimCommitToken())
 
         assertTrue(result.isFailure)
         val ex = result.exceptionOrNull()
@@ -218,7 +218,7 @@ class OpenCodeRepositoryWrapperTest {
     fun `getMessagesPaged returns empty page when list body is empty`() = runBlocking {
         server.enqueue(jsonResponse("[]"))
 
-        val result = repository.getMessagesPaged("session-1", limit = 50, before = null)
+        val result = repository.getMessagesPaged("session-1", limit = 50, before = null, token = repository.captureSlimCommitToken())
 
         assertTrue(result.isSuccess)
         val page = result.getOrThrow()
