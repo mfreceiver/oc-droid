@@ -86,7 +86,7 @@ class StatusAggregatorImplTest {
         // AuthorityOps into the store; the READ side (globalState / globalBusy /
         // statusByKey / stateAtNow) derives from authority.
         val store = SharedStateStore()
-        val fetchService = StatusFetchService(repository)
+        val fetchService = StatusFetchService(repository, repository)
         return StatusAggregatorImpl(identityStore, store, fetchService, scope, clock)
     }
 
@@ -494,7 +494,7 @@ class StatusAggregatorImplTest {
         val aggregator = StatusAggregatorImpl(
             ConnectionIdentityStore().also { it.bind(fp, "/work", "endpoint-A") },
             SharedStateStore(),
-            StatusFetchService(repo),
+            StatusFetchService(repo, repo),
             backgroundScope,
             clock = { now },
         )
@@ -526,7 +526,7 @@ class StatusAggregatorImplTest {
         val aggregator = StatusAggregatorImpl(
             ConnectionIdentityStore().also { it.bind(fp, "/work", "endpoint-A") },
             SharedStateStore(),
-            StatusFetchService(repo),
+            StatusFetchService(repo, repo),
             backgroundScope,
             clock = { now },
         )
@@ -608,7 +608,7 @@ class StatusAggregatorImplTest {
         val aggregator = StatusAggregatorImpl(
             store,
             SharedStateStore(),
-            StatusFetchService(repo),
+            StatusFetchService(repo, repo),
             kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.Unconfined),
             clock = { 100L },
         )
@@ -1094,7 +1094,7 @@ class StatusAggregatorImplTest {
         coEvery { repo.getSessionStatus() } returns Result.success(emptyMap())
         val identityStore = ConnectionIdentityStore().also { it.bind(fp, "/work", "endpoint-A") }
         val store = SharedStateStore()
-        val fetchService = StatusFetchService(repo)
+        val fetchService = StatusFetchService(repo, repo)
         var clock = 0L
         val aggregator = StatusAggregatorImpl(
             identityStore, store, fetchService,
@@ -1131,7 +1131,7 @@ class StatusAggregatorImplTest {
         coEvery { repo.getSessionStatus() } returns Result.success(emptyMap())
         val identityStore = ConnectionIdentityStore().also { it.bind(fp, "/work", "endpoint-A") }
         val store = SharedStateStore()
-        val fetchService = StatusFetchService(repo)
+        val fetchService = StatusFetchService(repo, repo)
         var clock = 0L
         val aggregator = StatusAggregatorImpl(
             identityStore, store, fetchService,
