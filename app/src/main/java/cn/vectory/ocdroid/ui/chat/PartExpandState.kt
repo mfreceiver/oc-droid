@@ -3,6 +3,7 @@ package cn.vectory.ocdroid.ui.chat
 import cn.vectory.ocdroid.data.model.MessageWithParts
 import cn.vectory.ocdroid.data.model.Part
 import cn.vectory.ocdroid.data.repository.ExpandOutcome
+import cn.vectory.ocdroid.data.repository.MessageRepository
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.data.repository.isThinPlaceholder
 import cn.vectory.ocdroid.data.repository.mergeFullBatchIntoLocal
@@ -200,7 +201,7 @@ data class ExpandPartsOutcome(
  * debug force-off escape hatch (ESP key `omitted_content_card=false`).
  */
 class ExpandPartsUseCase(
-    private val repository: OpenCodeRepository,
+    private val repository: MessageRepository,
 ) {
     /**
      * @param sessionId target session id.
