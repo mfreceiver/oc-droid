@@ -1,6 +1,6 @@
 package cn.vectory.ocdroid.ui.controller
 
-import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.data.repository.SessionRepository
 import cn.vectory.ocdroid.di.AppLifecycleMonitor
 import cn.vectory.ocdroid.di.UiApplicationScope
 import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
@@ -38,7 +38,7 @@ import javax.inject.Singleton
 class SessionMetadataPoller @Inject constructor(
     private val appLifecycleMonitor: AppLifecycleMonitor,
     @UiApplicationScope private val scope: CoroutineScope,
-    private val repository: OpenCodeRepository,
+    private val repository: SessionRepository,
     private val store: SharedStateStore,
     private val identityStore: ConnectionIdentityStore,
 ) {

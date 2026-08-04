@@ -1,7 +1,7 @@
 package cn.vectory.ocdroid.ui.controller
 
 import cn.vectory.ocdroid.data.model.QuestionRequest
-import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.data.repository.InteractionRepository
 import cn.vectory.ocdroid.di.AppLifecycleMonitor
 import cn.vectory.ocdroid.ui.SessionListState
 import cn.vectory.ocdroid.ui.SharedEffectBus
@@ -283,7 +283,7 @@ class ForegroundCatchUpController(
      * exercised directly by [ForegroundCatchUpControllerTest].
      */
     fun catchUpPendingQuestionsAllWorkdirs(
-        repository: OpenCodeRepository,
+        repository: InteractionRepository,
         workdirs: List<String>,
         tag: String = "ForegroundCatchUp",
     ) {

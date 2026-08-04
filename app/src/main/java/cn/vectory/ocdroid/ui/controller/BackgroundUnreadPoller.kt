@@ -2,7 +2,8 @@ package cn.vectory.ocdroid.ui.controller
 
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SessionStatus
-import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.data.repository.ConnectionRepository
+import cn.vectory.ocdroid.data.repository.SessionRepository
 import cn.vectory.ocdroid.ui.MainViewModelTimings
 import cn.vectory.ocdroid.ui.SharedStateStore
 import cn.vectory.ocdroid.util.SettingsManager
@@ -87,7 +88,8 @@ internal fun idleNotificationKey(
  */
 @Singleton
 class BackgroundUnreadPoller internal constructor(
-    private val repository: OpenCodeRepository,
+    private val sessionRepository: SessionRepository,
+    private val connectionRepository: ConnectionRepository,
     private val settingsManager: SettingsManager,
     private val store: SharedStateStore,
     private val clock: () -> Long,
@@ -96,12 +98,14 @@ class BackgroundUnreadPoller internal constructor(
 ) {
     @Inject
     constructor(
-        repository: OpenCodeRepository,
+        sessionRepository: SessionRepository,
+        connectionRepository: ConnectionRepository,
         settingsManager: SettingsManager,
         store: SharedStateStore,
         appLifecycleMonitor: AppLifecycleMonitor,
     ) : this(
-        repository,
+        sessionRepository,
+        connectionRepository,
         settingsManager,
         store,
         { System.currentTimeMillis() },
@@ -161,30 +165,30 @@ class BackgroundUnreadPoller internal constructor(
         // repository boundary (cancellation rethrown), and `.getOrElse` on
         // the resulting Result therefore never sees a CancellationException.
         if (!identityValid()) return UnreadPollResult.Aborted
-        val sessions = repository.getSessions(MainViewModelTimings.sessionFullLoadLimit)
+        val sessions = sessionRepository.getSessions(MainViewModelTimings.sessionFullLoadLimit)
             .getOrElse { return UnreadPollResult.Aborted }
         if (!identityValid()) return UnreadPollResult.Aborted
         val roots = sessions.filter { it.parentId == null }
-        val hydration = loadCompleteSessionTrees(repository, roots, shouldContinue = ::identityValid)
+        val hydration = loadCompleteSessionTrees(sessionRepository, roots, shouldContinue = ::identityValid)
         if (!identityValid()) return UnreadPollResult.Aborted
         // T-R1 (slimapi R1): slim mode routes status through per-workdir slim
         // endpoint (getSlimapiSessionsStatus) instead of legacy getSessionStatus;
         // active-session ids are digest-relay-owned in slim mode (skip the
         // legacy getActiveSessionIds, preserve store snapshot → null fallback).
-        val statuses = if (repository.usesSlimStatusFanOut) {
+        val statuses = if (connectionRepository.usesSlimStatusFanOut) {
             loadSlimSessionStatus(sessions, hydration.childrenByParent)
                 .getOrElse { return UnreadPollResult.Aborted }
         } else {
-            repository.getSessionStatus().getOrElse { return UnreadPollResult.Aborted }
+            sessionRepository.getSessionStatus().getOrElse { return UnreadPollResult.Aborted }
         }
         if (!identityValid()) return UnreadPollResult.Aborted
-        val activeIds = if (repository.usesSlimStatusFanOut) {
+        val activeIds = if (connectionRepository.usesSlimStatusFanOut) {
             // Slim: activity is digest-relay-owned; skip the legacy endpoint
             // and fall back to the existing store snapshot (null → fail-closed
             // in the commit below matches intersected existing activeSessionIds).
             null
         } else {
-            repository.getActiveSessionIds().getOrNull()
+            sessionRepository.getActiveSessionIds().getOrNull()
         }
         if (!identityValid()) return UnreadPollResult.Aborted
         val children = hydration.childrenByParent
@@ -306,9 +310,9 @@ class BackgroundUnreadPoller internal constructor(
 
     /**
      * T-R1 (slimapi R1): slim-mode per-workdir status fetch. Replaces the
-     * legacy [OpenCodeRepository.getSessionStatus] bulk call — derives the
+     * legacy [SessionRepository.getSessionStatus] bulk call — derives the
      * distinct workdirs from the already-loaded sessions+children tree and
-     * issues one concurrent [OpenCodeRepository.getSlimapiSessionsStatus]
+     * issues one concurrent [SessionRepository.getSlimapiSessionsStatus]
      * per directory. Fail-closed: any per-directory failure propagates as
      * [Result.failure], matching the legacy fail-closed semantics.
      */
@@ -322,7 +326,7 @@ class BackgroundUnreadPoller internal constructor(
         if (directories.isEmpty()) return@runSuspendCatching emptyMap()
         coroutineScope {
             val results = directories.map { dir ->
-                async { repository.getSlimapiSessionsStatus(dir) }
+                async { sessionRepository.getSlimapiSessionsStatus(dir) }
             }.awaitAll()
             buildMap { results.forEach { putAll(it.getOrThrow()) } }
         }
