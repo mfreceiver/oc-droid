@@ -32,7 +32,6 @@ import cn.vectory.ocdroid.data.repository.MessagesPage
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.ui.controller.CachedSessionWindow
 import cn.vectory.ocdroid.util.DebugLog
-import cn.vectory.ocdroid.util.SettingsManager
 import cn.vectory.ocdroid.ui.StreamOwnedState
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -45,7 +44,6 @@ internal fun launchLoadMessages(
     slices: SliceFlows,
     sessionId: String,
     resetLimit: Boolean = true,
-    settingsManager: SettingsManager? = null,
     onCacheWindow: (sessionId: String, window: CachedSessionWindow) -> Unit = { _, _ -> },
     emit: EventEmitter = EventEmitter { },
     /**

@@ -184,7 +184,7 @@ class SessionSyncCoordinator(
             val currentSessionId = slices.chat.value.currentSessionId
             val gen = gapReconcileCtrl.currentEpoch()
             val connectedOnceBefore = gapReconcileCtrl.sseSyncStateSnapshot().connectedOnce
-            val decisions = gapReconcileCtrl.onServerConnected(currentSessionId, gen, connectedOnceBefore)
+            val decisions = gapReconcileCtrl.onServerConnected(currentSessionId, gen)
             applySseSyncDecisions(decisions)
 
             if (connectedOnceBefore) {

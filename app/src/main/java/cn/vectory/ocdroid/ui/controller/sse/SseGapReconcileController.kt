@@ -108,14 +108,11 @@ internal class SseGapReconcileController(
      * returns the [SseSyncDecision]s for the caller to apply as side effects.
      *
      * @param gen the current connection epoch (from [ConnectionIdentityStore]).
-     * @param connectedOnceBefore whether [sseSyncState.connectedOnce] was true
-     *   before this reconnect (controls decision emission).
      * @return the list of decisions the caller should execute.
      */
     fun onServerConnected(
         currentSessionId: String?,
         gen: Long,
-        connectedOnceBefore: Boolean,
     ): List<SseSyncDecision> {
         val trigger = SseReconnectTrigger.ServerConnected(currentSessionId, gen)
         val (nextState, decisions) = reconcileGap(sseSyncState, trigger)
