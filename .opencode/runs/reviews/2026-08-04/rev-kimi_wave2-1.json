@@ -1,0 +1,64 @@
+{
+  "bundle_id": "release-v0.20.2-2026-08-04",
+  "reviewer": "rev-kimi",
+  "scope": "wave2-1",
+  "date": "2026-08-04",
+  "verdict": "CONCERNS",
+  "must_fix_before_release": "NONE",
+  "completion_assessment": "可进入 patch release v0.20.2 — wave2-1 god-object core split 4 lane 全部集成；rev-gpt 过程评审 CONCERNS 与 rev-kimi 终审 🟠 fast-follow 均已在分支内闭环，无 release-blocking 项。本机 merge --no-ff 后 check.sh + koverVerify 双绿。",
+  "diff_base": "36b9da78",
+  "diff_head": "61b3db1b",
+  "merge_commit": "20d9b41a",
+  "branch": "wave2/split",
+  "version_target": "0.20.2",
+  "score": null,
+  "blocking_issues": [],
+  "review_arc": {
+    "lanes": [
+      { "id": "L1", "scope": "Repository Gateway split (Stage A facade + internal delegation)", "head": "8ba9f17f" },
+      { "id": "L2", "scope": "AppCore orchestrator extraction (Pattern B constructor injection)", "head": "c0544b86" },
+      { "id": "L3", "scope": "SessionSyncCoordinator state-machine modularization", "head": "58c8a398" },
+      { "id": "L4", "scope": "ChatMessageList behavior-preserving split (pipeline single-sourcing + Compose baseline + recomposition key-dimension tests)", "head": "61b3db1b" }
+    ],
+    "stats": { "files_changed": 27, "insertions": 4247, "deletions": 4408, "net_loc": -161, "hubs_split": 4 }
+  },
+  "rev_gpt_process_review_summary": {
+    "stage": "过程评审 (per-lane, during wave2-1)",
+    "verdict_raised": "CONCERNS",
+    "evidence_commit": "bf80eb4a refactor(wave2-1-l2): address rev-gpt CONCERNS (visibility narrowing + Hilt exception kdoc)",
+    "concerns_addressed": [
+      "Lane 1->2 可见性收窄 (visibility narrowing) — Gateway 内部化后的访问边界收紧",
+      "Hilt 注入异常路径 kdoc 补全 (constructor injection Pattern B 的异常契约文档化)"
+    ],
+    "disposition": "两类 CONCERNS 均在 wave2/split 分支内以 follow-up commit 闭环，未遗留到 release。"
+  },
+  "rev_kimi_gate_review_summary": {
+    "stage": "终审 (gate, before release v0.20.2)",
+    "verdict_raised": "🟠 CONCERNS (fast-follow)",
+    "primary_finding": "Lane 4 缺重组 (recomposition) 维度的 key-dimension 回归覆盖：纯 helper 与单次 composition 基线无法捕获『remember key 元组被漏掉一个维度』这类静默陈旧 bug（remember 缓存会跳过重算而非报错）。",
+    "fast_follow_commits": [
+      "c0bfed02 test(wave2-1-l4): add Compose-level baseline (createComposeRule mirror invariant, 5 scenarios)",
+      "52f8716a test(wave2-1-l4): add recomposition key-dimension tests (close rev-kimi 🟠) — 3 recomposition-based tests: streamingPartTexts 全 Map 变更 / messages 追加 / sessionDiff 追加",
+      "61b3db1b merge(wave2-1): integrate Lane 4 recomposition key-dimension tests (rev-kimi 🟠 fast-follow)"
+    ],
+    "key_invariants_pinned": [
+      "streamingPartTexts 须以全 Map (非 .keys set equality) 入 key 元组 — 否则 token delta 不触发重算",
+      "reversedMessages / messages 须在 key 元组 — 否则新消息不反映",
+      "sessionDiff 须在 key 元组 — 否则 session-diff key 不出现于 lazyColumnKeys"
+    ],
+    "disposition": "🟠 以 fast-follow 形式在分支内补齐重组维度测试 (共 8 tests: 5 single-composition + 3 recomposition)，全部 PASS，🟠 关闭。"
+  },
+  "gate_evidence": {
+    "check_sh": "exit 0 (compileDebugKotlin + detekt sole-writer gate + testDebugUnitTest, post-merge on main @ 20d9b41a)",
+    "kover_verify": "exit 0 (koverVerify, post-merge on main @ 20d9b41a)"
+  },
+  "high_risk_points_verified": {
+    "l1_facade_zero_state": "6 Gateway 零状态不变量保持（无 @Volatile/lock/mutable field）；OCR 2240->1339 LOC 薄 facade；冻结符号 (SlimCommitToken/StaleSlimCommitException/DEFAULT_SERVER/3-arg ctor) 完整",
+    "l2_pattern_b": "AppCore orchestrators Pattern B 构造器注入；rev-gpt CONCERNS (可见性+Hilt kdoc) 已闭环",
+    "l3_ssc_modularization": "SessionSyncCoordinator 状态机模块化，sse/ 子簇 (DeltaFlushScheduler/QuestionReconcileWorker/SseDiagLogger/SseGapReconcileController/StatusFanOutApplier) 提取",
+    "l4_pipeline_single_sourcing": "RenderPipeline 一次性产出 renderBlocks + lazyColumnKeys，消除 M4->L2 key drift 窗口；M3 保留独立 remember (set equality)；rev-kimi 🟠 重组维度覆盖已补齐"
+  },
+  "known_gap": "本文件为评审摘要归档 (summary)，rev-gpt 过程评审与 rev-kimi 终审的逐条 finding 详细 JSON（含原始 severity 分级、逐 finding 上下文）由当时 task session 持有，未随分支提交；此处仅沉淀可从 git 历史实证的结论 (verdict / must_fix / 闭环 commit / 门禁证据)。如需逐条明细，回溯 wave2-1 评审 task session。",
+  "notes": "本 JSON 由 release orchestrator 在 v0.20.2 发版流程中补归档，修复『双层评审已发生但评审 JSON 未归档』的纪律缺失。verdict=CONCERNS 反映评审过程中确有 CONCERNS/🟠 提出；must_fix_before_release=NONE 反映所有 release-blocking 项均在分支内闭环、发版可放行。",
+  "timestamp": "2026-08-04"
+}
