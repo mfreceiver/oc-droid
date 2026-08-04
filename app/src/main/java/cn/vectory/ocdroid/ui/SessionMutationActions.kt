@@ -11,7 +11,8 @@ package cn.vectory.ocdroid.ui
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.ComposerImageAttachment
 import cn.vectory.ocdroid.data.model.Message
-import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.data.repository.InteractionRepository
+import cn.vectory.ocdroid.data.repository.SessionRepository
 import cn.vectory.ocdroid.ui.controller.ControllerEffect
 import cn.vectory.ocdroid.ui.controller.cleanScrollStateForSubtree
 import cn.vectory.ocdroid.ui.controller.removeSessions
@@ -23,7 +24,7 @@ import kotlinx.coroutines.launch
 
 internal fun launchCreateSession(
     scope: CoroutineScope,
-    repository: OpenCodeRepository,
+    repository: SessionRepository,
     slices: SliceFlows,
     title: String?,
     onSelectSession: (String) -> Unit,
@@ -52,7 +53,7 @@ internal fun launchCreateSession(
 
 internal fun launchForkSession(
     scope: CoroutineScope,
-    repository: OpenCodeRepository,
+    repository: InteractionRepository,
     slices: SliceFlows,
     sessionId: String,
     messageId: String?,
@@ -86,7 +87,7 @@ internal fun launchForkSession(
  */
 internal fun launchRenameSession(
     scope: CoroutineScope,
-    repository: OpenCodeRepository,
+    repository: SessionRepository,
     slices: SliceFlows,
     sessionId: String,
     title: String,
@@ -107,7 +108,7 @@ internal fun launchRenameSession(
 
 internal fun launchSetSessionArchived(
     scope: CoroutineScope,
-    repository: OpenCodeRepository,
+    repository: SessionRepository,
     slices: SliceFlows,
     settingsManager: SettingsManager,
     sessionId: String,
@@ -228,7 +229,7 @@ internal fun launchSetSessionArchived(
 
 internal fun launchDeleteSession(
     scope: CoroutineScope,
-    repository: OpenCodeRepository,
+    repository: SessionRepository,
     slices: SliceFlows,
     settingsManager: SettingsManager,
     sessionId: String,
@@ -311,7 +312,7 @@ internal fun launchDeleteSession(
 
 internal fun launchSendMessage(
     scope: CoroutineScope,
-    repository: OpenCodeRepository,
+    repository: InteractionRepository,
     slices: SliceFlows,
     sessionId: String,
     text: String,

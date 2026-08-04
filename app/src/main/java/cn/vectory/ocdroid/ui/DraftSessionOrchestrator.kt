@@ -3,7 +3,7 @@ package cn.vectory.ocdroid.ui
 import androidx.annotation.MainThread
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.Session
-import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.data.repository.SessionRepository
 import cn.vectory.ocdroid.di.UiApplicationScope
 import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.SettingsManager
@@ -31,7 +31,7 @@ import javax.inject.Singleton
 @Singleton
 internal class DraftSessionOrchestrator @Inject constructor(
     private val store: SharedStateStore,
-    private val repository: OpenCodeRepository,
+    private val repository: SessionRepository,
     private val settingsManager: SettingsManager,
     private val effectBus: SharedEffectBus,
     @UiApplicationScope private val appScope: CoroutineScope,

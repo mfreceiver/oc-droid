@@ -25,7 +25,10 @@ import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.data.model.RevertCutoff
 import cn.vectory.ocdroid.data.model.RevertCutoffState
 import cn.vectory.ocdroid.data.model.toCacheEntry
+import cn.vectory.ocdroid.data.repository.CatalogRepository
+import cn.vectory.ocdroid.data.repository.InteractionRepository
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.data.repository.SessionRepository
 import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.SettingsManager
 import cn.vectory.ocdroid.util.WorkdirPaths
@@ -214,7 +217,7 @@ internal fun launchLoadSessionDiff(
  */
 internal fun launchLoadChildSessions(
     scope: CoroutineScope,
-    repository: OpenCodeRepository,
+    repository: SessionRepository,
     slices: SliceFlows,
     sessionId: String,
     tag: String,
@@ -309,7 +312,7 @@ internal fun launchLoadChildSessions(
  */
 internal fun launchLoadPendingQuestions(
     scope: CoroutineScope,
-    repository: OpenCodeRepository,
+    repository: InteractionRepository,
     slices: SliceFlows,
     directory: String?,
     tag: String,
@@ -401,7 +404,7 @@ internal fun launchLoadPendingPermissions(
  */
 internal fun launchLoadAgents(
     scope: CoroutineScope,
-    repository: OpenCodeRepository,
+    repository: CatalogRepository,
     slices: SliceFlows,
     tag: String,
 ) {

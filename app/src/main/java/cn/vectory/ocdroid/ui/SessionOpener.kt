@@ -1,6 +1,6 @@
 package cn.vectory.ocdroid.ui
 
-import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.data.repository.SessionRepository
 import cn.vectory.ocdroid.di.UiApplicationScope
 import cn.vectory.ocdroid.util.runSuspendCatching
 import cn.vectory.ocdroid.ui.controller.SessionSwitcher
@@ -20,7 +20,7 @@ import javax.inject.Singleton
 @Singleton
 internal class SessionOpener @Inject constructor(
     private val store: SharedStateStore,
-    private val repository: OpenCodeRepository,
+    private val repository: SessionRepository,
     @UiApplicationScope private val appScope: CoroutineScope,
     private val sessionSwitcher: SessionSwitcher,
 ) {

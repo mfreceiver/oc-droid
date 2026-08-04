@@ -271,7 +271,7 @@ class AppCore @Inject constructor(
     }
     internal val commandOrchestrator by lazy {
         CommandOrchestrator(
-            store, repository, settingsManager, effectBus, appScope,
+            store, repository, repository, settingsManager, effectBus, appScope,
             currentProfileId, composerController,
             draftSessionOrchestrator, sessionOpener,
         )

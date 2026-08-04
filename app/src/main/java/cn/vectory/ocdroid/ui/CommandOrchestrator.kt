@@ -1,7 +1,8 @@
 package cn.vectory.ocdroid.ui
 
 import cn.vectory.ocdroid.R
-import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.data.repository.InteractionRepository
+import cn.vectory.ocdroid.data.repository.SessionRepository
 import cn.vectory.ocdroid.di.UiApplicationScope
 import cn.vectory.ocdroid.util.SettingsManager
 import cn.vectory.ocdroid.ui.controller.ComposerController
@@ -24,7 +25,8 @@ import javax.inject.Singleton
 @Singleton
 internal class CommandOrchestrator @Inject constructor(
     private val store: SharedStateStore,
-    private val repository: OpenCodeRepository,
+    private val sessionRepository: SessionRepository,
+    private val interactionRepository: InteractionRepository,
     private val settingsManager: SettingsManager,
     private val effectBus: SharedEffectBus,
     @UiApplicationScope private val appScope: CoroutineScope,
@@ -68,7 +70,7 @@ internal class CommandOrchestrator @Inject constructor(
                 if (existing != null) {
                     composerController.setInputText("")
                     appScope.launch {
-                        repository.executeCommand(existing, cmd, arguments, directory = commandDirectory)
+                        interactionRepository.executeCommand(existing, cmd, arguments, directory = commandDirectory)
                             .onFailure { error ->
                                 effectBus.tryEmitUiEvent(classifyCommandPostError(error, cmd))
                             }
@@ -78,7 +80,7 @@ internal class CommandOrchestrator @Inject constructor(
                     draftSessionOrchestrator.materializeDraftSession(
                         capturedCommandText = capturedCommandText,
                         commandPost = { sid ->
-                            repository.executeCommand(sid, cmd, arguments, directory = commandDirectory)
+                            interactionRepository.executeCommand(sid, cmd, arguments, directory = commandDirectory)
                                 .onFailure { error ->
                                     effectBus.tryEmitUiEvent(classifyCommandPostError(error, cmd))
                                 }
@@ -101,7 +103,7 @@ internal class CommandOrchestrator @Inject constructor(
     private fun createSessionForEffect(title: String? = null) {
         launchCreateSession(
             scope = appScope,
-            repository = repository,
+            repository = sessionRepository,
             slices = store.slices,
             title = title,
             onSelectSession = { sessionOpener.selectSessionForEffect(it) },
@@ -114,7 +116,7 @@ internal class CommandOrchestrator @Inject constructor(
         val wd = workdir.trim()
         store.dispatch(AppAction.WorkdirDraftStarted(workdir = wd))
         appScope.launch {
-            repository.getSessionsForDirectory(wd)
+            sessionRepository.getSessionsForDirectory(wd)
                 .onSuccess { sessions ->
                     store.mutateSessionList {
                         it.copy(directorySessions = it.directorySessions + (wd to sessions))

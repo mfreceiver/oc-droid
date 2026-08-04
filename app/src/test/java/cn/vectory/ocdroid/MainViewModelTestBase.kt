@@ -214,7 +214,6 @@ abstract class MainViewModelTestBase {
         val sessionSwitcher = cn.vectory.ocdroid.ui.controller.SessionSwitcher(
             store = store,
             settingsManager = settingsManager,
-            repository = repository,
             effects = effectBus,
             currentProfileId = { hostProfileStore.currentProfile().id },
         )

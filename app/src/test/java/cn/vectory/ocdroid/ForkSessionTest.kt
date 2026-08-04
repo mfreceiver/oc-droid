@@ -131,7 +131,6 @@ class ForkSessionTest {
         val sessionSwitcher = cn.vectory.ocdroid.ui.controller.SessionSwitcher(
             store = store,
             settingsManager = settingsManager,
-            repository = repository,
             effects = effectBus,
             currentProfileId = { "test-fp" },
         )
