@@ -24,11 +24,14 @@ import cn.vectory.ocdroid.ui.controller.subtreeIds
 import cn.vectory.ocdroid.ui.controller.SessionSyncCoordinator
 import cn.vectory.ocdroid.ui.controller.SessionSwitcher
 // §Wave2.1-split-l2: orchestrator dependencies (Pattern B constructor injection).
+// §Wave2.1-split-l2: orchestrator dependencies (Pattern B — constructor
+// injection, NO interfaces). These are internal to the ui package.
 import cn.vectory.ocdroid.ui.CommandOrchestrator
 import cn.vectory.ocdroid.ui.DraftSessionOrchestrator
 import cn.vectory.ocdroid.ui.RefreshOrchestrator
 import cn.vectory.ocdroid.ui.SendOrchestrator
 import cn.vectory.ocdroid.ui.SessionOpener
+import androidx.annotation.MainThread
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
@@ -208,14 +211,42 @@ class AppCore @Inject constructor(
      */
     internal val processStatusPoller: cn.vectory.ocdroid.service.streaming.ProcessStatusPoller,
 ) {
-    // §Wave2.1-split-l2: 5 orchestrator dependencies created lazily from the
-    // same constructor-injected deps. `lazy` keeps the constructor signature
-    // unchanged (existing test code that constructs AppCore manually with
-    // positional args continues to compile). Orchestrator references are
-    // acyclic (Refresh → Send → Draft → ...), so lazy synchronization is safe.
-    // Thread-safety: `lazy` default mode is LazyThreadSafetyMode.SYNCHRONIZED;
-    // production access is single-threaded (Dispatchers.Main), so double-
-    // checked locking overhead is negligible.
+    /**
+     * §Wave2.1-split-l2 (rev-gpt APPROVED EXCEPTION): _lazy composition_ of the 5
+     * orchestrator dependencies, NOT Hilt constructor injection.
+     *
+     * ## Why lazy, not Hilt ctor injection (§2.2 Pattern B)
+     *
+     * The Wave2.1 architecture report §2.2 specifies Pattern B: orchestrator
+     * classes declare constructor deps via `@Inject constructor` and AppCore
+     * receives them as constructor-injected parameters. This is the target state.
+     *
+     * However, migrating AppCore's constructor signature would break existing
+     * test factories (MainViewModelTestBase.createCore, ForkSessionTest) that
+     * construct AppCore manually with positional args and do not go through Hilt.
+     * Those factories are outside the Wave2.1 write domain, so constructor
+     * injection of orchestrators is deferred.
+     *
+     * ## What this means for Hilt ownership
+     *
+     * The orchestrator classes retain `@Singleton @Inject constructor`
+     * annotations (they are Hilt-provisionable types, future-proof for
+     * Wave2.2). But in Wave2.1, AppCore does NOT obtain them via Hilt — it owns
+     * the instances via `lazy`, which calls the orchestrator constructors
+     * directly. This is runtime-safe because:
+     *   - The dependency graph is acyclic (Refresh → Send → Draft → Command).
+     *   - All deps required by orchestrator constructors are already available
+     *     as AppCore constructor-injected fields (same Singleton instances Hilt
+     *     would provide).
+     *   - Production access is single-threaded (Dispatchers.Main), so lazy
+     *     synchronization overhead is negligible.
+     *
+     * ## TODO(Wave2.2)
+     *
+     * Migrate test factories to allow full Hilt constructor injection of the 5
+     * orchestrators into AppCore. Then remove this `lazy` composition block and
+     * add the 5 params to AppCore's `@Inject constructor`.
+     */
     internal val sessionOpener by lazy { SessionOpener(store, repository, appScope, sessionSwitcher) }
     internal val refreshOrchestrator by lazy {
         RefreshOrchestrator(
@@ -316,7 +347,8 @@ class AppCore @Inject constructor(
     // invoke these as `core.<method>()`.
 
     /** Cross-domain: composer→chat→session creation. Routes to draft or existing. */
-    fun sendMessage() {
+    @MainThread
+    internal fun sendMessage() {
         val draftWorkdir = store.composerFlow.value.draftWorkdir
         val existingSessionId = store.chatFlow.value.currentSessionId
         val text = store.composerFlow.value.inputText.trim()
@@ -332,10 +364,10 @@ class AppCore @Inject constructor(
     }
 
     /** `/clear` and other slash commands. */
-    fun executeCommand(command: String, arguments: String) = commandOrchestrator.executeCommand(command, arguments)
+    internal fun executeCommand(command: String, arguments: String) = commandOrchestrator.executeCommand(command, arguments)
 
     /** nav → session-list → chat (deep-link path). */
-    fun openSessionFromDeepLink(sessionId: String) = sessionOpener.openSessionFromDeepLink(sessionId)
+    internal fun openSessionFromDeepLink(sessionId: String) = sessionOpener.openSessionFromDeepLink(sessionId)
 
     /**
      * Full-stack local reset. Retained as a thin 1-line delegate — HostViewModel

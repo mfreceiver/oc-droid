@@ -36,7 +36,7 @@ import javax.inject.Singleton
  * ~450 LOC extracted from AppCoreOrchestration.kt.
  */
 @Singleton
-class RefreshOrchestrator @Inject constructor(
+internal class RefreshOrchestrator @Inject constructor(
     private val store: SharedStateStore,
     private val repository: OpenCodeRepository,
     private val settingsManager: SettingsManager,

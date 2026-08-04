@@ -28,7 +28,7 @@ import javax.inject.Singleton
  * ~350 LOC extracted from AppCoreOrchestration.kt.
  */
 @Singleton
-class SendOrchestrator @Inject constructor(
+internal class SendOrchestrator @Inject constructor(
     private val store: SharedStateStore,
     private val repository: OpenCodeRepository,
     private val settingsManager: SettingsManager,

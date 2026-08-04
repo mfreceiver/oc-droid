@@ -29,7 +29,7 @@ import javax.inject.Singleton
  * ~330 LOC extracted from AppCoreOrchestration.kt.
  */
 @Singleton
-class DraftSessionOrchestrator @Inject constructor(
+internal class DraftSessionOrchestrator @Inject constructor(
     private val store: SharedStateStore,
     private val repository: OpenCodeRepository,
     private val settingsManager: SettingsManager,

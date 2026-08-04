@@ -18,7 +18,7 @@ import javax.inject.Singleton
  * No orchestrator depends on this one (leaf in the dep graph).
  */
 @Singleton
-class SessionOpener @Inject constructor(
+internal class SessionOpener @Inject constructor(
     private val store: SharedStateStore,
     private val repository: OpenCodeRepository,
     @UiApplicationScope private val appScope: CoroutineScope,
