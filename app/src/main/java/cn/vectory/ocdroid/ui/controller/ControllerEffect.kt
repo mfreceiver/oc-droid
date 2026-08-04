@@ -135,8 +135,7 @@ sealed class ControllerEffect {
     /**
      * T11 round-2 (oracle D1 — cache-coupled non-focus resync): write a
      * non-focus RESYNC result into the in-memory `sessionWindowCache`
-     * owned by [SessionSwitcher]. Emitted by
-     * [SessionSyncCoordinator.applyReconcileResult] when a RESYNC
+     * owned by [SessionSwitcher]. Emitted when a RESYNC
      * reconcile produced items for a session that is NOT currently open
      * (so a later switchTo finds them without a re-fetch). Cache
      * eviction (via [EvictSession]) clears the corresponding

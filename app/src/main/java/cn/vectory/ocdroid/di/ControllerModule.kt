@@ -262,11 +262,11 @@ object ControllerModule {
      *
      * # triggerSinceFetch wiring (S2 — AUTHORITATIVE)
      *
-     * `auth=true` → [SessionSyncCoordinator.ReconcileMode.RESYNC] (the
+     * `auth=true` → RESYNC (the
      * resync sweep is authoritative: `isAuthoritativeSlimMerge` returns true
      * for RESYNC mode → `MessagesMerged(authoritative=true)` → the fetched
      * content is the final view, clearing any stale streamOwned overlay).
-     * `auth=false` → [SessionSyncCoordinator.ReconcileMode.DIGEST_FOCUS]
+     * `auth=false` → DIGEST_FOCUS
      * (skeleton merge — preserves streamOwned so an in-flight token stream
      * keeps its ownership).
      *
