@@ -1,0 +1,57 @@
+{
+  "bundle_id": "slimapi-p3-2026-08-05",
+  "branch": "feature/slimapi-p3",
+  "scope": "Session-list refresh fan-out optimization (~27 -> <=3 requests)",
+  "reviewer": "rev-ds",
+  "review_date": "2026-08-05",
+  "commits_reviewed": ["24ad5734", "af684782", "03f1dc3d", "d8d61b44"],
+  "diff_scope": "git diff main..HEAD (16 files, +678/-335)",
+  "rounds": [
+    {
+      "round": 1,
+      "verdict": "REQUEST-CHANGES",
+      "must_close": [
+        "X-Complete=false -> empty tree + 2s no-backoff sweep = ~30 req/min infinite storm (SessionTreeHydrator.kt:59-61)",
+        "gai-zao A not slim-gated: global dir-less /question is sidecar aggregation behavior; legacy direct mode scopes to process.cwd() -> silent P1-9 regression for legacy multi-workdir users",
+        "bulk tree path zero direct unit tests (coStubBulkTree defined but unused)"
+      ],
+      "nits": ["single-flight @Volatile Boolean non-atomic", "QuestionReconcileWorker kdoc falsehood (race-window preservation)", "gai-zao C claim inaccurate"]
+    },
+    {
+      "round": 2,
+      "verdict": "APPROVE-WITH-NITS",
+      "note": "All 3 round-1 must-close CLOSED. Residuals in legacy fallback path only.",
+      "residuals": [
+        {"sev": "orange", "id": "R1", "item": "legacy foreground fan-out directory set narrowed (dropped directorySessions.keys + normalizeDirectory)"},
+        {"sev": "yellow", "id": "R2", "item": "legacy foreground fan-out concurrent->serial (N*x latency)"},
+        {"sev": "yellow", "id": "R3", "item": "coStubBulkTree dead code"},
+        {"sev": "yellow", "id": "R4", "item": "QuestionReconcileWorker legacy branch untested"},
+        {"sev": "yellow", "id": "R5", "item": "worker legacy empty-dirs behavior delta (preserve vs clear)"}
+      ]
+    },
+    {
+      "round": 3,
+      "verdict": "APPROVE (clean)",
+      "note": "All round-2 residuals CLOSED (R1-R5). No new regression introduced by d8d61b44. Test count reconciles precisely (4488 @Test annotations)."
+    }
+  ],
+  "dimensions": {
+    "correctness": "PASS - fan-out collapse equivalent (single global + local filter/merge = original N calls); session-tree parentId grouping correct for nested/orphan/duplicate; X-Complete=false -> legacy BFS fallback (storm-free); generation gate + coalescing preserved",
+    "request_reduction": "PASS - cold-start ~27 -> <=3 (1x /question global + 1x /slimapi/sessions?roots=false + 1x /slimapi/sessions/status); no residual fan-out; legacy request count unchanged",
+    "discipline": "PASS - legacy fallback fully preserved (getChildren route + hydrateRoot/legacyBfsLoad + computeQuestionFanOutWorkdirs + concurrent per-dir launch); cold-start backfill semantics preserved (SSE no backlog -> single global pull); SSE relay unchanged",
+    "contract": "PASS - X-Slimapi-Version:2 auto-injected by interceptor for /slimapi/ (no manual); /question carries no version header, no dir; getSlimapiSessions(roots=false) conforms to v2-contract"
+  },
+  "final_verdict": "APPROVE (clean)",
+  "completion_assessment": "merge-ready for the planned patch release. Slim fan-out goal achieved; legacy path byte-for-byte faithful to pre-P3 (except documented intentional preserve-on-empty deviation in QuestionReconcileWorker). No must-fix items remain.",
+  "out_of_scope_preexisting": [
+    "ForegroundSessionTreeHydrator.request (SessionTreeHydrator.kt) + SessionListActions.kt call getSessionStatus() unconditionally (runs legacy status even in slim mode, lacks turn merge) - pre-existing, not introduced by this PR",
+    "ConnectionCoordinator reconnect does getSessionsForDirectory workdir fan-out - pre-existing, outside the 27-request profile"
+  ],
+  "check_sh": "exit 0 (compile + detekt + testDebugUnitTest, 4488 tests, 3 skipped) - verified by fixer each commit step; rev-ds could not run in read-only session but static reconciliation of @Test counts precise",
+  "audit": {
+    "orchestrator": "glm-5.2",
+    "fixer_rounds": "fixer-clm x3 (impl, r1-fixes, r2-nits)",
+    "review_rounds": "rev-ds x3 (REQUEST-CHANGES -> APPROVE-WITH-NITS -> APPROVE-clean)",
+    "explorers": "3 parallel (question paths, children+tree, session/status P2 coverage)"
+  }
+}
