@@ -117,4 +117,37 @@ class ServerCompatProfileTest {
         p.slimPerSessionStatusEndpointAvailable = true
         assertTrue(p.slimPerSessionStatusEndpointAvailable)
     }
+
+    // ── §slimapi-questions: /slimapi/questions capability flag ─────────────
+
+    @Test
+    fun `supportsSlimQuestions defaults true (fail-open so cold-start attempts the endpoint first)`() {
+        // Critical contract: a fresh profile MUST attempt the endpoint before
+        // falling back, otherwise a slim client connecting to a sidecar that
+        // DOES serve /slimapi/questions would silently regress to the buggy
+        // process.cwd()-scoped legacy fetch on cold-start.
+        assertTrue(ServerCompatProfile().supportsSlimQuestions)
+    }
+
+    @Test
+    fun `markSlimQuestionsUnsupported flips the bit sticky-false`() {
+        val p = ServerCompatProfile()
+        assertTrue("default true", p.supportsSlimQuestions)
+        p.markSlimQuestionsUnsupported()
+        assertFalse("flipped false after 404", p.supportsSlimQuestions)
+        // markSlimQuestionsSupported flips it back (first 200 after a re-probe).
+        p.markSlimQuestionsSupported()
+        assertTrue("flipped true on 200", p.supportsSlimQuestions)
+    }
+
+    @Test
+    fun `setSlimConnection resets supportsSlimQuestions to true so a newly-deployed sidecar is re-probed`() {
+        val p = ServerCompatProfile()
+        p.markSlimQuestionsUnsupported()
+        assertFalse("sticky-false after 404", p.supportsSlimQuestions)
+        // A reconfigure (newly-deployed sidecar that now serves the route)
+        // MUST re-probe — the bit resets to true.
+        p.setSlimConnection(true)
+        assertTrue("reset to true on reconfigure", p.supportsSlimQuestions)
+    }
 }

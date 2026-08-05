@@ -113,10 +113,12 @@ abstract class MainViewModelTestBase {
         // the relaxed mock auto-answers it, and explicit every blocks cause
         // MockK tracking issues with verify(exactly = N) in downstream tests.
         every { repository.isConnectionCaptureCurrent(any()) } returns true
-        // §rev-ds ISSUE 2: base test setup defaults to slim global question path.
-        // Tests that exercise the legacy per-dir path must explicitly override
-        // this to `false`.
+        // §rev-ds ISSUE 2 / §slimapi-questions: base test setup defaults to the
+        // slim question path — both the slim-connection flag AND the sidecar
+        // endpoint bit. Tests that exercise the legacy per-dir path must
+        // explicitly override these to `false`.
         every { repository.supportsGlobalQuestionFetch } returns true
+        every { repository.supportsSlimQuestions } returns true
         coEvery { repository.getSessions(any()) } returns Result.success(emptyList())
         coEvery { repository.getSessionsForDirectory(any(), any()) } returns Result.success(emptyList())
         coEvery { repository.getSessionStatus() } returns Result.success(emptyMap())
@@ -137,6 +139,18 @@ abstract class MainViewModelTestBase {
         coEvery { repository.getProvidersOrFailure() } returns Result.success(ProvidersResponse())
         coEvery { repository.getCommands() } returns Result.success(emptyList())
         coEvery { repository.getPendingQuestions(any()) } returns Result.success(emptyList())
+        // §slimapi-questions: default stub for the slim-questions endpoint path
+        // (slim-connection + endpoint bit both on per the stubs above). Returns
+        // an authoritative-empty Success so tests that don't care about pending
+        // questions see an empty full-replace (same effective behavior as the
+        // pre-slimapi-questions `getPendingQuestions(null) → empty` default).
+        coEvery { repository.getSlimapiQuestions(any()) } returns Result.success(
+            cn.vectory.ocdroid.data.repository.SlimAggregationOutcome.Success(
+                items = emptyList(),
+                authoritativeDirectories = null,
+                serverScope = null,
+            ),
+        )
     }
 
     @After

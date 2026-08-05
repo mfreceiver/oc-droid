@@ -157,7 +157,14 @@ class AppCoreDispatcherTest : MainViewModelTestBase() {
 
     @Test
     fun `dispatchSessionEffect handles LoadPendingQuestions and fans out`() = runTest {
-        coEvery { repository.getPendingQuestions(any()) } returns Result.success(emptyList())
+        io.mockk.every { repository.supportsSlimQuestions } returns true
+        coEvery { repository.getSlimapiQuestions(any()) } returns Result.success(
+            cn.vectory.ocdroid.data.repository.SlimAggregationOutcome.Success(
+                items = emptyList(),
+                authoritativeDirectories = null,
+                serverScope = null,
+            ),
+        )
         val core = newCore()
         // Seed a known workdir so the multi-workdir fan-out has at least one
         // directory to probe (settingsManager.currentWorkdir mock).
@@ -168,8 +175,9 @@ class AppCoreDispatcherTest : MainViewModelTestBase() {
         advanceUntilIdle()
 
         assertTrue(handled)
-        // §slimapi-p3: P3 fan-out collapse — single global call with null directory.
-        coVerify { repository.getPendingQuestions(null) }
+        // §slimapi-questions: slim path — single getSlimapiQuestions() call.
+        coVerify { repository.getSlimapiQuestions(any()) }
+        coVerify(exactly = 0) { repository.getPendingQuestions(null) }
     }
 
     @Test

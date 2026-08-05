@@ -1127,15 +1127,22 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
         assertFalse(core.chatFlow.value.isLoadingMessages)
     }
 
-    // §slimapi-p3: P3 fan-out collapse — single global /question=null call
-    // replaces the per-workdir fan-out. Verify the call fires once with null dir.
+    // §slimapi-questions: slim path — single getSlimapiQuestions() call
+    // replaces the per-workdir fan-out. Verify the call fires once.
     @Test
     fun `catchUpAfterDisconnectOrForeground fires a single global pending-questions catch-up call`() = runTest {
-        // §slimapi-p3: the workdir set no longer determines the fetch — one
-        // global getPendingQuestions(null) returns ALL questions.
+        // §slimapi-questions: the workdir set no longer determines the fetch — one
+        // getSlimapiQuestions() returns ALL questions.
+        every { repository.supportsSlimQuestions } returns true
         coEvery { repository.probeLatestMessageIdForCurrent(any()) } returns
             cn.vectory.ocdroid.data.repository.ProbeResult(ok = true, messageID = "anchor", updatedAt = 100L)
-        coEvery { repository.getPendingQuestions(any()) } returns Result.success(emptyList())
+        coEvery { repository.getSlimapiQuestions(any()) } returns Result.success(
+            cn.vectory.ocdroid.data.repository.SlimAggregationOutcome.Success(
+                items = emptyList(),
+                authoritativeDirectories = null,
+                serverScope = null,
+            ),
+        )
         val core = wire()
         core.writeChat {
             it.copy(currentSessionId = "s1", messages = listOf(Message(id = "anchor", role = "user")))
@@ -1148,8 +1155,9 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
         core.catchUpAfterDisconnectOrForeground("s1")
         advanceUntilIdle()
 
-        // Exactly ONE global call with null directory — no per-dir fan-out.
-        coVerify(exactly = 1) { repository.getPendingQuestions(null) }
+        // Exactly ONE slimapi call — no per-dir fan-out.
+        coVerify(exactly = 1) { repository.getSlimapiQuestions(any()) }
+        coVerify(exactly = 0) { repository.getPendingQuestions(null) }
         coVerify(exactly = 0) { repository.getPendingQuestions("/wA") }
     }
 

@@ -25,6 +25,7 @@ import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -443,12 +444,15 @@ class ForegroundCatchUpControllerTest {
         io.mockk.every { isInForeground } returns foregroundFlow
     }
 
-    // ── §slimapi-p3 / §rev-ds ISSUE 2: slim/legacy fan-out split ──
+    // ── §slimapi-p3 / §rev-ds ISSUE 2 → §slimapi-questions: slim/endpoint/fan-out split ──
 
     @Test
-    fun `slim path catchUpPendingQuestionsAllWorkdirs makes a single global call and merges results by id`() {
-        // §slimapi-p3: slim path — `supportsGlobalQuestionFetch=true` → single
-        // `getPendingQuestions(null)` returns ALL pending questions.
+    fun `slim path catchUpPendingQuestionsAllWorkdirs calls getSlimapiQuestions and never getPendingQuestions(null)`() {
+        // §slimapi-questions: slim path — `supportsGlobalQuestionFetch=true` AND
+        // `supportsSlimQuestions=true` → single `getSlimapiQuestions()` returns
+        // ALL pending questions across the configured workdir allowlist. The
+        // previous slim path called `getPendingQuestions(null)` which silently
+        // dropped pending questions whose workdir ≠ process.cwd().
         store.mutateSessionList {
             SessionListState(pendingQuestions = listOf(
                 QuestionRequest(id = "existing", sessionId = "s0", questions = emptyList())
@@ -456,11 +460,22 @@ class ForegroundCatchUpControllerTest {
         }
         val repository = mockk<OpenCodeRepository>(relaxed = true)
         io.mockk.every { repository.supportsGlobalQuestionFetch } returns true
-        coEvery { repository.getPendingQuestions(null) } returns Result.success(
-            listOf(
-                QuestionRequest(id = "qa", sessionId = "sa", questions = emptyList()),
-                QuestionRequest(id = "qb", sessionId = "sb", questions = emptyList()),
-            )
+        io.mockk.every { repository.supportsSlimQuestions } returns true
+
+        val incomingItems = listOf(
+            cn.vectory.ocdroid.data.model.SlimapiQuestionEntry(
+                id = "qa", sessionId = "sa", directory = "/workdir-a",
+            ),
+            cn.vectory.ocdroid.data.model.SlimapiQuestionEntry(
+                id = "qb", sessionId = "sb", directory = "/workdir-b",
+            ),
+        )
+        coEvery { repository.getSlimapiQuestions(any()) } returns Result.success(
+            cn.vectory.ocdroid.data.repository.SlimAggregationOutcome.Success(
+                items = incomingItems,
+                authoritativeDirectories = null,
+                serverScope = null,
+            ),
         )
 
         val testScope = TestScope(UnconfinedTestDispatcher())
@@ -477,13 +492,162 @@ class ForegroundCatchUpControllerTest {
         testScope.testScheduler.advanceUntilIdle()
 
         val ids = store.sessionListFlow.value.pendingQuestions.map { it.id }.toSet()
-        assertTrue("qa from global fetch", "qa" in ids)
-        assertTrue("qb from global fetch", "qb" in ids)
+        assertTrue("qa from slimapi fetch", "qa" in ids)
+        assertTrue("qb from slimapi fetch", "qb" in ids)
         assertTrue("existing preserved (gap-fill merge)", "existing" in ids)
-        // Exactly ONE global call — no per-dir fan-out.
-        coVerify(exactly = 1) { repository.getPendingQuestions(null) }
+        // §slimapi-questions bug fix: slim path MUST call getSlimapiQuestions,
+        // and MUST NEVER call getPendingQuestions(null) (that hid other-workdir
+        // pending questions on cold-start).
+        coVerify(exactly = 1) { repository.getSlimapiQuestions(any()) }
+        coVerify(exactly = 0) { repository.getPendingQuestions(null) }
         coVerify(exactly = 0) { repository.getPendingQuestions("/a") }
         coVerify(exactly = 0) { repository.getPendingQuestions("/b") }
+        testScope.cancel()
+    }
+
+    @Test
+    fun `slim path catchUpPendingQuestionsAllWorkdirs retains prior when sidecar scope directories is 0`() {
+        // §slimapi-questions: sidecar allowlist not ready (scope.directories==0)
+        // → getSlimapiQuestions returns Success(items=emptyList()) but the
+        // controller must NOT clear prior pending questions.
+        store.mutateSessionList {
+            SessionListState(pendingQuestions = listOf(
+                QuestionRequest(id = "pre-existing", sessionId = "s0", questions = emptyList())
+            ))
+        }
+        val repository = mockk<OpenCodeRepository>(relaxed = true)
+        io.mockk.every { repository.supportsGlobalQuestionFetch } returns true
+        io.mockk.every { repository.supportsSlimQuestions } returns true
+
+        coEvery { repository.getSlimapiQuestions(any()) } returns Result.success(
+            cn.vectory.ocdroid.data.repository.SlimAggregationOutcome.Success(
+                items = emptyList(),
+                authoritativeDirectories = null,
+                serverScope = cn.vectory.ocdroid.data.model.SlimapiScope(directories = 0),
+            ),
+        )
+
+        val testScope = TestScope(UnconfinedTestDispatcher())
+        val controller = ForegroundCatchUpController(
+            appLifecycleMonitor = stubMonitor(),
+            scope = testScope,
+            store = store,
+            settingsManager = settingsManager,
+            effects = effects,
+            clock = { nowMs },
+        )
+
+        controller.catchUpPendingQuestionsAllWorkdirs(repository = repository)
+        testScope.testScheduler.advanceUntilIdle()
+
+        // Without the scope==0 gate, the empty-items Success would gap-fill
+        // merge and drop "pre-existing". With the gate, it's retained.
+        val ids = store.sessionListFlow.value.pendingQuestions.map { it.id }.toSet()
+        assertTrue("pre-existing retained despite empty Success", "pre-existing" in ids)
+        coVerify(exactly = 1) { repository.getSlimapiQuestions(any()) }
+        coVerify(exactly = 0) { repository.getPendingQuestions(null) }
+        testScope.cancel()
+    }
+
+    @Test
+    fun `slim path with supportsSlimQuestions=false falls back to per-dir fan-out and never calls getSlimapiQuestions`() {
+        // §slimapi-questions: slim connection but the endpoint bit is sticky-false
+        // (older sidecar returned 404 once) → fan out per-dir with EXPLICIT
+        // directory headers, just like the legacy path. Never call the endpoint.
+        store.mutateSessionList {
+            SessionListState(pendingQuestions = listOf(
+                QuestionRequest(id = "existing", sessionId = "s0", questions = emptyList())
+            ))
+        }
+        val repository = mockk<OpenCodeRepository>(relaxed = true)
+        io.mockk.every { repository.supportsGlobalQuestionFetch } returns true
+        io.mockk.every { repository.supportsSlimQuestions } returns false
+        coEvery { repository.getPendingQuestions("/a") } returns Result.success(
+            listOf(QuestionRequest(id = "qa", sessionId = "sa", questions = emptyList()))
+        )
+        coEvery { repository.getPendingQuestions("/b") } returns Result.success(
+            listOf(QuestionRequest(id = "qb", sessionId = "sb", questions = emptyList()))
+        )
+
+        val testScope = TestScope(UnconfinedTestDispatcher())
+        val controller = ForegroundCatchUpController(
+            appLifecycleMonitor = stubMonitor(),
+            scope = testScope,
+            store = store,
+            settingsManager = settingsManager,
+            effects = effects,
+            clock = { nowMs },
+        )
+
+        controller.catchUpPendingQuestionsAllWorkdirs(repository = repository, workdirs = listOf("/a", "/b"))
+        testScope.testScheduler.advanceUntilIdle()
+
+        val ids = store.sessionListFlow.value.pendingQuestions.map { it.id }.toSet()
+        assertTrue("qa from /a fetch", "qa" in ids)
+        assertTrue("qb from /b fetch", "qb" in ids)
+        assertTrue("existing preserved (gap-fill merge)", "existing" in ids)
+        // Per-dir fan-out — never null, never the slim endpoint.
+        coVerify(exactly = 0) { repository.getPendingQuestions(null) }
+        coVerify(exactly = 1) { repository.getPendingQuestions("/a") }
+        coVerify(exactly = 1) { repository.getPendingQuestions("/b") }
+        coVerify(exactly = 0) { repository.getSlimapiQuestions(any()) }
+        testScope.cancel()
+    }
+
+    @Test
+    fun `slim path Partial outcome preserves local entries for uncovered directories`() {
+        // §slimapi-questions: a Partial outcome (errors[] non-empty) must keep
+        // local entries whose directory is NOT in authoritativeDirectories,
+        // while replacing (gap-filling) the covered directories with the
+        // incoming items.
+        store.mutateSessionList {
+            SessionListState(pendingQuestions = listOf(
+                // Local entry in an UNCOVERED dir — must survive.
+                QuestionRequest(id = "q-local-uncovered", sessionId = "s-u", directory = "/uncovered", questions = emptyList()),
+                // Local entry in a COVERED dir — must be replaced (gap-fill wins on id).
+                QuestionRequest(id = "q-local-covered", sessionId = "s-c", directory = "/covered", questions = emptyList()),
+            ))
+        }
+        val repository = mockk<OpenCodeRepository>(relaxed = true)
+        io.mockk.every { repository.supportsGlobalQuestionFetch } returns true
+        io.mockk.every { repository.supportsSlimQuestions } returns true
+
+        coEvery { repository.getSlimapiQuestions(any()) } returns Result.success(
+            cn.vectory.ocdroid.data.repository.SlimAggregationOutcome.Partial(
+                items = listOf(
+                    cn.vectory.ocdroid.data.model.SlimapiQuestionEntry(
+                        id = "q-new-covered", sessionId = "s-c-new", directory = "/covered",
+                    ),
+                ),
+                errors = listOf(
+                    cn.vectory.ocdroid.data.model.SlimapiAggregationError(
+                        directory = "/failed", code = "upstream_unavailable",
+                    ),
+                ),
+                authoritativeDirectories = setOf("/covered"),
+                serverScope = null,
+            ),
+        )
+
+        val testScope = TestScope(UnconfinedTestDispatcher())
+        val controller = ForegroundCatchUpController(
+            appLifecycleMonitor = stubMonitor(),
+            scope = testScope,
+            store = store,
+            settingsManager = settingsManager,
+            effects = effects,
+            clock = { nowMs },
+        )
+
+        controller.catchUpPendingQuestionsAllWorkdirs(repository = repository)
+        testScope.testScheduler.advanceUntilIdle()
+
+        val state = store.sessionListFlow.value
+        val ids = state.pendingQuestions.map { it.id }.toSet()
+        assertTrue("uncovered local entry preserved", "q-local-uncovered" in ids)
+        assertTrue("covered incoming entry added", "q-new-covered" in ids)
+        // The covered local entry was dropped (its dir was replaced).
+        assertFalse("covered local entry replaced", "q-local-covered" in ids)
         testScope.cancel()
     }
 
@@ -498,6 +662,7 @@ class ForegroundCatchUpControllerTest {
         }
         val repository = mockk<OpenCodeRepository>(relaxed = true)
         io.mockk.every { repository.supportsGlobalQuestionFetch } returns false
+        io.mockk.every { repository.supportsSlimQuestions } returns true // irrelevant when not slim
         coEvery { repository.getPendingQuestions("/a") } returns Result.success(
             listOf(QuestionRequest(id = "qa", sessionId = "sa", questions = emptyList()))
         )
@@ -532,15 +697,19 @@ class ForegroundCatchUpControllerTest {
     // ── §slimapi-p3: slim single-flight guard (AtomicBoolean) ───────────
 
     @Test
-    fun `slim path concurrent triggers collapse to one in-flight global getPendingQuestions(null)`() {
-        // §slimapi-p3: three triggers → AtomicBoolean.compareAndSet collapses
-        // the 2nd and 3rd into no-ops.
+    fun `slim path concurrent triggers collapse to one in-flight getSlimapiQuestions`() {
+        // §slimapi-questions: three triggers → AtomicBoolean.compareAndSet
+        // collapses the 2nd and 3rd into no-ops.
         val repository = mockk<OpenCodeRepository>(relaxed = true)
         io.mockk.every { repository.supportsGlobalQuestionFetch } returns true
+        io.mockk.every { repository.supportsSlimQuestions } returns true
+
         val gate = CompletableDeferred<Unit>()
-        coEvery { repository.getPendingQuestions(null) } coAnswers {
+        coEvery { repository.getSlimapiQuestions(any()) } coAnswers {
             gate.await()
-            Result.success(emptyList<cn.vectory.ocdroid.data.model.QuestionRequest>())
+            Result.success(cn.vectory.ocdroid.data.repository.SlimAggregationOutcome.Success(
+                items = emptyList(), authoritativeDirectories = null, serverScope = null,
+            ))
         }
         val testScope = TestScope(UnconfinedTestDispatcher())
         val controller = ForegroundCatchUpController(
@@ -557,11 +726,11 @@ class ForegroundCatchUpControllerTest {
             testScope.testScheduler.advanceUntilIdle()
         }
 
-        coVerify(exactly = 1) { repository.getPendingQuestions(null) }
+        coVerify(exactly = 1) { repository.getSlimapiQuestions(any()) }
 
         gate.complete(Unit)
         testScope.testScheduler.advanceUntilIdle()
-        coVerify(exactly = 1) { repository.getPendingQuestions(null) }
+        coVerify(exactly = 1) { repository.getSlimapiQuestions(any()) }
         testScope.cancel()
     }
 
@@ -569,7 +738,9 @@ class ForegroundCatchUpControllerTest {
     fun `slim path inFlight is released after failure so a later trigger can fire`() {
         val repository = mockk<OpenCodeRepository>(relaxed = true)
         io.mockk.every { repository.supportsGlobalQuestionFetch } returns true
-        coEvery { repository.getPendingQuestions(null) } returns
+        io.mockk.every { repository.supportsSlimQuestions } returns true
+
+        coEvery { repository.getSlimapiQuestions(any()) } returns
             Result.failure(java.io.IOException("503"))
         val testScope = TestScope(UnconfinedTestDispatcher())
         val controller = ForegroundCatchUpController(
@@ -583,11 +754,11 @@ class ForegroundCatchUpControllerTest {
 
         controller.catchUpPendingQuestionsAllWorkdirs(repository = repository)
         testScope.testScheduler.advanceUntilIdle()
-        coVerify(exactly = 1) { repository.getPendingQuestions(null) }
+        coVerify(exactly = 1) { repository.getSlimapiQuestions(any()) }
 
         controller.catchUpPendingQuestionsAllWorkdirs(repository = repository)
         testScope.testScheduler.advanceUntilIdle()
-        coVerify(exactly = 2) { repository.getPendingQuestions(null) }
+        coVerify(exactly = 2) { repository.getSlimapiQuestions(any()) }
         testScope.cancel()
     }
 
@@ -599,6 +770,7 @@ class ForegroundCatchUpControllerTest {
         // make any pending-questions calls.
         val repository = mockk<OpenCodeRepository>(relaxed = true)
         io.mockk.every { repository.supportsGlobalQuestionFetch } returns false
+        io.mockk.every { repository.supportsSlimQuestions } returns true
         val testScope = TestScope(UnconfinedTestDispatcher())
         val controller = ForegroundCatchUpController(
             appLifecycleMonitor = stubMonitor(),

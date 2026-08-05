@@ -14,12 +14,16 @@ import cn.vectory.ocdroid.data.model.PermissionRequest
 import cn.vectory.ocdroid.data.model.PermissionResponse
 import cn.vectory.ocdroid.data.model.QuestionRequest
 import cn.vectory.ocdroid.data.model.Session
-import cn.vectory.ocdroid.data.repository.SlimAggregationOutcome
+import cn.vectory.ocdroid.data.model.SlimapiAggregationError
 import cn.vectory.ocdroid.data.model.SlimapiPermissionEntry
 import cn.vectory.ocdroid.data.model.SlimapiQuestionEntry
 import cn.vectory.ocdroid.data.repository.ClientBundle
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.data.repository.ServerCompatProfile
+import cn.vectory.ocdroid.data.repository.SlimAggregationOutcome
+import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.runSuspendCatching
+import java.io.IOException
 
 /**
  * Gateway for write-style interaction operations: send, abort, summarize,
@@ -30,6 +34,7 @@ import cn.vectory.ocdroid.util.runSuspendCatching
  */
 internal class InteractionGateway(
     private val bundleProvider: () -> ClientBundle,
+    private val serverCompatProfile: ServerCompatProfile,
 ) {
     private val api: OpenCodeApi get() = bundleProvider().restApi
     private val mutationApi: OpenCodeApi get() = bundleProvider().mutationApi
@@ -142,21 +147,81 @@ internal class InteractionGateway(
         }
     }
 
+    /**
+     * §slimapi-questions: cross-directory pending-questions aggregate via
+     * `GET /slimapi/questions` (oc-slimapi thin route).
+     *
+     * **Bug fix** (cold-start multi-workdir visibility): the previous impl
+     * forwarded to legacy `api.getPendingQuestions(dir)` which (with
+     * `directory = null`) upstream resolves to `process.cwd()` — silently
+     * hiding pending questions belonging to any other workdir. This impl
+     * hits the sidecar's cross-directory aggregate so cold-start sees them
+     * all (each [SlimapiQuestionEntry] carries its own `directory`).
+     *
+     * **Capability gate**: only called when [ServerCompatProfile.slimConnection]
+     * AND [ServerCompatProfile.supportsSlimQuestions] are both true. Behaviour:
+     *  - HTTP 200 → mark supported; map the envelope to a typed
+     *    [SlimAggregationOutcome] (Success when `errors.isEmpty()`, Partial
+     *    otherwise). `authoritativeDirectories == null` → globally authoritative.
+     *  - HTTP 404 (`thin_route_not_found`) → mark unsupported (sticky-false)
+     *    AND throw so the call site's `Result.failure` path triggers — the next
+     *    reconcile cycle takes the per-dir fan-out branch. No silent fallback
+     *    here (the call site owns the fan-out since it knows the workdir set).
+     *  - HTTP 5xx / other / transport → throw (transient — do NOT flip the bit,
+     *    do NOT fall back; the call site keeps local).
+     *
+     * The `directories` param is retained for signature compatibility with
+     * the existing interface/forwarder but is intentionally unused — the
+     * sidecar aggregates across its whole configured allowlist regardless.
+     */
+    @Suppress("UNUSED_PARAMETER")
     suspend fun getSlimapiQuestions(
         directories: List<String>? = null,
     ): Result<SlimAggregationOutcome<SlimapiQuestionEntry>> = runSuspendCatching {
-        val dir = directories?.firstOrNull()
-        val items = api.getPendingQuestions(dir).map { q ->
-            SlimapiQuestionEntry(
-                id = q.id, sessionId = q.sessionId,
-                questions = q.questions, tool = q.tool, directory = dir,
-            )
+        if (!serverCompatProfile.slimConnection || !serverCompatProfile.supportsSlimQuestions) {
+            // Defensive: should never be called with the gate closed, but if it
+            // is, surface a deterministic failure rather than a network probe.
+            throw IOException("slimapi /slimapi/questions gate closed (slim=${serverCompatProfile.slimConnection} bit=${serverCompatProfile.supportsSlimQuestions})")
         }
-        SlimAggregationOutcome.Success(
-            items = items,
-            authoritativeDirectories = directories?.toSet(),
-            serverScope = null,
-        )
+        val resp = api.getSlimapiQuestions()
+        if (resp.isSuccessful) {
+            serverCompatProfile.markSlimQuestionsSupported()
+            val body = resp.body() ?: throw IOException("slimapi /slimapi/questions 200 with null body")
+            if (body.errors.isEmpty()) {
+                SlimAggregationOutcome.Success(
+                    items = body.items,
+                    // §rev-gpt #2 / §rev-opus: passthrough the server's scope
+                    // (readiness) and authoritative-directory set verbatim.
+                    // Hardcoding null here would (a) re-introduce the N==0
+                    // false-clear (sidecar allowlist not ready → empty items
+                    // wrongly treated as globally-authoritative → stale
+                    // pending state wiped) and (b) drop a server hint that the
+                    // response covers only a subset of dirs. Symmetric with the
+                    // Partial branch below + the permissions envelope handling.
+                    authoritativeDirectories = body.authoritativeDirectories?.toSet(),
+                    serverScope = body.scope,
+                )
+            } else {
+                SlimAggregationOutcome.Partial(
+                    items = body.items,
+                    errors = body.errors.map { wire ->
+                        SlimapiAggregationError(directory = wire.directory, code = wire.code)
+                    },
+                    authoritativeDirectories = body.authoritativeDirectories?.toSet() ?: emptySet(),
+                    serverScope = body.scope,
+                )
+            }
+        } else if (resp.code() == 404) {
+            // Old sidecar without the route — sticky-flip the bit so subsequent
+            // cycles fan out per-dir. Throw so this call's Result.failure path
+            // fires (the controller keeps local pending state on failure).
+            serverCompatProfile.markSlimQuestionsUnsupported()
+            DebugLog.w("InteractionGateway", "slimapi /slimapi/questions 404 (old sidecar) → mark unsupported + throw for per-dir fan-out")
+            throw IOException("slimapi /slimapi/questions not supported (404)")
+        } else {
+            // 5xx / transport / other — transient; do NOT flip the bit.
+            throw IOException("slimapi /slimapi/questions HTTP ${resp.code()}")
+        }
     }
 
     suspend fun getSlimapiPermissions(
@@ -177,13 +242,26 @@ internal class InteractionGateway(
         )
     }
 
+    /**
+     * §slimapi-questions: reply to a question fetched via `/slimapi/questions`.
+     *
+     * Threads the originating [directory] through to the legacy write endpoint
+     * (`/question/{id}/reply`) so the upstream opencode InstanceState that
+     * owns the pending question is correctly routed — even though the question
+     * arrived via the sidecar's cross-directory aggregate. The sidecar also
+     * re-validates the [routeToken] HMAC for write-side authentication.
+     *
+     * [directory] is sourced from [SlimapiQuestionEntry.directory] at the call
+     * site; null only when the triggering UI genuinely cannot know it.
+     */
     suspend fun replySlimapiQuestion(
         questionId: String,
         answers: List<List<String>>,
         routeToken: String?,
+        directory: String? = null,
     ): Result<Unit> = runSuspendCatching {
         val response = mutationApi.replyQuestion(
-            questionId, QuestionReplyRequest(answers = answers), null,
+            questionId, QuestionReplyRequest(answers = answers), directory,
         )
         if (!response.isSuccessful) {
             val errorBody = response.errorBody()?.string() ?: response.message()
@@ -191,11 +269,14 @@ internal class InteractionGateway(
         }
     }
 
+    /** §slimapi-questions: reject a question fetched via `/slimapi/questions`.
+     *  See [replySlimapiQuestion] for the [directory] / [routeToken] contract. */
     suspend fun rejectSlimapiQuestion(
         questionId: String,
         routeToken: String?,
+        directory: String? = null,
     ): Result<Unit> = runSuspendCatching {
-        val response = mutationApi.rejectQuestion(questionId, null)
+        val response = mutationApi.rejectQuestion(questionId, directory)
         if (!response.isSuccessful) {
             val errorBody = response.errorBody()?.string() ?: response.message()
             throw Exception("Reject failed ${response.code()}: $errorBody")

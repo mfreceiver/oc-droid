@@ -1517,12 +1517,12 @@ class SessionSyncCoordinatorTest {
 
     // §issue-1 Phase 2a Fix B: fan-out site (1) now INCLUDES per-fp recent_workdirs
     // (flipped green from the Phase 1b characterization that asserted their absence).
-    // §slimapi-p3: P3 fan-out collapse — single global /question=null call
+    // §slimapi-questions: slim path — single getSlimapiQuestions() call
     // replaces the per-workdir fan-out loop. The server returns ALL pending
     // questions across all workdirs in one response; no workdir iteration needed.
     @Test
     fun `loadPendingQuestionsAllWorkdirs makes a single global call and reconciles authoritatively`() {
-        // §slimapi-p3: a single getPendingQuestions(null) returns ALL pending
+        // §slimapi-questions: a single getSlimapiQuestions() returns ALL pending
         // questions across all workdirs. Authoritative reconcile: questions the
         // server no longer reports are dropped.
         seed {
@@ -1534,65 +1534,92 @@ class SessionSyncCoordinatorTest {
         }
         val repository = mockk<cn.vectory.ocdroid.data.repository.OpenCodeRepository>(relaxed = true)
         io.mockk.every { repository.supportsGlobalQuestionFetch } returns true
-        coEvery { repository.getPendingQuestions(null) } returns Result.success(
-            listOf(QuestionRequest(id = "qc", sessionId = "sc", questions = emptyList()))
+        io.mockk.every { repository.supportsSlimQuestions } returns true
+
+        coEvery { repository.getSlimapiQuestions(any()) } returns Result.success(
+            cn.vectory.ocdroid.data.repository.SlimAggregationOutcome.Success(
+                items = listOf(cn.vectory.ocdroid.data.model.SlimapiQuestionEntry(id = "qc", sessionId = "sc")),
+                authoritativeDirectories = null,
+                serverScope = null,
+            ),
         )
 
         coordinator.loadPendingQuestionsAllWorkdirs(repository)
         scope.testScheduler.advanceUntilIdle()
 
         val ids = slices.sessionList.value.pendingQuestions.map { it.id }.toSet()
-        // Authoritative reconcile: only the single global call's result survives.
-        assertTrue("qc from global call", "qc" in ids)
-        // existing-not-on-server was NOT in the global result → dropped by
+        // Authoritative reconcile: only the single slimapi call's result survives.
+        assertTrue("qc from slimapi call", "qc" in ids)
+        // existing-not-on-server was NOT in the slimapi result → dropped by
         // authoritative reconcile (server is source of truth).
         assertFalse(
             "existing-not-on-server is dropped by authoritative reconcile",
             "existing-not-on-server" in ids)
-        // Exactly ONE global call — no per-dir fan-out.
-        coVerify(exactly = 1) { repository.getPendingQuestions(null) }
+        // Exactly ONE slimapi call — no per-dir fan-out, no getPendingQuestions(null).
+        coVerify(exactly = 1) { repository.getSlimapiQuestions(any()) }
+        coVerify(exactly = 0) { repository.getPendingQuestions(null) }
         coVerify(exactly = 0) { repository.getPendingQuestions("/current") }
     }
 
     @Test
     fun `loadPendingQuestionsAllWorkdirs issues a single global call regardless of workdir count`() {
-        // §slimapi-p3: the workdir set no longer affects the fetch — one
-        // global call covers all workdirs.
+        // §slimapi-questions: the workdir set no longer affects the fetch — one
+        // getSlimapiQuestions() call covers all workdirs.
         seed {
             it.copy(directorySessions = mapOf("/dup" to listOf(Session(id = "sx", directory = "/dup"))))
         }
         val repository = mockk<cn.vectory.ocdroid.data.repository.OpenCodeRepository>(relaxed = true)
         io.mockk.every { repository.supportsGlobalQuestionFetch } returns true
-        coEvery { repository.getPendingQuestions(null) } returns Result.success(emptyList())
+        io.mockk.every { repository.supportsSlimQuestions } returns true
+
+        coEvery { repository.getSlimapiQuestions(any()) } returns Result.success(
+            cn.vectory.ocdroid.data.repository.SlimAggregationOutcome.Success(
+                items = emptyList(),
+                authoritativeDirectories = null,
+                serverScope = null,
+            ),
+        )
 
         coordinator.loadPendingQuestionsAllWorkdirs(repository)
         scope.testScheduler.advanceUntilIdle()
 
-        coVerify(exactly = 1) { repository.getPendingQuestions(null) }
+        coVerify(exactly = 1) { repository.getSlimapiQuestions(any()) }
+        coVerify(exactly = 0) { repository.getPendingQuestions(null) }
     }
 
     @Test
     fun `loadPendingQuestionsAllWorkdirs fires a single global call even with no known workdirs`() {
-        // §slimapi-p3: the global call is always valid (directory=null),
+        // §slimapi-questions: the getSlimapiQuestions call is always valid,
         // no longer gated on any workdir being known.
         seed { it.copy(directorySessions = emptyMap()) }
         val repository = mockk<cn.vectory.ocdroid.data.repository.OpenCodeRepository>(relaxed = true)
         io.mockk.every { repository.supportsGlobalQuestionFetch } returns true
-        coEvery { repository.getPendingQuestions(null) } returns Result.success(emptyList())
+        io.mockk.every { repository.supportsSlimQuestions } returns true
+
+        coEvery { repository.getSlimapiQuestions(any()) } returns Result.success(
+            cn.vectory.ocdroid.data.repository.SlimAggregationOutcome.Success(
+                items = emptyList(),
+                authoritativeDirectories = null,
+                serverScope = null,
+            ),
+        )
 
         coordinator.loadPendingQuestionsAllWorkdirs(repository)
         scope.testScheduler.advanceUntilIdle()
 
-        coVerify(exactly = 1) { repository.getPendingQuestions(null) }
+        coVerify(exactly = 1) { repository.getSlimapiQuestions(any()) }
+        coVerify(exactly = 0) { repository.getPendingQuestions(null) }
     }
 
     @Test
     fun `loadPendingQuestionsAllWorkdirs swallows global fetch failure and keeps the slice unchanged`() {
-        // §slimapi-p3: single global call failure doesn't wipe the slice.
+        // §slimapi-questions: single getSlimapiQuestions failure doesn't wipe the slice.
         seed { it.copy(directorySessions = emptyMap()) }
         val repository = mockk<cn.vectory.ocdroid.data.repository.OpenCodeRepository>(relaxed = true)
         io.mockk.every { repository.supportsGlobalQuestionFetch } returns true
-        coEvery { repository.getPendingQuestions(null) } returns Result.failure(java.io.IOException("network down"))
+        io.mockk.every { repository.supportsSlimQuestions } returns true
+
+        coEvery { repository.getSlimapiQuestions(any()) } returns Result.failure(java.io.IOException("network down"))
 
         coordinator.loadPendingQuestionsAllWorkdirs(repository)
         scope.testScheduler.advanceUntilIdle()
@@ -1600,6 +1627,76 @@ class SessionSyncCoordinatorTest {
         // Failure path doesn't wipe the slice — pendingQuestions stays empty
         // (its initial state) rather than being mutated by the failed fetch.
         assertTrue(slices.sessionList.value.pendingQuestions.isEmpty())
+        // Slim path failure MUST NOT fall back to getPendingQuestions(null).
+        coVerify(exactly = 0) { repository.getPendingQuestions(null) }
+    }
+
+    @Test
+    fun `loadPendingQuestionsAllWorkdirs retains prior pending when sidecar scope directories is 0`() {
+        // §slimapi-questions: sidecar allowlist not ready (scope.directories==0)
+        // → Success(items=emptyList()) MUST NOT full-replace — retain prior.
+        seed {
+            it.copy(
+                pendingQuestions = listOf(
+                    QuestionRequest(id = "pre-existing", sessionId = "s0", directory = "/old", questions = emptyList())
+                )
+            )
+        }
+        val repository = mockk<cn.vectory.ocdroid.data.repository.OpenCodeRepository>(relaxed = true)
+        io.mockk.every { repository.supportsGlobalQuestionFetch } returns true
+        io.mockk.every { repository.supportsSlimQuestions } returns true
+
+        coEvery { repository.getSlimapiQuestions(any()) } returns Result.success(
+            cn.vectory.ocdroid.data.repository.SlimAggregationOutcome.Success(
+                items = emptyList(),
+                authoritativeDirectories = null,
+                serverScope = cn.vectory.ocdroid.data.model.SlimapiScope(directories = 0),
+            ),
+        )
+
+        coordinator.loadPendingQuestionsAllWorkdirs(repository)
+        scope.testScheduler.advanceUntilIdle()
+
+        // Without the scope==0 gate, an empty-items Success would full-replace
+        // and wipe "pre-existing". With the gate, it's retained.
+        val ids = slices.sessionList.value.pendingQuestions.map { it.id }.toSet()
+        assertTrue("pre-existing retained despite empty Success", "pre-existing" in ids)
+        coVerify(exactly = 1) { repository.getSlimapiQuestions(any()) }
+        coVerify(exactly = 0) { repository.getPendingQuestions(null) }
+    }
+
+    @Test
+    fun `loadPendingQuestionsAllWorkdirs falls back to per-dir fan-out in the same cycle when getSlimapiQuestions fails`() {
+        // §rev-gpt #1 liveness: a 404 / failure on the slim-questions endpoint must
+        // trigger per-dir fan-out IN THIS cycle, not be deferred to an uncertain next
+        // reconcile (which may never come if the user stays on a non-Chat screen).
+        seed { it.copy(directorySessions = emptyMap()) }
+        val repository = mockk<cn.vectory.ocdroid.data.repository.OpenCodeRepository>(relaxed = true)
+        io.mockk.every { repository.supportsGlobalQuestionFetch } returns true
+        io.mockk.every { repository.supportsSlimQuestions } returns true
+        // slim endpoint fails (e.g. 404 from old sidecar — gateway flips bit + throws)
+        coEvery { repository.getSlimapiQuestions(any()) } returns
+            Result.failure(java.io.IOException("slimapi /slimapi/questions not supported (404)"))
+        // the fallback per-dir fetch returns one question per known workdir
+        coEvery { repository.getPendingQuestions("/proj") } returns Result.success(
+            listOf(QuestionRequest(id = "q-fallback", sessionId = "s1", questions = emptyList()))
+        )
+        // settingsManager/currentProfileId already wired in this test class; ensure
+        // computeLegacyQuestionWorkdirs() resolves ["/proj"] (currentWorkdir, no recent
+        // workdir overrides).
+        every { settingsManager.currentWorkdir } returns "/proj"
+        every { settingsManager.getRecentWorkdirs(any()) } returns emptyList()
+
+        coordinator.loadPendingQuestionsAllWorkdirs(repository)
+        scope.testScheduler.advanceUntilIdle()
+
+        // The slim endpoint was attempted once...
+        coVerify(exactly = 1) { repository.getSlimapiQuestions(any()) }
+        // ...AND the per-dir fallback fired in the SAME cycle (NOT deferred):
+        coVerify(exactly = 1) { repository.getPendingQuestions("/proj") }
+        // ...and the fallback's question reached the slice:
+        assertTrue("fallback question loaded in-cycle",
+            slices.sessionList.value.pendingQuestions.any { it.id == "q-fallback" })
     }
 
     @Test

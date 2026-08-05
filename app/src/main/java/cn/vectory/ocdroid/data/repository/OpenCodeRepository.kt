@@ -261,6 +261,7 @@ class OpenCodeRepository @Inject constructor(
     )
     private val interactionGateway = InteractionGateway(
         bundleProvider = { requireClientBundle() },
+        serverCompatProfile = serverCompatProfile,
     )
     private val catalogGateway = CatalogGateway(
         bundleProvider = { requireClientBundle() },
@@ -424,6 +425,13 @@ class OpenCodeRepository @Inject constructor(
      *  independent of status-endpoint support. Same flag as [usesSlimStatusFanOut]
      *  — both map to [ConnectionGateway.slimConnection]/[ServerCompatProfile.slimConnection]. */
     override val supportsGlobalQuestionFetch: Boolean get() = connectionGateway.usesSlimStatusFanOut
+
+    /** §slimapi-questions: sidecar serves the cross-directory `/slimapi/questions`
+     *  aggregate. Fail-open default; flipped sticky-false on the first observed
+     *  404 from an older sidecar. The slim-questions branch in
+     *  `QuestionReconcileWorker` / `ForegroundCatchUpController` ANDs this with
+     *  [supportsGlobalQuestionFetch] to decide endpoint vs per-dir fan-out. */
+    override val supportsSlimQuestions: Boolean get() = serverCompatProfile.supportsSlimQuestions
 
     private data class CandidateSsl(
         val config: SslConfig,
@@ -1265,13 +1273,15 @@ class OpenCodeRepository @Inject constructor(
     override suspend fun replySlimapiQuestion(
         questionId: String,
         answers: List<List<String>>,
-        @Suppress("UNUSED_PARAMETER") routeToken: String?
-    ): Result<Unit> = interactionGateway.replySlimapiQuestion(questionId, answers, routeToken)
+        @Suppress("UNUSED_PARAMETER") routeToken: String?,
+        directory: String?,
+    ): Result<Unit> = interactionGateway.replySlimapiQuestion(questionId, answers, routeToken, directory)
 
     override suspend fun rejectSlimapiQuestion(
         questionId: String,
-        @Suppress("UNUSED_PARAMETER") routeToken: String?
-    ): Result<Unit> = interactionGateway.rejectSlimapiQuestion(questionId, routeToken)
+        @Suppress("UNUSED_PARAMETER") routeToken: String?,
+        directory: String?,
+    ): Result<Unit> = interactionGateway.rejectSlimapiQuestion(questionId, routeToken, directory)
 
     override suspend fun respondSlimapiPermission(
         sessionId: String,

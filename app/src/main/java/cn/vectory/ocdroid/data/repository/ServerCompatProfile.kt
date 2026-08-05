@@ -107,6 +107,11 @@ class ServerCompatProfile @Inject constructor() {
         // Catalog thin routes are additive — re-probe on every reconfigure so a
         // newly-deployed sidecar serving /slimapi/command|agent is re-discovered.
         useSlimCatalog = true
+        // §slimapi-questions: cross-directory /slimapi/questions aggregate is
+        // additive — re-probe on every reconfigure so a newly-deployed sidecar
+        // serving it is re-discovered (a prior 404 from an older sidecar is sticky
+        // only within one connection incarnation).
+        supportsSlimQuestions = true
     }
 
     /**
@@ -249,6 +254,42 @@ class ServerCompatProfile @Inject constructor() {
     /** Mark the slim catalog unsupported (first 404 `thin_route_not_found` from
      *  an old sidecar). Sticky until [setSlimConnection] resets on reconfigure. */
     internal fun markSlimCatalogUnsupported() { useSlimCatalog = false }
+
+    /**
+     * §slimapi-questions: whether the connected oc-slimapi sidecar serves the
+     * cross-directory `GET /slimapi/questions` endpoint.
+     *
+     * **Why a separate bit** (vs [slimConnection] / [supportsSlimStatus]):
+     * cold-start in slim mode previously called legacy `GET /question` with
+     * `directory = null`, which upstream resolves to `process.cwd()` and
+     * silently drops pending questions for any other workdir. The new sidecar
+     * endpoint aggregates across the configured workdir allowlist so cold-start
+     * sees them all — but it is additive, so an older sidecar returns 404
+     * `thin_route_not_found` and the client must fall back to per-dir fan-out.
+     *
+     * **Fail-open model**: default `true` — attempt the new endpoint first when
+     * [slimConnection] is on. On the first observed 404 (old sidecar predating
+     * the route), flip to `false` (cached, sticky) and subsequent calls short-
+     * circuit to the legacy per-dir fan-out. Transport errors (5xx / timeout)
+     * do NOT flip the flag (transient — would double traffic + mask outages).
+     * [setSlimConnection] resets it to `true` on every reconfigure so a newly-
+     * deployed sidecar is re-probed.
+     *
+     * Irrelevant in legacy (non-slim) mode — the slim-questions branch in
+     * `QuestionReconcileWorker` / `ForegroundCatchUpController` gates on
+     * [slimConnection] (via [cn.vectory.ocdroid.data.repository.InteractionRepository.supportsGlobalQuestionFetch])
+     * first.
+     */
+    @Volatile var supportsSlimQuestions: Boolean = true
+        internal set
+
+    /** Mark /slimapi/questions supported (first 200). Sticky. */
+    internal fun markSlimQuestionsSupported() { supportsSlimQuestions = true }
+
+    /** Mark /slimapi/questions unsupported (first 404 `thin_route_not_found`
+     *  from an old sidecar). Sticky until [setSlimConnection] resets on
+     *  reconfigure. */
+    internal fun markSlimQuestionsUnsupported() { supportsSlimQuestions = false }
 
     /** 落库 [SlimapiHealthPayload] 的版本契约业务字段。 */
     fun updateSlimapi(payload: SlimapiHealthPayload) {

@@ -124,6 +124,54 @@ data class SlimapiAggregationError(
     val code: String? = null,
 )
 
+/**
+ * Wire shape of a single entry inside the `errors[]` array of
+ * [SlimapiQuestionsEnvelope] (oc-slimapi `GET /slimapi/questions`).
+ *
+ * Distinct from [SlimapiAggregationError] (the decoded client model): the
+ * wire DTO carries a non-null [directory] + [code] + optional [message],
+ * matching the sidecar's `{directory, code, message?}` contract verbatim.
+ * [cn.vectory.ocdroid.data.repository.gateway.InteractionGateway.getSlimapiQuestions]
+ * maps each wire entry onto [SlimapiAggregationError] for the typed
+ * [cn.vectory.ocdroid.data.repository.SlimAggregationOutcome.Partial].
+ */
+@Serializable
+data class SlimapiAggregationErrorWire(
+    val directory: String,
+    val code: String,
+    val message: String? = null,
+)
+
+/**
+ * Wire envelope returned by `GET /slimapi/questions` (oc-slimapi thin route).
+ *
+ *  - [items]: each is the opencode `QuestionRequest` shape (incl. capital-ID
+ *    `sessionID`) PLUS a per-item [SlimapiQuestionEntry.directory] string —
+ *    the workdir the question originated from. Reuses [SlimapiQuestionEntry]
+ *    verbatim (already matches the item shape).
+ *  - [errors]: per-directory upstream failures; empty on full success.
+ *  - [authoritativeDirectories]: `null` = globally authoritative (replace
+ *    ALL local pending questions with [items]); a directory list = partial
+ *    success (replace local only for those dirs, KEEP local for
+ *    uncovered/failed dirs).
+ *  - [scope]: sidecar readiness scope (`{directories:N}`), mirroring the
+ *    permissions envelope. `N == 0` means the sidecar's allowlist is not
+ *    ready yet — the (possibly empty) [items] MUST be treated as non-
+ *    authoritative and the client retains prior local state (otherwise an
+ *    empty response during startup would false-clear stale pending
+ *    questions). Confirmed live: `GET /slimapi/questions` returns
+ *    `{"items":[],"errors":[],"scope":{"directories":21}}` (v0.2.2 release
+ *    test report §2.2). `null` (pre-0.2.2 sidecar / scope key absent) →
+ *    original behavior.
+ */
+@Serializable
+data class SlimapiQuestionsEnvelope(
+    val items: List<SlimapiQuestionEntry> = emptyList(),
+    val errors: List<SlimapiAggregationErrorWire> = emptyList(),
+    val authoritativeDirectories: List<String>? = null,
+    val scope: SlimapiScope? = null,
+)
+
 @Serializable
 data class SlimSessionDigest(
     @SerialName("sessionID") val sessionId: String,

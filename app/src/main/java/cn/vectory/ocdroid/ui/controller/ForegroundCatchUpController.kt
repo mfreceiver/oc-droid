@@ -1,7 +1,9 @@
 package cn.vectory.ocdroid.ui.controller
 
 import cn.vectory.ocdroid.data.model.QuestionRequest
-import cn.vectory.ocdroid.data.repository.InteractionRepository
+import cn.vectory.ocdroid.data.model.SlimapiQuestionEntry
+import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.data.repository.SlimAggregationOutcome
 import cn.vectory.ocdroid.di.AppLifecycleMonitor
 import cn.vectory.ocdroid.ui.SessionListState
 import cn.vectory.ocdroid.ui.SharedEffectBus
@@ -264,73 +266,150 @@ class ForegroundCatchUpController(
     // ── §R18 Phase 3 Wave 1 (P1-9): multi-workdir pending questions fan-out ──
 
     /**
-     * §slimapi-p3: P3 fan-out collapse — single global /question=null call.
+     * §slimapi-p3 → §slimapi-questions: endpoint-vs-fan-out pending-question
+     * catch-up.
      *
-     * Previously this method fanned out to EVERY known workdir (the in-memory
-     * `directorySessions` keys + `currentWorkdir`) by calling
-     * `getPendingQuestions(dir)` once per workdir (up to 8×). The `/question`
-     * directory parameter is a no-op for filtering (only instance routing), so
-     * a single `directory=null` (dir-less) global call returns ALL pending
-     * questions across all workdirs, reducing the refresh fan-out from 8→1.
+     * **Branching** (the actual cold-start bug fix):
+     *  - `supportsGlobalQuestionFetch && supportsSlimQuestions` → single
+     *    `getSlimapiQuestions()` call hits the sidecar's cross-directory
+     *    aggregate (`GET /slimapi/questions`). Each returned entry carries its
+     *    own `directory`; the slice replace preserves it so the slim
+     *    reply/reject path routes correctly. The previous slim path called
+     *    `getPendingQuestions(null)` which resolves to `process.cwd()` upstream
+     *    and silently dropped other-workdir pending questions — fixed.
+     *  - else (slim but endpoint disabled via sticky-false 404, OR non-slim)
+     *    → per-dir fan-out over `workdirs`, calling `getPendingQuestions(dir)`
+     *    with an EXPLICIT directory header per dir (never null).
      *
-     * Results are merged by id into the sessionList slice via
-     * [SharedStateStore.mutateSessionList] (`byGet` wins, pre-existing fills
-     * gaps — same merge semantics as `launchLoadPendingQuestions`).
-     *
-     * The caller no longer supplies `workdirs` — the global fetch is
-     * authoritative for all workdirs. Single-flight (boolean [inFlight])
-     * collapses concurrent triggers from manual refresh / SSE reconnect
-     * / foreground probe into ONE in-flight request.
-     *
-     * §scope-note: AppCore (out of this wave's write scope) needs to call
-     * this from its catch-up paths to wire production. The method is
-     * exercised directly by [ForegroundCatchUpControllerTest].
+     * Slim path uses single-flight (boolean [slimInFlight]); legacy path uses
+     * per-dir single-flight (`legacyInFlightDirs`). Both collapse concurrent
+     * triggers from manual refresh / SSE reconnect / foreground probe.
      */
     fun catchUpPendingQuestionsAllWorkdirs(
-        repository: InteractionRepository,
+        repository: OpenCodeRepository,
         workdirs: List<String> = emptyList(),
         tag: String = "ForegroundCatchUp",
     ) {
-        if (repository.supportsGlobalQuestionFetch) {
-            // §slimapi-p3: slim path — single global call.
+        if (repository.supportsGlobalQuestionFetch && repository.supportsSlimQuestions) {
+            // §slimapi-questions: slim path — cross-directory aggregate.
             // AtomicBoolean.compareAndSet for thread-safe check-then-set.
             if (!slimInFlight.compareAndSet(false, true)) return
             scope.launch {
                 try {
-                    repository.getPendingQuestions(directory = null)
-                        .onSuccess { questions ->
-                            mergePendingQuestionsById(store::mutateSessionList, questions)
+                    repository.getSlimapiQuestions(directories = null)
+                        .onSuccess { outcome ->
+                            applyCatchUpOutcome(outcome)
                         }
                         .onFailure { error ->
-                            DebugLog.w(tag, "catchUp getPendingQuestions(null) failed: ${error.message}")
+                            // §rev-gpt #1 liveness: slim-questions endpoint failed
+                            // (e.g. 404 → sticky-false on an older sidecar). Fall
+                            // back to per-dir fan-out IN THIS cycle so a pending
+                            // question is not hidden until an uncertain next catch-
+                            // up. See QuestionReconcileWorker for the full rationale.
+                            DebugLog.w(tag, "catchUp getSlimapiQuestions failed: ${error.message}; falling back to per-dir fan-out")
+                            runLegacyFanOut(repository, workdirs, tag)
                         }
                 } finally {
                     slimInFlight.set(false)
                 }
             }
         } else {
-            // §rev-ds round-2 FIX 2: legacy per-dir fan-out — each dir gets its
-            // own scope.launch (concurrent), matching pre-P3 concurrency. Per-dir
-            // single-flight via legacyInFlightDirs (ConcurrentHashMap-backed set).
-            val uniqueDirs = workdirs
-                .filter { it.isNotBlank() }
-                .distinct()
-            if (uniqueDirs.isEmpty()) return
-            uniqueDirs.forEach { dir ->
-                if (!legacyInFlightDirs.add(dir)) return@forEach
-                scope.launch {
-                    try {
-                        repository.getPendingQuestions(dir)
-                            .onSuccess { questions ->
-                                mergePendingQuestionsById(store::mutateSessionList, questions)
-                            }
-                            .onFailure { error ->
-                                DebugLog.w(tag, "catchUp getPendingQuestions($dir) failed: ${error.message}")
-                            }
-                    } finally {
-                        legacyInFlightDirs.remove(dir)
+            runLegacyFanOut(repository, workdirs, tag)
+        }
+    }
+
+    /**
+     * §rev-ds / §slimapi-questions / §rev-gpt #1: per-directory fan-out — used by
+     * the non-slim branch, the slim-but-endpoint-disabled branch, AND the slim-path
+     * failure fallback. Each dir gets its own scope.launch (concurrent), matching
+     * pre-P3 concurrency. Per-dir single-flight via [legacyInFlightDirs]. Each call
+     * passes an EXPLICIT directory header (never null — null resolves to
+     * process.cwd() upstream and hides other-workdir pending questions).
+     */
+    private fun runLegacyFanOut(
+        repository: OpenCodeRepository,
+        workdirs: List<String>,
+        tag: String,
+    ) {
+        val uniqueDirs = workdirs
+            .filter { it.isNotBlank() }
+            .distinct()
+        if (uniqueDirs.isEmpty()) return
+        uniqueDirs.forEach { dir ->
+            if (!legacyInFlightDirs.add(dir)) return@forEach
+            scope.launch {
+                try {
+                    repository.getPendingQuestions(dir)
+                        .onSuccess { questions ->
+                            mergePendingQuestionsById(store::mutateSessionList, questions)
+                        }
+                        .onFailure { error ->
+                            DebugLog.w(tag, "catchUp getPendingQuestions($dir) failed: ${error.message}")
+                        }
+                } finally {
+                    legacyInFlightDirs.remove(dir)
+                }
+            }
+        }
+    }
+
+    /**
+     * §slimapi-questions: maps a typed [SlimAggregationOutcome] of slimapi
+     * question entries onto the sessionList `pendingQuestions` slice, with the
+     * same keep-uncovered / replace-covered semantics as the reconcile worker
+     * (see [cn.vectory.ocdroid.ui.controller.sse.applySlimapiQuestionsOutcome]).
+     * Uses the byGet gap-fill merge for the full-replace Success case so SSE-
+     * delivered questions that the server's get endpoint doesn't echo back
+     * survive (mirrors the legacy fan-out's [mergePendingQuestionsById]).
+     */
+    private fun applyCatchUpOutcome(outcome: SlimAggregationOutcome<SlimapiQuestionEntry>) {
+        when (outcome) {
+            is SlimAggregationOutcome.Success -> {
+                // §rev-gpt #2: sidecar allowlist not ready (scope.directories==0)
+                // → retain prior (no false-clear of stale pending questions).
+                if (outcome.serverScope?.directories == 0) return
+                val authDirs = outcome.authoritativeDirectories
+                val incoming = outcome.items
+                    .map { it.toQuestionRequest() }
+                    .let { mapped ->
+                        if (authDirs == null) mapped
+                        else mapped.filter { q -> q.directory != null && q.directory in authDirs }
+                    }
+                if (authDirs == null) {
+                    // Globally authoritative — gap-fill merge (incoming wins by id).
+                    mergePendingQuestionsById(store::mutateSessionList, incoming)
+                } else {
+                    // Defensive: replace only entries whose directory ∈ authDirs;
+                    // gap-fill the covered subset.
+                    store.mutateSessionList { state ->
+                        val kept = state.pendingQuestions.filterNot { q ->
+                            q.directory != null && q.directory in authDirs
+                        }
+                        val byGet = incoming.associateBy { it.id }
+                        val existing = kept.associateBy { it.id }
+                        val merged = (byGet + existing.filterKeys { it !in byGet }).values.toList()
+                        state.copy(pendingQuestions = merged)
                     }
                 }
+            }
+            is SlimAggregationOutcome.Partial -> {
+                if (outcome.serverScope?.directories == 0) return
+                val authDirs = outcome.authoritativeDirectories
+                val incoming = outcome.items
+                    .map { it.toQuestionRequest() }
+                    .filter { q -> q.directory != null && q.directory in authDirs }
+                store.mutateSessionList { state ->
+                    val kept = state.pendingQuestions.filterNot { q ->
+                        q.directory != null && q.directory in authDirs
+                    }
+                    val byGet = incoming.associateBy { it.id }
+                    val existing = kept.associateBy { it.id }
+                    val merged = (byGet + existing.filterKeys { it !in byGet }).values.toList()
+                    state.copy(pendingQuestions = merged)
+                }
+            }
+            is SlimAggregationOutcome.Failure -> {
+                // Keep local entirely — no-op (caller already logged).
             }
         }
     }

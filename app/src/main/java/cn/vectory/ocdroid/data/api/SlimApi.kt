@@ -132,4 +132,33 @@ interface SlimApi {
     @Headers("X-Opencode-Skip-Dir: 1")
     @GET("slimapi/agent")
     suspend fun getSlimapiAgents(): retrofit2.Response<List<AgentInfo>>
+
+    /**
+     * Cross-directory pending-questions aggregate (oc-slimapi thin route).
+     * Returns [SlimapiQuestionsEnvelope] — `items` are the opencode
+     * `QuestionRequest` shape (incl. `sessionID` capital-ID SerialName) PLUS
+     * a per-item `directory` string; `errors` carries per-directory upstream
+     * failures; `authoritativeDirectories` is null when the response is
+     * globally authoritative (replace ALL local pending) or a directory list
+     * when only partial success (replace covered, keep others).
+     *
+     * **Bug fix**: cold-start in slim mode previously called legacy
+     * `GET /question` with `directory = null`, which upstream resolves to
+     * `process.cwd()` and silently hid pending questions belonging to other
+     * workdirs. This sidecar endpoint aggregates across the configured
+     * workdir allowlist so cold-start sees them all.
+     *
+     * Additive route with the same 404 `thin_route_not_found` → fallback
+     * contract as [getSlimapiCommands]: on the first 404 the caller
+     * ([cn.vectory.ocdroid.data.repository.gateway.InteractionGateway.getSlimapiQuestions])
+     * caches that via
+     * [cn.vectory.ocdroid.data.repository.ServerCompatProfile.supportsSlimQuestions]
+     * (sticky-false) and throws so the call site falls back to per-dir
+     * fan-out. `X-Opencode-Skip-Dir: 1` — aggregation is global, not scoped
+     * by the directory-header interceptor. `X-Slimapi-Version` is injected by
+     * [cn.vectory.ocdroid.data.repository.http.SlimapiVersionInterceptor].
+     */
+    @Headers("X-Opencode-Skip-Dir: 1")
+    @GET("slimapi/questions")
+    suspend fun getSlimapiQuestions(): retrofit2.Response<SlimapiQuestionsEnvelope>
 }

@@ -358,8 +358,14 @@ class OrchestratorViewModel @Inject constructor(
         // as respondPermission.
         viewModelScope.launch {
             val result = if (routeToken != null) {
-                DebugLog.d("Question", "replyQuestion slim req=$requestId token=$routeToken")
-                core.repository.replySlimapiQuestion(requestId, answers, routeToken)
+                // §slimapi-questions: thread the originating directory (carried on
+                // the pending entry from SlimapiQuestionEntry.directory) so the
+                // sidecar routes the write to the owning opencode instance. Falls
+                // back to null if the entry has no directory (legacy fallback).
+                val entryDir = core.sessionListFlow.value.pendingQuestions
+                    .firstOrNull { it.id == requestId }?.directory
+                DebugLog.d("Question", "replyQuestion slim req=$requestId token=$routeToken dir=${entryDir ?: "null"}")
+                core.repository.replySlimapiQuestion(requestId, answers, routeToken, entryDir)
             } else {
                 // §R18 Phase 2-E step 1: explicit directory now required by the
                 // API. Resolve from the question's parent session if possible
@@ -396,8 +402,11 @@ class OrchestratorViewModel @Inject constructor(
         // as respondPermission.
         viewModelScope.launch {
             val result = if (routeToken != null) {
-                DebugLog.d("Question", "rejectQuestion slim req=$requestId token=$routeToken")
-                core.repository.rejectSlimapiQuestion(requestId, routeToken)
+                // §slimapi-questions: see replyQuestion — thread the entry directory.
+                val entryDir = core.sessionListFlow.value.pendingQuestions
+                    .firstOrNull { it.id == requestId }?.directory
+                DebugLog.d("Question", "rejectQuestion slim req=$requestId token=$routeToken dir=${entryDir ?: "null"}")
+                core.repository.rejectSlimapiQuestion(requestId, routeToken, entryDir)
             } else {
                 val directory = core.resolveQuestionDirectory(requestId)
                 // §Phase1a instrumentation (Issue 1): the directory actually sent on the reject.

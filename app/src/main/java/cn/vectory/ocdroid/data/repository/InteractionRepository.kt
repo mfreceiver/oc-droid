@@ -40,8 +40,17 @@ interface InteractionRepository {
     suspend fun getSlimapiPermissions(
         directories: List<String>? = null,
     ): Result<SlimAggregationOutcome<SlimapiPermissionEntry>>
-    suspend fun replySlimapiQuestion(questionId: String, answers: List<List<String>>, routeToken: String?): Result<Unit>
-    suspend fun rejectSlimapiQuestion(questionId: String, routeToken: String?): Result<Unit>
+    suspend fun replySlimapiQuestion(
+        questionId: String,
+        answers: List<List<String>>,
+        routeToken: String?,
+        directory: String? = null,
+    ): Result<Unit>
+    suspend fun rejectSlimapiQuestion(
+        questionId: String,
+        routeToken: String?,
+        directory: String? = null,
+    ): Result<Unit>
     suspend fun respondSlimapiPermission(
         sessionId: String,
         permissionId: String,
@@ -61,4 +70,13 @@ interface InteractionRepository {
      * of status-endpoint support.
      */
     val supportsGlobalQuestionFetch: Boolean
+
+    /**
+     * §slimapi-questions: whether the connected oc-slimapi sidecar serves the
+     * cross-directory `GET /slimapi/questions` endpoint. ANDed with
+     * [supportsGlobalQuestionFetch] at the reconcile call sites to decide
+     * endpoint-vs-per-dir-fan-out. Fail-open default `true`; sticky-false on
+     * the first observed 404 from an older sidecar.
+     */
+    val supportsSlimQuestions: Boolean
 }

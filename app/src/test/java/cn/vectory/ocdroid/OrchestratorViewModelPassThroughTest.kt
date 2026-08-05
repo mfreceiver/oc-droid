@@ -291,12 +291,13 @@ class OrchestratorViewModelPassThroughTest : MainViewModelTestBase() {
 
     @Test
     fun `replyQuestion with routeToken dispatches through replySlimapiQuestion`() = runTest {
-        coEvery { repository.replySlimapiQuestion(any(), any(), any()) } returns Result.success(Unit)
+        coEvery { repository.replySlimapiQuestion(any(), any(), any(), any()) } returns Result.success(Unit)
         val core = createCore()
         val vm = OrchestratorViewModel(core)
         val q = QuestionRequest(
             id = "q-slim", sessionId = "s1", routeToken = "tok-reply",
             questions = listOf(QuestionInfo(question = "q", header = "h", options = emptyList())),
+            directory = "/workdir-slim",
         )
         core.writeSessionList { it.copy(pendingQuestions = listOf(q)) }
 
@@ -304,7 +305,7 @@ class OrchestratorViewModelPassThroughTest : MainViewModelTestBase() {
         vm.replyQuestion("q-slim", answers, routeToken = "tok-reply")
         advanceUntilIdle()
 
-        coVerify(exactly = 1) { repository.replySlimapiQuestion("q-slim", answers, "tok-reply") }
+        coVerify(exactly = 1) { repository.replySlimapiQuestion("q-slim", answers, "tok-reply", "/workdir-slim") }
         // Legacy MUST NOT fire when routeToken present.
         coVerify(exactly = 0) { repository.replyQuestion(any(), any(), any()) }
         // Slim path skips directory resolution entirely.
@@ -314,7 +315,7 @@ class OrchestratorViewModelPassThroughTest : MainViewModelTestBase() {
 
     @Test
     fun `replyQuestion failure on slim path still invokes onError`() = runTest {
-        coEvery { repository.replySlimapiQuestion(any(), any(), any()) } returns Result.failure(
+        coEvery { repository.replySlimapiQuestion(any(), any(), any(), any()) } returns Result.failure(
             java.io.IOException("slim 403"),
         )
         val core = createCore()
