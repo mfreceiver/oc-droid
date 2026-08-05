@@ -1,0 +1,47 @@
+{
+  "bundle_id": "slimapi-p1-2026-08-05",
+  "reviewer": "rev-kimi",
+  "scope": "slimapi-p1",
+  "date": "2026-08-05",
+  "branch": "feature/slimapi-p1",
+  "commit_range": "513b5f75..1a70f2a1",
+  "base": "513b5f75",
+  "verdict": "APPROVE_WITH_NITS",
+  "verdict_summary": "Correct and well-scoped: error-code extraction mirrors established per-gateway convention with all probed edge cases handled; SessionMissing/Failed precedence and collapse conditions sound incl. mixed partial-success+session_not_found race; discipline clean (4 intended files, test encodes fixed behaviour). 4 nits raised, all non-blocking.",
+  "dimensions": {
+    "correctness": "PASS — parseEnvelopeCode (HttpException→errorBody one-shot in runCatching→{\"code\":…}; IOException→null) correct; SessionMissing checked before Failed (right precedence); session_not_found-any-id trigger sound (missing session 404s every per-id call); total-failure Failed(code=firstNotNullOfOrNull) sound; empty messageIds→Ok([],[]) pinned by test; cancellation-safe (runSuspendCatching rethrows CancellationException).",
+    "discipline": "PASS — exactly 4 files (MessageGateway.kt, OpenCodeRepository.kt 1-line ctor arg, SlimapiExpandOutcome.kt, one endpoints test); no slim-token/interface/freeze/build.gradle.kts touches; per-gateway helper duplication intentional (mirrors SessionGateway:118-129 / OCR:1215-1232); test change encodes fixed Failed(code) not the buggy Ok — strengthening, not weakening.",
+    "fallback_kdoc": "PASS — legacy-fallback-absent-by-design rationale accurate on both expandMessagesFullBatch and SlimapiExpandOutcome; matches audit conclusion (catalog 404-fallback = old batch→per-id RETIRED transition, not legacy REST) and slim-mode-api-routing.md §5.4 G6."
+  },
+  "findings": [
+    {
+      "severity": "minor",
+      "id": "stale-test-section-header",
+      "desc": "OpenCodeRepositorySlimapiEndpointsTest section-header comment claimed 'no SessionMissing/Failed outcomes — always returns Ok', directly contradicting the new code and the updated test below it.",
+      "status": "fixed in 643b5ca0 (header rewritten to three-outcome collapse)."
+    },
+    {
+      "severity": "minor",
+      "id": "sessionmissing-coverage-gap",
+      "desc": "Headline GAP-2 SessionMissing branch (session_not_found→SessionMissing) had NO test; nor mixed Ok.failures-with-parsed-code, nor all-IOException→Failed(null).",
+      "status": "fixed in 643b5ca0 — added 'expand session_not_found returns SessionMissing' + 'expand mixed success and failure returns Ok with parsed failure code'."
+    },
+    {
+      "severity": "nit",
+      "id": "stale-ok-kdoc",
+      "desc": "SlimapiExpandOutcome Ok KDoc still described usedBatch true/false batch semantics + 'transitional fallback fires (drives prioritising server-side batch endpoint deployment)' — contradicts the same file's new always-false note.",
+      "status": "fixed in 643b5ca0 (trimmed to lite-v2 reality; usedBatch marked telemetry-only)."
+    },
+    {
+      "severity": "nit",
+      "id": "stale-failed-kdoc",
+      "desc": "SlimapiExpandOutcome Failed KDoc still cited '413 after exhaustive halving, 503 after exhaustive backoff' (retired machinery); 'exhausted' now has no producer.",
+      "status": "fixed in 643b5ca0 (halving/backoff removed; exhausted marked vestigial — always false, consumer tolerates true defensively)."
+    }
+  ],
+  "nits_addressed_pre_merge": ["stale-test-section-header (643b5ca0)", "sessionmissing-coverage-gap (643b5ca0)", "stale-ok-kdoc (643b5ca0)", "stale-failed-kdoc (643b5ca0)"],
+  "check_sh": "exit 0 (compileDebugKotlin + detekt 0 findings + testDebugUnitTest incl. 2 new tests), re-verified by orchestrator on 643b5ca0",
+  "completion_assessment": "READY_TO_MERGE",
+  "confidence": "high — static review + edge-case probing; check.sh independently re-verified by orchestrator on both 1a70f2a1 and 643b5ca0 (exit 0).",
+  "note": "Review was static/read-only. All 4 nits addressed pre-merge in 643b5ca0; no REQUEST_CHANGES issues raised."
+}
