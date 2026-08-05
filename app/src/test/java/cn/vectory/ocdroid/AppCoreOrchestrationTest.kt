@@ -23,6 +23,7 @@ import cn.vectory.ocdroid.ui.SharedEffectBus
 import cn.vectory.ocdroid.ui.UiEvent
 import cn.vectory.ocdroid.ui.catchUpAfterDisconnectOrForeground
 import cn.vectory.ocdroid.ui.classifyCommandPostError
+import cn.vectory.ocdroid.ui.computeQuestionFanOutWorkdirs
 import cn.vectory.ocdroid.ui.executeCommand
 import cn.vectory.ocdroid.ui.loadMessagesForEffect
 import cn.vectory.ocdroid.ui.materializeDraftSession
@@ -1825,5 +1826,87 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
             "stale-fp EvictSession must NOT remove session from current host's list",
             core.store.sessionListFlow.value.sessions.any { it.id == sid },
         )
+    }
+
+    // ── §rev-ds round-2 FIX 1: computeQuestionFanOutWorkdirs ──────────────────
+    //
+    // Pure helper — direct unit tests for the workdir-set computation
+    // shared by BOTH pending-question fan-out sites. Pins dedup,
+    // blank filtering, null-currentWorkdir, and order/distinct correctness so a
+    // future refactor of the helper cannot silently drop a source.
+    // Restored from pre-P3 (removed in 24ad5734).
+
+    @Test
+    fun `computeQuestionFanOutWorkdirs dedupes a workdir present in all three sources to a single entry`() {
+        val result = computeQuestionFanOutWorkdirs(
+            directorySessionKeys = setOf("/dup", "/a"),
+            currentWorkdir = "/dup",
+            recentWorkdirs = listOf("/dup", "/b"))
+        assertEquals(listOf("/dup", "/a", "/b"), result)
+        assertEquals("no duplicate entries", 3, result.toSet().size)
+    }
+
+    @Test
+    fun `computeQuestionFanOutWorkdirs filters blank and empty entries from every source`() {
+        val result = computeQuestionFanOutWorkdirs(
+            directorySessionKeys = setOf("/ok", "", "   "),
+            currentWorkdir = "",
+            recentWorkdirs = listOf("/recent", "", "  "))
+        assertEquals(listOf("/ok", "/recent"), result)
+    }
+
+    @Test
+    fun `computeQuestionFanOutWorkdirs handles null currentWorkdir without crashing`() {
+        val result = computeQuestionFanOutWorkdirs(
+            directorySessionKeys = setOf("/a"),
+            currentWorkdir = null,
+            recentWorkdirs = listOf("/b"))
+        assertEquals(listOf("/a", "/b"), result)
+    }
+
+    @Test
+    fun `computeQuestionFanOutWorkdirs returns empty list when every source is empty or blank`() {
+        val result = computeQuestionFanOutWorkdirs(
+            directorySessionKeys = emptySet(),
+            currentWorkdir = null,
+            recentWorkdirs = emptyList())
+        assertTrue(result.isEmpty())
+    }
+
+    @Test
+    fun `computeQuestionFanOutWorkdirs preserves first-seen order and drops later duplicates`() {
+        val result = computeQuestionFanOutWorkdirs(
+            directorySessionKeys = setOf("/x"),
+            currentWorkdir = "/x",
+            recentWorkdirs = listOf("/x", "/y"),
+        )
+        assertEquals(listOf("/x", "/y"), result)
+    }
+
+    @Test
+    fun `computeQuestionFanOutWorkdirs dedups slash-variants after normalize`() {
+        val result = computeQuestionFanOutWorkdirs(
+            directorySessionKeys = setOf("/app", "/app/"),
+            currentWorkdir = "/app",
+            recentWorkdirs = listOf("/b"))
+        assertEquals(listOf("/app", "/b"), result)
+    }
+
+    @Test
+    fun `computeQuestionFanOutWorkdirs dedups slash entries after normalize preserving root`() {
+        val result = computeQuestionFanOutWorkdirs(
+            directorySessionKeys = setOf("", "/"),
+            currentWorkdir = "/",
+            recentWorkdirs = listOf(""))
+        assertEquals(listOf("/"), result)
+    }
+
+    @Test
+    fun `computeQuestionFanOutWorkdirs preserves first-seen post-normalize form`() {
+        val result = computeQuestionFanOutWorkdirs(
+            directorySessionKeys = setOf("/proj-a/"),
+            currentWorkdir = "/proj-a",
+            recentWorkdirs = listOf("/proj-b/"))
+        assertEquals(listOf("/proj-a", "/proj-b"), result)
     }
 }

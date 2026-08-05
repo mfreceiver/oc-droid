@@ -25,13 +25,6 @@ class SessionTreeHydratorTest {
         io.mockk.every { repository.supportsBulkSessionTree } returns false
     }
 
-    /** Stubs the repository for the slim bulk path with the given sessions. */
-    private fun coStubBulkTree(sessions: List<Session>, complete: Boolean? = true) {
-        io.mockk.every { repository.supportsBulkSessionTree } returns true
-        coEvery { repository.getSlimapiSessions(any(), any(), any(), any()) } returns
-            Result.success(cn.vectory.ocdroid.data.model.SlimSessionsPage(sessions, complete))
-    }
-
     private fun session(id: String, parentId: String? = null) =
         Session(id = id, directory = "/repo", parentId = parentId)
 

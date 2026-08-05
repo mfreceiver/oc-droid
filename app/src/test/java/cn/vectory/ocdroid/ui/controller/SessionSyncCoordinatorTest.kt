@@ -1779,6 +1779,123 @@ class SessionSyncCoordinatorTest {
             "q-child" in ids)
     }
 
+    // ── §rev-ds round-2 FIX 4: legacy branch coverage ────────────────────
+
+    @Test
+    fun `legacy path fans out per-dir and merges results with gap-fill semantics`() {
+        // §rev-ds round-2 FIX 4: legacy branch (supportsGlobalQuestionFetch=false)
+        // fans out per-dir by calling getPendingQuestions for each workdir, then
+        // replaces the pendingQuestions slice with the merged result (authoritative
+        // reconcile — server response replaces all prior pending questions).
+        val q1 = QuestionRequest(id = "q1", sessionId = "s1", questions = emptyList())
+        val q2 = QuestionRequest(id = "q2", sessionId = "s2", questions = emptyList())
+        val q3 = QuestionRequest(id = "q3", sessionId = "s3", questions = emptyList())
+
+        // Pre-seed q2. After reconcile, q1 and q3 should appear, q2 should be
+        // gone (not in any dir response — authoritative reconcile).
+        seed {
+            it.copy(pendingQuestions = listOf(q2))
+        }
+        every { settingsManager.currentWorkdir } returns "/proj-a"
+        every { settingsManager.getRecentWorkdirs("test-fp") } returns listOf("/proj-b", "/proj-c")
+
+        val repository = mockk<cn.vectory.ocdroid.data.repository.OpenCodeRepository>(relaxed = true)
+        io.mockk.every { repository.supportsGlobalQuestionFetch } returns false
+        // Each dir returns different questions to prove per-dir fan-out.
+        coEvery { repository.getPendingQuestions("/proj-a") } returns Result.success(listOf(q1))
+        coEvery { repository.getPendingQuestions("/proj-b") } returns Result.success(listOf(q3))
+        coEvery { repository.getPendingQuestions("/proj-c") } returns Result.success(emptyList())
+
+        coordinator.loadPendingQuestionsAllWorkdirs(repository)
+        scope.testScheduler.advanceUntilIdle()
+
+        // Three per-dir calls, no global call (null).
+        coVerify(exactly = 1) { repository.getPendingQuestions("/proj-a") }
+        coVerify(exactly = 1) { repository.getPendingQuestions("/proj-b") }
+        coVerify(exactly = 1) { repository.getPendingQuestions("/proj-c") }
+        coVerify(exactly = 0) { repository.getPendingQuestions(null) }
+
+        // Authoritative reconcile: only questions from server response survive.
+        val ids = slices.sessionList.value.pendingQuestions.map { it.id }.toSet()
+        assertTrue("q1 from /proj-a", "q1" in ids)
+        assertTrue("q3 from /proj-b", "q3" in ids)
+        assertFalse("q2 was pre-seeded but NOT in any dir response — dropped by authoritative reconcile", "q2" in ids)
+    }
+
+    @Test
+    fun `legacy path generation gate drops stale superseded response`() {
+        // §rev-ds round-2 FIX 4: the generation gate prevents a stale (earlier
+        // generation) per-dir fan-out from overwriting a later reconcile result.
+        // Uses the legacy path's sequential for-loop.
+        val qStale = QuestionRequest(id = "q-stale", sessionId = "s1", questions = emptyList())
+        val qFresh = QuestionRequest(id = "q-fresh", sessionId = "s1", questions = emptyList())
+
+        every { settingsManager.currentWorkdir } returns "/proj-a"
+        every { settingsManager.getRecentWorkdirs("test-fp") } returns emptyList()
+
+        // Use a gate to stall the first reconcile's single dir call mid-flight.
+        val gate = CompletableDeferred<Unit>()
+        var callCount = 0
+        val repository = mockk<cn.vectory.ocdroid.data.repository.OpenCodeRepository>(relaxed = true)
+        io.mockk.every { repository.supportsGlobalQuestionFetch } returns false
+        coEvery { repository.getPendingQuestions("/proj-a") } coAnswers {
+            callCount++
+            gate.await()
+            when (callCount) {
+                1 -> Result.success(listOf(qStale))  // gen=1: stale response
+                2 -> Result.success(listOf(qFresh))  // gen=2: fresh response
+                else -> Result.success(emptyList())
+            }
+        }
+
+        // First reconcile (gen=1) — hangs on gate.
+        coordinator.loadPendingQuestionsAllWorkdirs(repository)
+
+        // Second reconcile (gen=2) — queued via pending flag (gen bumps to 2).
+        coordinator.loadPendingQuestionsAllWorkdirs(repository)
+
+        // Release gate — gen=1 resumes, gets qStale. Generation gate (1 != 2)
+        // drops the stale write. Then pending flag fires gen=2.
+        gate.complete(Unit)
+        scope.testScheduler.advanceUntilIdle()
+
+        // Gen=2's qFresh is committed (its generation matches).
+        val ids = slices.sessionList.value.pendingQuestions.map { it.id }.toSet()
+        assertEquals(
+            "only q-fresh from the trailing (gen=2) reconcile survives",
+            setOf("q-fresh"),
+            ids,
+        )
+        assertFalse("q-stale from gen=1 must be dropped by generation gate", "q-stale" in ids)
+    }
+
+    @Test
+    fun `legacy path with no known workdirs preserves pending questions (FIX 5 preserve-on-empty)`() {
+        // §rev-ds round-2 FIX 5: the legacy branch preserves pending questions
+        // when no workdirs are known, rather than clearing them. This is an
+        // intentional deviation from pre-P3 (which committed empty, clearing).
+        seed {
+            it.copy(pendingQuestions = listOf(
+                QuestionRequest(id = "keep", sessionId = "s1", questions = emptyList())
+            ))
+        }
+        every { settingsManager.currentWorkdir } returns null
+        every { settingsManager.getRecentWorkdirs("test-fp") } returns emptyList()
+
+        val repository = mockk<cn.vectory.ocdroid.data.repository.OpenCodeRepository>(relaxed = true)
+        io.mockk.every { repository.supportsGlobalQuestionFetch } returns false
+
+        coordinator.loadPendingQuestionsAllWorkdirs(repository)
+        scope.testScheduler.advanceUntilIdle()
+
+        // Pending questions preserved (not cleared on empty dirs).
+        assertEquals(
+            setOf("keep"),
+            slices.sessionList.value.pendingQuestions.map { it.id }.toSet()
+        )
+        coVerify(exactly = 0) { repository.getPendingQuestions(any()) }
+    }
+
     // ── §task7-coverage: session.error event handler ────────────────────────
     // The session.error SSE event (rate-limit / quota / provider failures) was
     // entirely untested — every branch in its handler (UiEvent.Error emission

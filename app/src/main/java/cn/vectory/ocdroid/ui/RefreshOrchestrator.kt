@@ -125,11 +125,15 @@ internal class RefreshOrchestrator @Inject constructor(
             onColdSnapshot = { sid -> sessionSyncCoordinator.markSessionColdSnapshotted(sid) },
             expectedRouteInstance = store.slices.routeInstanceFor(sessionId),
         )
-        // §rev-ds ISSUE 2: compute workdirs for legacy per-dir fan-out;
-        // slim path ignores this argument.
-        val questionWorkdirs = (settingsManager.getRecentWorkdirs(currentProfileId()) + listOfNotNull(settingsManager.currentWorkdir))
-            .filter { it.isNotBlank() }
-            .distinct()
+        // §rev-ds round-2 FIX 1: restore pre-P3 directory-set computation
+        // using computeQuestionFanOutWorkdirs (unions directorySessions.keys +
+        // currentWorkdir + recentWorkdirs, normalizes, filters blanks, distincts).
+        // Slim path ignores this argument (single global call).
+        val questionWorkdirs = computeQuestionFanOutWorkdirs(
+            directorySessionKeys = store.sessionListFlow.value.directorySessions.keys,
+            currentWorkdir = settingsManager.currentWorkdir,
+            recentWorkdirs = settingsManager.getRecentWorkdirs(currentProfileId()),
+        )
         foregroundCatchUpController.catchUpPendingQuestionsAllWorkdirs(
             repository = repository,
             workdirs = questionWorkdirs,

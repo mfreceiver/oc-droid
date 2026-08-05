@@ -309,17 +309,17 @@ class ForegroundCatchUpController(
                 }
             }
         } else {
-            // §rev-ds: legacy path — per-dir fan-out (restored pre-P3 behavior).
+            // §rev-ds round-2 FIX 2: legacy per-dir fan-out — each dir gets its
+            // own scope.launch (concurrent), matching pre-P3 concurrency. Per-dir
+            // single-flight via legacyInFlightDirs (ConcurrentHashMap-backed set).
             val uniqueDirs = workdirs
                 .filter { it.isNotBlank() }
                 .distinct()
             if (uniqueDirs.isEmpty()) return
-            // Single-flight: only fetch dirs not already in-flight.
-            val toFetch = uniqueDirs.filter { legacyInFlightDirs.add(it) }
-            if (toFetch.isEmpty()) return
-            scope.launch {
-                try {
-                    for (dir in toFetch) {
+            uniqueDirs.forEach { dir ->
+                if (!legacyInFlightDirs.add(dir)) return@forEach
+                scope.launch {
+                    try {
                         repository.getPendingQuestions(dir)
                             .onSuccess { questions ->
                                 mergePendingQuestionsById(store::mutateSessionList, questions)
@@ -327,9 +327,9 @@ class ForegroundCatchUpController(
                             .onFailure { error ->
                                 DebugLog.w(tag, "catchUp getPendingQuestions($dir) failed: ${error.message}")
                             }
+                    } finally {
+                        legacyInFlightDirs.remove(dir)
                     }
-                } finally {
-                    toFetch.forEach { legacyInFlightDirs.remove(it) }
                 }
             }
         }

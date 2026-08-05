@@ -78,6 +78,12 @@ internal class QuestionReconcileWorker(
                 } else {
                     // §rev-ds: legacy path — per-dir fan-out (restored pre-P3).
                     val allDirs = computeLegacyQuestionWorkdirs()
+                    // §rev-ds round-2 FIX 5 (preserve-on-empty): when no workdirs
+                    // are known, preserve existing pendingQuestions rather than
+                    // committing an empty list (pre-P3 cleared on empty). The
+                    // current behavior is safer — discarding pending questions
+                    // due to transient workdir unavailability could lose user-
+                    // visible question state. Chosen per reviewer guidance.
                     if (allDirs.isEmpty()) return@launch
                     val allQuestions = mutableListOf<cn.vectory.ocdroid.data.model.QuestionRequest>()
                     for (dir in allDirs) {
