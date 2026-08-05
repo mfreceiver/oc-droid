@@ -79,6 +79,16 @@ abstract class StatusModule {
         fun provideStatusFetchService(
             sessionRepository: SessionRepository,
             connectionRepository: ConnectionRepository,
-        ): StatusFetchService = StatusFetchService(sessionRepository, connectionRepository)
+            slimStatusFetchCache: SlimStatusFetchCache,
+        ): StatusFetchService = StatusFetchService(sessionRepository, connectionRepository, slimStatusFetchCache)
+
+        /** SlimApi P2: shared background status-fetch cache that deduplicates
+         *  the two 30s background polling loops. Provided explicitly (not
+         *  @Inject constructor) so the default clock param is honored. */
+        @Provides
+        @Singleton
+        fun provideSlimStatusFetchCache(
+            sessionRepository: SessionRepository,
+        ): SlimStatusFetchCache = SlimStatusFetchCache(sessionRepository)
     }
 }

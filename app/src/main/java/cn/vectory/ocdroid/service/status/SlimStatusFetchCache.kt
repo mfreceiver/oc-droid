@@ -4,7 +4,6 @@ import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.data.repository.SessionRepository
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import javax.inject.Inject
 import javax.inject.Singleton
 
 /**
@@ -55,7 +54,7 @@ import javax.inject.Singleton
  * in depth.
  */
 @Singleton
-class SlimStatusFetchCache @Inject internal constructor(
+class SlimStatusFetchCache internal constructor(
     private val sessionRepository: SessionRepository,
     private val clock: () -> Long = { System.currentTimeMillis() },
 ) {
