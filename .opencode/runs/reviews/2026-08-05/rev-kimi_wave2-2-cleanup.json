@@ -1,0 +1,60 @@
+{
+  "bundle": "wave2-2-cleanup-2026-08-05",
+  "reviewer": "rev-kimi",
+  "scope": "wave2-2-cleanup",
+  "base": "d62431a1",
+  "head_initial": "cec28023",
+  "head_final": "b19b849a",
+  "verdict": "CHANGES_REQUESTED",
+  "effective_state_after_fixes": "PASS (all actionable findings addressed; no release blocker remained)",
+  "findings": [
+    {
+      "severity": "medium",
+      "area": "task3-unused-params",
+      "issue": "launchLoadMessages(settingsManager) is a genuine leftover wrongly classified as intentional: zero body refs, all 3 call sites pass it, no KDoc (unlike every other defaulted param in the signature). Vestigial, not intentional.",
+      "file": "app/src/main/java/cn/vectory/ocdroid/ui/MessageLoader.kt",
+      "resolution": "REMOVED in 837bae33: param + now-dead SettingsManager import + 3 call-site args (RefreshOrchestrator/ChatViewModel/SendOrchestrator)."
+    },
+    {
+      "severity": "medium",
+      "area": "task3-unused-params",
+      "issue": "SseGapReconcileController.onServerConnected(connectedOnceBefore) is provably redundant; KDoc falsely claims it 'controls decision emission' (reconcileGap branches on prev.connectedOnce internally). Caller's local val is independent of the param → ripple-free removal.",
+      "file": "app/src/main/java/cn/vectory/ocdroid/ui/controller/sse/SseGapReconcileController.kt",
+      "resolution": "REMOVED in 837bae33: param + false @param KDoc + single call-site arg (SessionSyncCoordinator.kt:187)."
+    },
+    {
+      "severity": "low",
+      "area": "task1-docs",
+      "issue": "Stale doc: docs/specs/architecture.md:33 directory tree still listed 'SSEClient.kt / SseLogFilter.kt' under data/api. Only straggler — all code refs, moved test, baseline (0 entries), and 4 sse-client-spec.md links verified.",
+      "file": "docs/specs/architecture.md",
+      "resolution": "FIXED in 837bae33: removed SseLogFilter.kt from data/api tree line; added SseLogFilter to the util/ list (line 50)."
+    },
+    {
+      "severity": "low",
+      "area": "task2-test-scope",
+      "issue": "Test header overstates coverage: tests pin rememberScrollController's INTERNAL slot structure but do NOT cover its call position inside ChatMessageList's body.",
+      "file": "app/src/test/java/cn/vectory/ocdroid/ui/chat/ScrollManagerSaveableTest.kt",
+      "resolution": "FIXED in 837bae33: KDoc narrowed to 'slot positionality WITHIN rememberScrollController'; explicit scope note that ChatMessageList call-position would need a scaffold integration test. Tests themselves validated by rev-kimi as non-vacuous (navFabVisible negative control traced through all 4 production LaunchedEffects)."
+    },
+    {
+      "severity": "low",
+      "area": "hygiene",
+      "issue": "Untracked .tmp-unused-detect.yml (temp detekt investigation config) left in worktree; risk of accidental commit.",
+      "file": ".tmp-unused-detect.yml",
+      "resolution": "DELETED before merge: orchestrator caught it during `git add -A` and amended commit 176d3a2c → 837bae33 to exclude it. Not present in v0.20.4."
+    },
+    {
+      "severity": "low",
+      "area": "task3-process",
+      "issue": "Both spot-checked 'intentional' UnusedParameter keeps failed scrutiny (2/2), undermining confidence in the remaining ~49 unaudited keeps.",
+      "resolution": "ACCEPTED AS FOLLOW-UP: the 2 flipped keeps (settingsManager, connectedOnceBefore) were removed. The remaining ~47 are documented-intentional (@Suppress'd gateway tokens, KDoc 'kept pure' SseFeedback params, reducer (state,action) pattern symmetry, onSelectSession kept for call-site consistency per §B4 comment, composable scaffold VM/callback APIs, TokenStreamCoordinator threading pattern). A fuller re-audit is recommended as a separate follow-up task; not a v0.20.4 blocker."
+    }
+  ],
+  "summary": "CHANGES_REQUESTED (non-blocking) → all 6 findings addressed in follow-up commit 837bae33 (merged as b19b849a, released as v0.20.4). Task 1 complete/correct. Task 2 valid + effective (3/3 green Robolectric; Compose 1.10.0 API proven). Task 3: 2 confirmed removals safe + 2 rev-kimi-validated leftovers removed. Release risk for v0.20.4: none.",
+  "evidence": {
+    "testRun": "testDebugUnitTest fresh 2026-08-05: 253 classes, 0 failures, 0 errors; ScrollManagerSaveableTest 3/3; util.SseLogFilterTest 7/7",
+    "baselineGrep": "config/detekt/baseline.xml: 0 UiMustNotImportDataApiRule entries after diff",
+    "ruleSource": "UiMustNotImportDataApiRule.kt — import-based, /ui/ path scope",
+    "finalCheckSh": "check.sh exit 0 on main @ b19b849a (release gate)"
+  }
+}
