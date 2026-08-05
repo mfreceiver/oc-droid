@@ -37,10 +37,11 @@ import java.util.concurrent.atomic.AtomicLong
  * actually touched here is interface-clean — `getSessions` / `getSessionsForDirectory`
  * (SessionRepository) + `getSessionDiff` (FileVcsRepository), i.e. a dual (Session +
  * FileVcs) seam would suffice. Migration is DEFERRED: these are per-call params threaded
- * in by RefreshOrchestrator (which itself holds OCR concrete and is transitively blocked
- * by the slim-token shim via launchLoadMessages / launchCatchUp). Narrowing the param type
- * here would force a dual-param split at every caller now, before the caller chain is
- * unblocked. Revisit after B3 (slim-token retirement) — see oracle wave2.3 §3.4.
+ * in by RefreshOrchestrator (via SessionListActions wrappers), which itself holds OCR
+ * concrete and is transitively blocked by the slim-token shim via launchLoadMessages /
+ * launchCatchUp. Narrowing the param type here would force a dual-param split at every
+ * caller now, before the caller chain is unblocked. Revisit after B3 (slim-token
+ * retirement) — see oracle wave2.3 §3.4.
  */
 internal class SessionListRefreshOrchestrator(
     private val cacheWriter: SessionMetadataCacheWriter,

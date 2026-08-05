@@ -10,8 +10,9 @@ import cn.vectory.ocdroid.data.model.MessageWithParts
  *  `getSlimapiMessagesPage`) the token is REQUIRED and callers supply one via the concrete
  *  repo's `captureSlimCommitToken()`; `expandMessagesFullBatch` keeps an optional nullable
  *  token. This couples the seam to OCR's nested [OpenCodeRepository.SlimCommitToken] type —
- *  an acknowledged trade-off (pinned by T3RepositoryExtractFreezeTest §6b) until the slim-token
- *  compatibility shim is retired (B3). */
+ *  a compile-time coupling (the method *surface* is additionally pinned by
+ *  T3RepositoryExtractFreezeTest §6b, which checks method names, not param types) that holds
+ *  until the slim-token compatibility shim is retired (B3). */
 interface MessageRepository {
     suspend fun getMessages(sessionId: String, limit: Int? = null): Result<List<MessageWithParts>>
     suspend fun getMessagesPaged(
