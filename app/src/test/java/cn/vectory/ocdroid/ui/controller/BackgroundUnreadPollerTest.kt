@@ -40,7 +40,8 @@ class BackgroundUnreadPollerTest {
         every { repository.usesSlimStatusFanOut } returns false
         coEvery { repository.getActiveSessionIds() } returns Result.success(emptySet())
         return BackgroundUnreadPoller(
-        repository = repository,
+        sessionRepository = repository,
+        connectionRepository = repository,
         settingsManager = settings,
         store = store,
         clock = { now },
@@ -222,7 +223,8 @@ class BackgroundUnreadPollerTest {
         )
 
         val poller = BackgroundUnreadPoller(
-            repository = repository,
+            sessionRepository = repository,
+            connectionRepository = repository,
             settingsManager = settings,
             store = store,
             clock = { now },

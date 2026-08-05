@@ -1,7 +1,7 @@
 package cn.vectory.ocdroid.ui.controller
 
 import cn.vectory.ocdroid.data.model.Message
-import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.data.repository.MessageRepository
 import cn.vectory.ocdroid.di.UiApplicationScope
 import cn.vectory.ocdroid.ui.AppAction
 import cn.vectory.ocdroid.ui.SharedStateStore
@@ -19,7 +19,7 @@ import javax.inject.Singleton
  *    current session (`currentSessionId == sid`). These are `LastAssistantErrorAttached`
  *    payloads that couldn't attach at arrival (route mismatch / last==null /
  *    last already has error). The coordinator re-reads the transcript via
- *    [OpenCodeRepository.getMessages] to find the server-identified error-bearing
+ *    [MessageRepository.getMessages] to find the server-identified error-bearing
  *    assistant (B2: `session.error` carries no messageId, so GET is required).
  *
  *  - **(c) GET fallback drain**: [ChatState.pendingErrorCheck] entries where the
@@ -42,7 +42,7 @@ import javax.inject.Singleton
 class ErrorRecoveryCoordinator @Inject constructor(
     @UiApplicationScope private val scope: CoroutineScope,
     private val store: SharedStateStore,
-    private val repository: OpenCodeRepository,
+    private val repository: MessageRepository,
 ) {
     /** Single-threaded (Main.immediate) — safe without locks. */
     private val inFlight = mutableSetOf<String>()
@@ -77,7 +77,7 @@ class ErrorRecoveryCoordinator @Inject constructor(
     }
 
     /**
-     * Fetches messages for [sid] via [OpenCodeRepository.getMessages], finds the
+     * Fetches messages for [sid] via [MessageRepository.getMessages], finds the
      * most recent error-bearing assistant, and dispatches [AppAction.ErrorLocalizationSettled].
      * On network failure, settles as a no-op (markers cleared; banner already displays).
      */

@@ -43,7 +43,7 @@ import com.mikepenz.markdown.compose.components.MarkdownComponentModel
 import com.mikepenz.markdown.compose.components.markdownComponents
 import com.mikepenz.markdown.compose.elements.MarkdownTableBasicText
 import com.mikepenz.markdown.m3.Markdown
-import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.data.repository.FileVcsRepository
 import cn.vectory.ocdroid.ui.theme.LocalMarkdownFontSizes
 import cn.vectory.ocdroid.ui.theme.markdownTypography
 import cn.vectory.ocdroid.ui.util.DataUriImageTransformer
@@ -151,7 +151,7 @@ internal fun TextPart(
     text: String,
     isUser: Boolean,
     modifier: Modifier = Modifier.fillMaxWidth(),
-    repository: OpenCodeRepository? = null,
+    repository: FileVcsRepository? = null,
     workspaceDirectory: String? = null,
     isStreaming: Boolean = false,
     // §0.6.2 ora-2: stable identity ("$messageId|$partId") shared between the
@@ -267,7 +267,7 @@ internal fun TextPart(
 @Composable
 internal fun ResolvedMarkdownText(
     text: String,
-    repository: OpenCodeRepository,
+    repository: FileVcsRepository,
     workspaceDirectory: String?,
     modifier: Modifier = Modifier
 ) {

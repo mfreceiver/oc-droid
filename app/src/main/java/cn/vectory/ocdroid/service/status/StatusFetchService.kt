@@ -1,7 +1,8 @@
 package cn.vectory.ocdroid.service.status
 
 import cn.vectory.ocdroid.data.model.SessionStatus
-import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.data.repository.ConnectionRepository
+import cn.vectory.ocdroid.data.repository.SessionRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import javax.inject.Inject
@@ -27,7 +28,7 @@ import javax.inject.Singleton
  * # Contract (verbatim from the legacy [StatusAggregatorImpl.refresh] fold)
  *
  * Returns a [Result] of [StatusFetch]:
- *  - **slim mode** (`repository.usesSlimStatusFanOut`): one
+ *  - **slim mode** (`connectionRepository.usesSlimStatusFanOut`): one
  *    `getSlimapiSessionsStatus(dir)` per registered workdir (the sidecar
  *    requires a single directory per call). Merged map + the set of workdirs
  *    whose per-directory call FAILED. Empty-registered-workdirs (cold-start) →
@@ -49,7 +50,8 @@ import javax.inject.Singleton
  */
 @Singleton
 class StatusFetchService @Inject internal constructor(
-    private val repository: OpenCodeRepository,
+    private val sessionRepository: SessionRepository,
+    private val connectionRepository: ConnectionRepository,
 ) {
     /**
      * T-R1 (slimapi R1) 方案A Issue2: carrier for a status-fetch result shared
@@ -73,13 +75,13 @@ class StatusFetchService @Inject internal constructor(
      *  reducer bins `sessionId → workdir`; the fetch only needs the workdir set).
      */
     suspend fun fetch(snapshot: StatusSnapshot): Result<StatusFetch> =
-        if (repository.usesSlimStatusFanOut) {
+        if (connectionRepository.usesSlimStatusFanOut) {
             withContext(Dispatchers.IO) {
                 val merged = mutableMapOf<String, SessionStatus>()
                 val succeeded = mutableSetOf<String>()
                 val failed = mutableSetOf<String>()
                 for (dir in snapshot.registeredWorkdirs) {
-                    repository.getSlimapiSessionsStatus(dir)
+                    sessionRepository.getSlimapiSessionsStatus(dir)
                         .onSuccess { merged.putAll(it); succeeded.add(dir) }
                         .onFailure { failed.add(dir) }
                 }
@@ -103,7 +105,7 @@ class StatusFetchService @Inject internal constructor(
             // Legacy: single host-global call. failedWorkdirs is always empty,
             // so the reducer's fold is byte-for-byte identical to the pre-T-R1 path.
             withContext(Dispatchers.IO) {
-                repository.getSessionStatus().map { StatusFetch(it, emptySet()) }
+                sessionRepository.getSessionStatus().map { StatusFetch(it, emptySet()) }
             }
         }
 }

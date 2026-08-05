@@ -2,7 +2,7 @@ package cn.vectory.ocdroid.service.streaming
 
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SessionStatus
-import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.data.repository.SessionRepository
 import cn.vectory.ocdroid.data.repository.ServerCompatProfile
 import cn.vectory.ocdroid.data.repository.StatusOutcome
 import cn.vectory.ocdroid.service.identity.ConnectionIdentity
@@ -67,7 +67,7 @@ class SlimFanOutRunnerGateTest {
         val store = ConnectionIdentityStore()
         bindIdentity(store)
 
-        val repo = mockk<OpenCodeRepository>(relaxed = true)
+        val repo = mockk<SessionRepository>(relaxed = true)
         // Stub the sids the runner will see so relaxed-mock doesn't cause issues.
         coEvery { repo.getSlimapiSessionStatusOutcome("sid-a") } returns
             StatusOutcome.Success("sid-a", SessionStatus(type = "idle"))
@@ -120,7 +120,7 @@ class SlimFanOutRunnerGateTest {
         val store = ConnectionIdentityStore()
         bindIdentity(store)
 
-        val repo = mockk<OpenCodeRepository>(relaxed = true)
+        val repo = mockk<SessionRepository>(relaxed = true)
         coEvery { repo.getSlimapiSessionStatusOutcome("sid-a") } returns
             StatusOutcome.Success("sid-a", SessionStatus(type = "idle"))
         val fanOut = SlimStatusFanOut(repo)

@@ -451,7 +451,7 @@ class OpenCodeRepositoryDirectoryTest {
                 .setHeader("X-Next-Cursor", "cursor-abc")
         )
 
-        val result = repository.getMessagesPaged("session-1", limit = 50, before = null)
+        val result = repository.getMessagesPaged("session-1", limit = 50, before = null, token = repository.captureSlimCommitToken())
 
         assertTrue(result.isSuccess)
         val page = result.getOrThrow()
@@ -470,7 +470,8 @@ class OpenCodeRepositoryDirectoryTest {
         val result = repository.getMessagesPaged(
             sessionId = "session-1",
             limit = 20,
-            before = "older-cursor"
+            before = "older-cursor",
+            token = repository.captureSlimCommitToken(),
         )
 
         assertTrue(result.isSuccess)

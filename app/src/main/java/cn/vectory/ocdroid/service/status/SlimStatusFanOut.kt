@@ -1,6 +1,6 @@
 package cn.vectory.ocdroid.service.status
 
-import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.data.repository.SessionRepository
 import cn.vectory.ocdroid.data.repository.StatusOutcome
 import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.runSuspendCatching
@@ -84,7 +84,7 @@ import kotlinx.coroutines.sync.withPermit
  *   perf-hint). Test-only override; production stays at 4.
  */
 class SlimStatusFanOut(
-    private val repository: OpenCodeRepository,
+    private val repository: SessionRepository,
     private val concurrency: Int = DEFAULT_CONCURRENCY,
 ) {
 
@@ -170,7 +170,7 @@ class SlimStatusFanOut(
 
     /**
      * Per-sid fetch with [runSuspendCatching] belt-and-suspenders. T4's
-     * [OpenCodeRepository.getSlimapiSessionStatusOutcome] is already
+     * [SessionRepository.getSlimapiSessionStatusOutcome] is already
      * exception-tolerant (every IOException / SerializationException /
      * unexpected Throwable is caught + collapsed to a [StatusOutcome]
      * variant), so a thrown exception here is truly unexpected. Defensive

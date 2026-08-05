@@ -120,7 +120,7 @@ class AppCoreDispatcherTest : MainViewModelTestBase() {
 
     @Test
     fun `dispatchSessionEffect handles LoadMessages and fetches the page`() = runTest {
-        coEvery { repository.getMessagesPaged(any(), any(), any()) } returns
+        coEvery { repository.getMessagesPaged(any(), any(), any(), any()) } returns
             Result.success(MessagesPage(emptyList(), null))
         val core = newCore()
 
@@ -128,7 +128,7 @@ class AppCoreDispatcherTest : MainViewModelTestBase() {
         advanceUntilIdle()
 
         assertTrue(handled)
-        coVerify { repository.getMessagesPaged("sess-A", any(), any()) }
+        coVerify { repository.getMessagesPaged("sess-A", any(), any(), any()) }
     }
 
     @Test
@@ -698,7 +698,7 @@ class AppCoreDispatcherTest : MainViewModelTestBase() {
         )
         // C2 tail: loadMessages fired after the hydrate.
         io.mockk.coVerify(atLeast = 1) {
-            repository.getMessagesPaged(any(), any(), any())
+            repository.getMessagesPaged(any(), any(), any(), any())
         }
     }
 
@@ -833,7 +833,7 @@ class AppCoreDispatcherTest : MainViewModelTestBase() {
         )
         // loadMessages never ran (entry guard returned before it).
         io.mockk.coVerify(exactly = 0) {
-            repository.getMessagesPaged(any(), any(), any())
+            repository.getMessagesPaged(any(), any(), any(), any())
         }
     }
 
@@ -869,7 +869,7 @@ class AppCoreDispatcherTest : MainViewModelTestBase() {
             c.store.chatFlow.value.messages.isEmpty(),
         )
         io.mockk.coVerify(exactly = 0) {
-            repository.getMessagesPaged(any(), any(), any())
+            repository.getMessagesPaged(any(), any(), any(), any())
         }
     }
 

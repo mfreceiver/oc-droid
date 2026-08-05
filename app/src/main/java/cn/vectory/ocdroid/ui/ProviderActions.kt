@@ -8,8 +8,8 @@ package cn.vectory.ocdroid.ui
  * Future cleanup (batch3e+): may be inlined into individual VM private methods.
  */
 
+import cn.vectory.ocdroid.data.repository.CatalogRepository
 import cn.vectory.ocdroid.data.repository.HostProfileStore
-import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.util.SettingsManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.isActive
@@ -17,7 +17,7 @@ import kotlinx.coroutines.launch
 
 internal fun launchLoadProviders(
     scope: CoroutineScope,
-    repository: OpenCodeRepository,
+    repository: CatalogRepository,
     slices: SliceFlows,
     settingsManager: SettingsManager,
     hostProfileStore: HostProfileStore,

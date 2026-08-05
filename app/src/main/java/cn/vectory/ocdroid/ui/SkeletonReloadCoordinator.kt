@@ -3,7 +3,7 @@ package cn.vectory.ocdroid.ui
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.Part
 import cn.vectory.ocdroid.data.repository.MessagesPage
-import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.data.repository.MessageRepository
 import cn.vectory.ocdroid.service.identity.ConnectionIdentity
 import cn.vectory.ocdroid.ui.StreamOwnedState
 import cn.vectory.ocdroid.ui.chat.PartExpandState
@@ -197,7 +197,7 @@ private enum class ReloadOutcome {
  */
 class SkeletonReloadCoordinator(
     private val scope: CoroutineScope,
-    private val repository: OpenCodeRepository,
+    private val repository: MessageRepository,
     private val slices: SliceFlows,
     private val foreground: StateFlow<Boolean> = MutableStateFlow(true),
     private val currentTransport: () -> TransportSnapshot? = { null },

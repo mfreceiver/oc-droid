@@ -1,7 +1,7 @@
 package cn.vectory.ocdroid.ui.controller
 
 import cn.vectory.ocdroid.data.model.Session
-import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.data.repository.SessionRepository
 import cn.vectory.ocdroid.ui.AppAction
 import cn.vectory.ocdroid.ui.SharedStateStore
 import kotlinx.coroutines.CoroutineScope
@@ -25,7 +25,7 @@ private data class RootHydration(
 
 /** Recursively loads roots with bounded root-level concurrency. */
 internal suspend fun loadCompleteSessionTrees(
-    repository: OpenCodeRepository,
+    repository: SessionRepository,
     roots: List<Session>,
     maxConcurrency: Int = 6,
     shouldContinue: () -> Boolean = { true },
@@ -45,7 +45,7 @@ internal suspend fun loadCompleteSessionTrees(
 }
 
 private suspend fun hydrateRoot(
-    repository: OpenCodeRepository,
+    repository: SessionRepository,
     root: Session,
     shouldContinue: () -> Boolean,
 ): RootHydration {
@@ -68,7 +68,7 @@ private suspend fun hydrateRoot(
 
 /** Cached foreground loader: complete roots are skipped until invalidated. */
 internal class ForegroundSessionTreeHydrator(
-    private val repository: OpenCodeRepository,
+    private val repository: SessionRepository,
     private val store: SharedStateStore,
     private val scope: CoroutineScope,
 ) {

@@ -3,7 +3,6 @@ package cn.vectory.ocdroid.ui.controller
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.Part
 import cn.vectory.ocdroid.data.model.Session
-import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.ui.AppAction
 import cn.vectory.ocdroid.ui.PendingScrollRequest
 import cn.vectory.ocdroid.ui.ScrollBehavior
@@ -65,7 +64,6 @@ internal data class CacheWindowKey(val profileId: String, val sessionId: String)
 class SessionSwitcher(
     private val store: SharedStateStore,
     private val settingsManager: SettingsManager,
-    private val repository: OpenCodeRepository,
     private val effects: SharedEffectBus,
     /** R-20 Phase 1: provider for the current host's serverGroupFp. Used to
      *  key the LRU and to emit VerifyAndHydrate. */

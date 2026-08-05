@@ -40,7 +40,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.FileNode
-import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.data.repository.FileVcsRepository
 import cn.vectory.ocdroid.ui.theme.AppBottomSheet
 import cn.vectory.ocdroid.ui.theme.Dimens
 
@@ -54,7 +54,7 @@ import cn.vectory.ocdroid.ui.theme.Dimens
  * affordance returns to the parent. Confirming calls [onSelect] with the
  * currently displayed path (absolute, `/`-rooted).
  *
- * Listings are fetched via [OpenCodeRepository.getFileTreeForDirectory], which
+ * Listings are fetched via [FileVcsRepository.getFileTreeForDirectory], which
  * bypasses the repository's session-scoped workdir injection so browsing is
  * independent of the currently selected session.
  *
@@ -65,7 +65,7 @@ import cn.vectory.ocdroid.ui.theme.Dimens
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DirectoryPickerSheet(
-    repository: OpenCodeRepository,
+    repository: FileVcsRepository,
     onDismiss: () -> Unit,
     onSelect: (path: String) -> Unit
 ) {

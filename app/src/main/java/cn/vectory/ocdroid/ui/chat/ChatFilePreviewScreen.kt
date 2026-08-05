@@ -26,7 +26,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.FileContent
-import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.data.repository.FileVcsRepository
 import cn.vectory.ocdroid.ui.files.FilePreviewPane
 import cn.vectory.ocdroid.ui.files.resolveRelativePreviewPath
 import cn.vectory.ocdroid.ui.theme.Dimens
@@ -36,7 +36,7 @@ import kotlinx.coroutines.CancellationException
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun ChatFilePreviewScreen(
-    repository: OpenCodeRepository,
+    repository: FileVcsRepository,
     workdir: String?,
     path: String?,
     onClose: () -> Unit,

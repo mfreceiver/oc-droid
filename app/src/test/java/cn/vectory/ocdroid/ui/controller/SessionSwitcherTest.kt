@@ -103,7 +103,6 @@ class SessionSwitcherTest {
         switcher = SessionSwitcher(
             store = store,
             settingsManager = settingsManager,
-            repository = repository,
             effects = effects,
             currentProfileId = { "test-fp" },
             clock = { nowMs }
@@ -1023,7 +1022,6 @@ class SessionSwitcherTest {
         val switcher2 = SessionSwitcher(
             store = store,
             settingsManager = settingsManager,
-            repository = repository,
             effects = effects,
             currentProfileId = { "new-fp" })
         // switcher2 shares the same sessionWindowCache (same store/controller instance pair)?

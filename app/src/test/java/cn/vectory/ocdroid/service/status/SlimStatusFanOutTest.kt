@@ -1,7 +1,7 @@
 package cn.vectory.ocdroid.service.status
 
 import cn.vectory.ocdroid.data.model.SessionStatus
-import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.data.repository.SessionRepository
 import cn.vectory.ocdroid.data.repository.StatusOutcome
 import io.mockk.coEvery
 import io.mockk.coVerify
@@ -177,7 +177,7 @@ class SlimStatusFanOutTest {
 
     @Test
     fun `C1 - checkSlimSessionsStatuses issues one per-session GET per sid`() = runTest {
-        val repo = mockk<OpenCodeRepository>(relaxed = true)
+        val repo = mockk<SessionRepository>(relaxed = true)
         coEvery { repo.getSlimapiSessionStatusOutcome("s1") } returns
             StatusOutcome.Success("s1", SessionStatus(type = "idle"))
         coEvery { repo.getSlimapiSessionStatusOutcome("s2") } returns
@@ -196,7 +196,7 @@ class SlimStatusFanOutTest {
 
     @Test
     fun `C1 - empty input returns Empty summary and issues zero GETs`() = runTest {
-        val repo = mockk<OpenCodeRepository>(relaxed = true)
+        val repo = mockk<SessionRepository>(relaxed = true)
         val fanOut = SlimStatusFanOut(repo)
 
         val summary = fanOut.checkSlimSessionsStatuses(emptyList())
@@ -207,7 +207,7 @@ class SlimStatusFanOutTest {
 
     @Test
     fun `C1 - duplicates collapse to a single GET per unique sid`() = runTest {
-        val repo = mockk<OpenCodeRepository>(relaxed = true)
+        val repo = mockk<SessionRepository>(relaxed = true)
         coEvery { repo.getSlimapiSessionStatusOutcome("s1") } returns
             StatusOutcome.Success("s1", SessionStatus(type = "idle"))
         val fanOut = SlimStatusFanOut(repo)
@@ -220,7 +220,7 @@ class SlimStatusFanOutTest {
 
     @Test
     fun `C2 - 503 Retry outcome routes to retryableCount`() = runTest {
-        val repo = mockk<OpenCodeRepository>(relaxed = true)
+        val repo = mockk<SessionRepository>(relaxed = true)
         coEvery { repo.getSlimapiSessionStatusOutcome("s1") } returns
             StatusOutcome.Retry("s1", "upstream_unavailable")
         val fanOut = SlimStatusFanOut(repo)
@@ -233,7 +233,7 @@ class SlimStatusFanOutTest {
 
     @Test
     fun `C2 - 404 SessionMissing routes to missingSids`() = runTest {
-        val repo = mockk<OpenCodeRepository>(relaxed = true)
+        val repo = mockk<SessionRepository>(relaxed = true)
         coEvery { repo.getSlimapiSessionStatusOutcome("s1") } returns
             StatusOutcome.SessionMissing("s1")
         val fanOut = SlimStatusFanOut(repo)
@@ -246,7 +246,7 @@ class SlimStatusFanOutTest {
 
     @Test
     fun `C5 - fake-idle cross-check routes idle-for-unknown-sid to missingSids`() = runTest {
-        val repo = mockk<OpenCodeRepository>(relaxed = true)
+        val repo = mockk<SessionRepository>(relaxed = true)
         coEvery { repo.getSlimapiSessionStatusOutcome("s1") } returns
             StatusOutcome.Success("s1", SessionStatus(type = "idle"))
         val fanOut = SlimStatusFanOut(repo)
@@ -262,7 +262,7 @@ class SlimStatusFanOutTest {
 
     @Test
     fun `CE - an unexpected throw from getSlimapiSessionStatusOutcome collapses to Retry(null)`() = runTest {
-        val repo = mockk<OpenCodeRepository>(relaxed = true)
+        val repo = mockk<SessionRepository>(relaxed = true)
         coEvery { repo.getSlimapiSessionStatusOutcome("s1") } throws
             IllegalStateException("unexpected")
         val fanOut = SlimStatusFanOut(repo)
@@ -281,7 +281,7 @@ class SlimStatusFanOutTest {
         // T13-C1 concurrency: with concurrency=2, 5 sids cannot ALL run
         // concurrently — verify by interleaving delays + observing at
         // most `concurrency` in-flight at once.
-        val repo = mockk<OpenCodeRepository>(relaxed = true)
+        val repo = mockk<SessionRepository>(relaxed = true)
         val inFlight = java.util.concurrent.atomic.AtomicInteger(0)
         val maxInFlight = java.util.concurrent.atomic.AtomicInteger(0)
         coEvery { repo.getSlimapiSessionStatusOutcome(any()) } coAnswers {
@@ -305,7 +305,7 @@ class SlimStatusFanOutTest {
 
     @Test
     fun `U-CQ8 - legacy knownSessionIds overload still works (backward compat)`() = runTest {
-        val repo = mockk<OpenCodeRepository>(relaxed = true)
+        val repo = mockk<SessionRepository>(relaxed = true)
         coEvery { repo.getSlimapiSessionStatusOutcome("s1") } returns
             StatusOutcome.Success("s1", SessionStatus(type = "idle"))
         val fanOut = SlimStatusFanOut(repo)
@@ -326,7 +326,7 @@ class SlimStatusFanOutTest {
         // The provider re-reads the snapshot AFTER awaitAll → returns a set
         // that no longer contains "B" → "B"'s Success(idle) is correctly
         // reclassified as missing (NOT trusted as a stale idle).
-        val repo = mockk<OpenCodeRepository>(relaxed = true)
+        val repo = mockk<SessionRepository>(relaxed = true)
         val inFlight = java.util.concurrent.atomic.AtomicInteger(0)
         val networkDoneWhenProviderRan = java.util.concurrent.atomic.AtomicBoolean(false)
         coEvery { repo.getSlimapiSessionStatusOutcome(any()) } coAnswers {
@@ -373,7 +373,7 @@ class SlimStatusFanOutTest {
         // the snapshot AFTER awaitAll → returns a set that NOW contains "C" →
         // "C"'s Success(idle) is NOT misjudged missing. (The pre-U-CQ8 overload
         // captured {A} before the sweep → "C" would have been a false missing.)
-        val repo = mockk<OpenCodeRepository>(relaxed = true)
+        val repo = mockk<SessionRepository>(relaxed = true)
         coEvery { repo.getSlimapiSessionStatusOutcome(any()) } coAnswers {
             StatusOutcome.Success(firstArg(), SessionStatus(type = "idle"))
         }
@@ -400,7 +400,7 @@ class SlimStatusFanOutTest {
         // Same scenario as above but via the legacy overload with the PRE-sweep
         // snapshot {A} (C not yet known). This is the BUG U-CQ8 fixes: "C"'s
         // idle is misjudged missing because the stale snapshot omits it.
-        val repo = mockk<OpenCodeRepository>(relaxed = true)
+        val repo = mockk<SessionRepository>(relaxed = true)
         coEvery { repo.getSlimapiSessionStatusOutcome(any()) } coAnswers {
             StatusOutcome.Success(firstArg(), SessionStatus(type = "idle"))
         }
@@ -420,7 +420,7 @@ class SlimStatusFanOutTest {
 
     @Test
     fun `U-CQ8 - provider returning null disables the cross-check`() = runTest {
-        val repo = mockk<OpenCodeRepository>(relaxed = true)
+        val repo = mockk<SessionRepository>(relaxed = true)
         coEvery { repo.getSlimapiSessionStatusOutcome("s1") } returns
             StatusOutcome.Success("s1", SessionStatus(type = "idle"))
         val fanOut = SlimStatusFanOut(repo)

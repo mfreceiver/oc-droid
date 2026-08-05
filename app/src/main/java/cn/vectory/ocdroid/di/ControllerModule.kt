@@ -162,13 +162,11 @@ object ControllerModule {
     fun provideSessionSwitcher(
         store: SharedStateStore,
         settingsManager: SettingsManager,
-        repository: OpenCodeRepository,
         effectBus: SharedEffectBus,
         @Named("currentProfileId") currentProfileId: () -> String,
     ): SessionSwitcher = SessionSwitcher(
         store = store,
         settingsManager = settingsManager,
-        repository = repository,
         effects = effectBus,
         currentProfileId = currentProfileId,
     )

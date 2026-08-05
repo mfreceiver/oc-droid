@@ -1,6 +1,7 @@
 package cn.vectory.ocdroid.service.status
 
-import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.data.repository.ConnectionRepository
+import cn.vectory.ocdroid.data.repository.SessionRepository
 import cn.vectory.ocdroid.di.UiApplicationScope
 import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
 import cn.vectory.ocdroid.ui.SharedStateStore
@@ -76,7 +77,8 @@ abstract class StatusModule {
         @Provides
         @Singleton
         fun provideStatusFetchService(
-            repository: OpenCodeRepository,
-        ): StatusFetchService = StatusFetchService(repository)
+            sessionRepository: SessionRepository,
+            connectionRepository: ConnectionRepository,
+        ): StatusFetchService = StatusFetchService(sessionRepository, connectionRepository)
     }
 }
