@@ -1,0 +1,46 @@
+{
+  "bundle_id": "slimapi-p2-2026-08-05",
+  "reviewer": "rev-kimi",
+  "scope": "slimapi-p2",
+  "date": "2026-08-05",
+  "branch": "feature/slimapi-p2",
+  "commit_range": "29c0674a..af2e8d17",
+  "base": "25f41b70",
+  "verdict": "APPROVE_WITH_NITS",
+  "verdict_summary": "Correct, disciplined, cacheKey fix real and verified; one stale comment + one test-gap, neither blocking.",
+  "dimensions": {
+    "correctness": "PASS — single global call + local filtering is equivalent to N per-dir calls given upstream no-op; all-or-nothing semantics consistent across all 3 sites' authority-reducer inputs; cold-start empty-success preserved in all 3 sites.",
+    "discipline": "PASS — downstream consumers not merged (ProcessStatusPoller→GlobalBusyState/FGS, BackgroundUnreadPoller→unread/idle); allSessionsById directory ownership preserved; per-dir call capability retained as fallback; foreground StatusPollOrchestrator bypasses the cache (fresh fallback).",
+    "risk": "PASS — Mutex-across-network safe (only 2 callers/30s, no nested locks); double-checked locking correct (@Volatile entry + immutable CacheEntry); host-switch defense-in-depth verified (caller identity guards drop stale cross-host results)."
+  },
+  "findings": [
+    {
+      "severity": "minor",
+      "id": "wiring-test-gap",
+      "desc": "No end-to-end test pins cross-caller cacheKey alignment; SlimStatusFetchCacheTest covers the cache mechanism + different-key-miss regression, but not that both call sites agree on the key expression.",
+      "status": "accepted — production code correct today; regression guarded by SlimStatusFetchCacheTest (different-key→no-dedup) + the corrected comment (af2e8d17) warning against dir-as-key."
+    },
+    {
+      "severity": "minor",
+      "id": "stale-comment",
+      "desc": "BackgroundUnreadPoller.kt loadSlimSessionStatus comment claimed 'the first [directory] is used as both the request directory and the cache scoping key' — false since f3df423a; described the exact pre-fix bug.",
+      "status": "fixed in af2e8d17 (comment rewritten to warn against reintroduction)."
+    },
+    {
+      "severity": "nit",
+      "id": "dead-partial-failure-plumbing",
+      "desc": "failedDirSessionIds (StatusAggregatorImpl:413-416) + failedWorkdirs carrier now unreachable-non-empty on both slim and legacy paths.",
+      "status": "accepted — kept deliberately for structural compatibility (documented); future cleanup."
+    },
+    {
+      "severity": "nit",
+      "id": "stale-sidecar-comment",
+      "desc": "OpenCodeRepository.kt:888 still says directory is 'REQUIRED by the sidecar' (stale since sidecar 5e4e750 made it optional).",
+      "status": "out of scope — behavior unaffected (ocdroid deliberately still passes a directory)."
+    }
+  ],
+  "nits_addressed_pre_merge": ["stale-comment (af2e8d17)"],
+  "check_sh": "exit 0 (compileDebugKotlin + detekt 0 findings + testDebugUnitTest), run on reconciled branch HEAD af2e8d17",
+  "confidence": "high on correctness/discipline; medium-high on phase-alignment reasoning (static only, not runtime-verified).",
+  "note": "Review was static/read-only. check.sh greenness independently re-verified by orchestrator on af2e8d17 (exit 0)."
+}

@@ -1,0 +1,40 @@
+{
+  "bundle_id": "slimapi-p2-2026-08-05",
+  "reviewer": "rev-gpt",
+  "gate": "second (post rev-kimi)",
+  "scope": "slimapi-p2",
+  "date": "2026-08-05",
+  "branch": "feature/slimapi-p2",
+  "commit_range": "25f41b70..af2e8d17",
+  "base": "25f41b70",
+  "head": "af2e8d17",
+  "verdict": "APPROVE_WITH_NITS",
+  "verdict_summary": "No correctness blocker under the stated hostProfileId cache-scope contract; one test-evidence gap (cross-caller wiring) + one endpointFp scope note, neither blocking.",
+  "blockers": "None found in the production implementation under the stated hostProfileId cache-scope contract.",
+  "dimensions": {
+    "correctness": "PASS — one-call paths cover the complete global map; reducer coverage metadata coherent in all 3 sites; cold-start preserved. Minor test-evidence gap (cache tested in isolation, not via both production callers).",
+    "concurrency": "PASS — volatile fast path + mutex recheck + mutex-held single-flight correct; callers on Dispatchers.Default, StatusFetchService hops to IO, no Main hop/block; no nested-lock reentrancy; failure-caching consistent with fail-closed consumers.",
+    "fallback_safety": "PASS — per-directory repository capability retained (SessionRepository/Gateway/OpenCodeRepository); foreground calls repo directly (fresh fallback); allSessionsById ownership preserved; reversion to per-dir feasible without seam redesign.",
+    "discipline": "PASS — ProcessStatusPoller still drives GlobalBusyState/FGS via StatusAggregatorInput.refresh; BackgroundUnreadPoller still does store commit + unread evaluation; only the fetch changed; foreground bypasses cache.",
+    "sidecar_compat": "PASS — Retrofit method still requires directory; all callers pass a real directory via .first(); works on old sidecar (required param, accepts any value) + new sidecar (optional); 404→standard fallback intact.",
+    "pre_auth_audit": "PASS — main HEAD exactly 25f41b70; main status clean; feature ancestry af2e8d17→...→29c0674a→25f41b70 correct; no slimapi-p2 commit leaked to main."
+  },
+  "findings": [
+    {
+      "severity": "minor",
+      "id": "caller-wiring-test-gap",
+      "desc": "SlimStatusFetchCacheTest exercises the cache in isolation (different-key miss, concurrent single-flight) but never invokes StatusFetchService + BackgroundUnreadPoller against one shared cache instance — so the regression test would still pass if one caller reverted to a directory key. Same gap rev-kimi flagged.",
+      "status": "accepted non-blocking — production wiring verified correct by inspection (both callers use hostProfileId ?: DEFAULT_CACHE_KEY); guarded by SlimStatusFetchCacheTest different-key→no-dedup + the corrected comment (af2e8d17)."
+    },
+    {
+      "severity": "minor",
+      "id": "endpointfp-cache-scope",
+      "desc": "cacheKey is hostProfileId only, not endpointFp. An endpoint-only reconfigure (same profileId, different endpointFp) could serve a stale cached result for up to 10s. StatusAggregatorImpl fences pre-reconfigure requests, but a post-reconfigure cache hit has the current epoch; BackgroundUnreadPoller.identityValid() does not check endpoint.",
+      "status": "accepted non-blocking — adding endpointFp to the key would require threading it to BOTH callers; BackgroundUnreadPoller lacks ready endpointFp access, so asymmetric keys would re-diverge and break dedup (worse). Practical risk near-zero: endpoint-only-reconfigure is rare, 10s TTL bounds the window, authority reducer intersects with the current tree (stale cross-endpoint sids dropped), sids are unique. Mitigated by TTL + reducer intersection. Documented as an explicit cache-scope tradeoff."
+    }
+  ],
+  "circuit_breaker": "not triggered — passed on first rev-gpt attempt",
+  "check_sh": "exit 0 independently re-verified by orchestrator on af2e8d17 (compile + detekt 0 findings + testDebugUnitTest). rev-gpt could not execute check.sh (review env read-only) — greenness taken from orchestrator verification.",
+  "confidence": "medium-high for static correctness (verified source, reducer inputs, dispatcher paths, DI wiring, sidecar param handling, commit ancestry, main cleanliness).",
+  "note": "Second gate of dual-gate review (rev-kimi → rev-gpt). Both APPROVE_WITH_NITS, no blockers. Merge/release gate satisfied."
+}

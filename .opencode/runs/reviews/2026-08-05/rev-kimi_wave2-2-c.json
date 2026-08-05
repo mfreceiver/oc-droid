@@ -1,0 +1,46 @@
+{
+  "reviewer": "rev-kimi",
+  "bundle_id": "wave2-2-c-2026-08-05",
+  "scope": "wave2-2-c",
+  "branch": "feature/wave2-c",
+  "commits": ["1b000cb0", "64c1ab4d"],
+  "date": "2026-08-05",
+  "verdict": "approve-with-nits",
+  "completion_assessment": "complete",
+  "dimensions": {
+    "correctness": {
+      "rating": "pass",
+      "notes": "Task 1: markdownTypographyCompact deletion verified safe — rg across app/ (main+test+androidTest) returns zero remaining refs (exit 1); diff is a pure -24-line removal of exactly one function from Type.kt. Task 2: independently re-verified all 11 private demotions have zero external member-access refs. 6 of 7 ctor vals show zero .sym hits outside AppCore.kt; the identityStore hits are realRepo.identityStore = OpenCodeRepository own @Inject lateinit var identityStore (OpenCodeRepository.kt:211) — a different class member, not AppCore access. Same-name collisions for sessionOpener (CommandOrchestrator.kt:36 own ctor param) and sendOrchestrator (DraftSessionOrchestrator.kt:41 own ctor param) are Pattern-B-injected distinct members, correctly not confused. Test construction of AppCore (MainViewModelTestBase.kt:258, positional ctor args) is visibility-agnostic — Kotlin ctor params are unaffected by property visibility. All 11 demoted symbols are genuinely used within AppCore.kt (sseEventBridge.start(sseEventStream.events){identityStore.currentEpoch()} :471; foregroundCatchUpController.onServerConnected :1083; processStatusPoller backoff :1119-1127; identityStore.currentIdentity :1149; pass-throughs :362/:367/:370; unreadSoakController/errorRecoveryCoordinator intentionally unused-in-AppCore per their KDoc eager-singleton-construction role). Effect routing bodies (dispatchEffect/dispatchSessionSyncEffect) untouched — the diff is 11 visibility-keyword-only line changes."
+    },
+    "completeness": {
+      "rating": "pass",
+      "notes": "The recon-to-compiler correction narrative is accurate and the final private set is defensible — neither over- nor under-reverted. 11+12=23 reconciles with the recon candidate count. I verified external call sites exist for ALL 12 reverted symbols, not just 2-3: writeChat/writeSessionList/writeHost/sessionSyncCoordinator (AppCoreOrchestrationTest :102/:103/:1854/:1251), writeConnection (AppCoreOrchestrationTest:1025), writeComposer/writeSettings (ComposerViewModelPassThroughTest :131/:48), writeUnread (SessionViewModelTest:984), writeFile (OrchestratorViewModel.kt:431 — production caller), writeSessionWindow (AppCoreDispatcherTest:240 core.writeSessionWindow), and refreshOrchestrator/draftSessionOrchestrator via implicit-receiver access inside internal fun AppCore.* extension shims in AppCoreOrchestration.kt (:269/:278/:284) — Kotlin extensions cannot access private members, so internal is load-bearing there. Commit message honestly documents the recon failure and correctly states the compiler is authoritative."
+    },
+    "discipline": {
+      "rating": "pass",
+      "notes": "Bundle touches exactly 2 files (Type.kt, AppCore.kt — git diff 25f41b70..64c1ab4d --stat confirmed). T3RepositoryExtractFreezeTest untouched; SlimCommitToken family + DEFAULT_SERVER untouched (live refs across 20+ main/test files unchanged). lastNavPage and MessageRemovedFromFull correctly retained with live production callers (OrchestratorViewModel/SettingsManager/NavigationPrefs; AppAction/ChatFieldsReducer). AppCore irreducible-core role retained: public entry points, slice accessors, 15 shared-infra vals, and the still-needed internal members (composerController/sessionSwitcher/hostProfileController/sessionSyncCoordinator/connectionCoordinator/refreshOrchestrator/draftSessionOrchestrator + 9 writeXxx) all preserved. Conservative principle honored: visibility-only change, no renames/logic; when recon conflicted with the compiler, the candidate was reverted rather than forced. Worktree clean == HEAD at review time."
+    }
+  },
+  "findings": [
+    {
+      "severity": "nit",
+      "issue": "writeTraffic is now private and has ZERO call sites anywhere — including within AppCore.kt itself (only its declaration exists). It was already dead code as internal before this bundle; the demotion is harmless (unused-private warning at most) and within the bundle visibility-only scope, but the symbol is a clean deletion candidate for a follow-up rather than a member worth keeping at any visibility.",
+      "location": "app/src/main/java/cn/vectory/ocdroid/ui/AppCore.kt:305"
+    },
+    {
+      "severity": "nit",
+      "issue": "Pre-existing stale comment block (not introduced by this bundle): claims the extension shims access orchestrators via AppCore internal lateinit var fields initialized by Hilt @Inject method postInject — the fields are actually internal val ... by lazy composition, no lateinit/postInject mechanism exists. Since this bundle operates in exactly this seam (demoting the neighboring lazy vals), the misdescription is now doubly confusing; fix opportunistically.",
+      "location": "app/src/main/java/cn/vectory/ocdroid/ui/AppCoreOrchestration.kt:261-265"
+    },
+    {
+      "severity": "nit",
+      "issue": "Resulting surface is mildly asymmetric: 3 of 5 lazy orchestrators (sessionOpener/sendOrchestrator/commandOrchestrator) are private while refreshOrchestrator/draftSessionOrchestrator stay internal. This is compiler-driven and correct (the internal pair is accessed by AppCoreOrchestration.kt extension shims), but a one-line KDoc note on the lazy block explaining WHY the split exists would prevent a future reader from harmonizing them and breaking the shims.",
+      "location": "app/src/main/java/cn/vectory/ocdroid/ui/AppCore.kt:217-274"
+    }
+  ],
+  "uncertainties": [
+    "check.sh exit 0 for both commits is taken as reported by the implementer — my review sandbox is read-only (no gradle execution). However, static verification strongly supports compile-green: all 11 private symbols lack any external accessor, and Kotlin constructor named/positional arguments are visibility-agnostic, so no call-site breakage mechanism exists.",
+    "No runtime/instrumentation exercise performed; effect-routing correctness argued from the diff being visibility-keyword-only plus the internal-usage line-level trace."
+  ],
+  "summary": "Both tasks verified independently and found correct, complete, and disciplined. Task 1: markdownTypographyCompact deletion is clean (zero refs remain; freeze-pinned SlimCommitToken family + DEFAULT_SERVER + live-caller shims untouched). Task 2: all 11 private demotions re-verified to have zero external member-access refs (same-name members on OpenCodeRepository/CommandOrchestrator/DraftSessionOrchestrator are distinct, correctly excluded), and all 12 reverts to internal re-verified to have genuine external accessors — including the subtle case where refreshOrchestrator/draftSessionOrchestrator are reached via implicit receiver from AppCore extension shims in AppCoreOrchestration.kt, which cannot see private members. The recon-to-compiler correction narrative is honest and the final set is exactly the compiler-defensible one; visibility-only diff; freeze test untouched; AppCore hub role preserved. Three nits: dead writeTraffic (deletion candidate), a pre-existing stale lateinit/postInject comment in AppCoreOrchestration.kt, and an unexplained private/internal split among the 5 lazy orchestrators. APPROVE-WITH-NITS, mergeable."
+}
