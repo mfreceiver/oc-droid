@@ -48,9 +48,8 @@ import org.junit.Test
  *    open-tabs-list setter / sessionCache setter calls are captured into the
  *    [RecordingCallbacks] facade (so test bodies keep referencing the same
  *    accessor names as before),
- *  - a mockk [OpenCodeRepository] (Phase 2-E step 2: setCurrentDirectory
- *    capture was removed alongside the production call; the mock is still
- *    wired for the remaining answers SessionSwitcher needs),
+ *  - a mockk [OpenCodeRepository] wired for the remaining answers
+ *    SessionSwitcher needs,
  *  - a real [SharedEffectBus] drained into [collectedEffects] for the 5
  *    cross-domain effect emissions (ClearDeltaBuffers / LoadChildSessions /
  *    LoadMessages / LoadSessionStatus / LoadPendingQuestions), exposed via
@@ -500,12 +499,9 @@ class SessionSwitcherTest {
         assertTrue("expanded parts cleared on switch", expandedParts.value.isEmpty())
     }
 
-    // ── Step 6: (Phase 2-E step 2) directory sync ──────────────────────────
-    // §R18 Phase 2-E step 2: the repository.setCurrentDirectory call that
-    // lived at Step 6 of switchTo was removed; directory routing now uses
-    // the session's directory field directly at each callsite. The previous
-    // "switchTo syncs directory to selected session" test verified the
-    // removed side effect; deleted alongside the call.
+    // ── Step 6: directory sync ─────────────────────────────────────────────
+    // Directory routing now uses the session's directory field directly at each
+    // callsite (no separate switchTo Step-6 directory sync).
 
     // ── Step 7: load callbacks ──────────────────────────────────────────────
 
@@ -1131,10 +1127,8 @@ class SessionSwitcherTest {
             persistSessionCacheCalls.add(PersistCall(firstArg()))
             callOrder += "persistSessionCache"
         }
-        // §R18 Phase 2-E step 2: the repository.setCurrentDirectory mock that
-        // lived here was removed alongside the production call it captured
-        // (switchTo Step 6). syncDirectoryCalls is kept (still mutable) for
-        // any future capture need but is no longer populated by switchTo.
+        // syncDirectoryCalls is kept (still mutable) for any future capture
+        // need; switchTo no longer populates it (directory routing is per-callsite).
     }
 
         // ── Cross-domain counts (derived from collectedEffects) ──

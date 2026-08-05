@@ -451,9 +451,8 @@ class ChatViewModelTest : MainViewModelTestBase() {
         advanceUntilIdle()
 
         coVerifyOrder {
-            // §R18 Phase 2-E step 2: createSessionInWorkdir no longer calls
-            // repository.setCurrentDirectory (removed); the workdir is carried
-            // by composer.draftWorkdir → sendMessage → materializeDraftSession.
+            // createSessionInWorkdir carries the workdir via composer.draftWorkdir →
+            // sendMessage → materializeDraftSession (no separate directory-set call).
             repository.createSession(title = null, directory = any())
             repository.sendMessage("session-1", "hello", any(), any(), any())
         }

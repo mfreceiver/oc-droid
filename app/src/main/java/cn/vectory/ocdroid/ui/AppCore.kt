@@ -270,6 +270,10 @@ class AppCore @Inject constructor(
         )
     }
     private val commandOrchestrator by lazy {
+        // `repository` (the OCR @Singleton) is passed twice: it implements BOTH
+        // SessionRepository and InteractionRepository — the same singleton sits
+        // behind both narrow seams (see RepositoryInterfaceModule @Binds). This
+        // is intentional, not a typo.
         CommandOrchestrator(
             store, repository, repository, settingsManager, effectBus, appScope,
             currentProfileId, composerController,
