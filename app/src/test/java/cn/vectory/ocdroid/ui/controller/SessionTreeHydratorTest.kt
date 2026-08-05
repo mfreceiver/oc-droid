@@ -19,11 +19,25 @@ import java.util.concurrent.atomic.AtomicInteger
 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class SessionTreeHydratorTest {
     private val repository = mockk<OpenCodeRepository>()
+
+    /** Stubs the repository to use the legacy BFS path (non-slim). */
+    private fun stubLegacyTree() {
+        io.mockk.every { repository.supportsBulkSessionTree } returns false
+    }
+
+    /** Stubs the repository for the slim bulk path with the given sessions. */
+    private fun coStubBulkTree(sessions: List<Session>, complete: Boolean? = true) {
+        io.mockk.every { repository.supportsBulkSessionTree } returns true
+        coEvery { repository.getSlimapiSessions(any(), any(), any(), any()) } returns
+            Result.success(cn.vectory.ocdroid.data.model.SlimSessionsPage(sessions, complete))
+    }
+
     private fun session(id: String, parentId: String? = null) =
         Session(id = id, directory = "/repo", parentId = parentId)
 
     @Test
     fun `recursive hydration marks root complete only after every descendant succeeds`() = runTest {
+        stubLegacyTree()
         val root = session("A")
         val child = session("C", "A")
         val grandchild = session("G", "C")
@@ -40,6 +54,7 @@ class SessionTreeHydratorTest {
 
     @Test
     fun `descendant request failure leaves root incomplete`() = runTest {
+        stubLegacyTree()
         val root = session("A")
         val child = session("C", "A")
         coEvery { repository.getChildren("A") } returns Result.success(listOf(child))
@@ -53,6 +68,7 @@ class SessionTreeHydratorTest {
 
     @Test
     fun `root hydration concurrency is bounded`() = runTest {
+        stubLegacyTree()
         val active = AtomicInteger()
         val maxActive = AtomicInteger()
         val roots = (1..8).map { session("R$it") }
@@ -72,6 +88,7 @@ class SessionTreeHydratorTest {
 
     @Test
     fun `status failure caches complete tree while descendants remain unknown`() = runTest {
+        stubLegacyTree()
         val store = SharedStateStore()
         val root = session("A")
         val child = session("C", "A")
@@ -95,6 +112,7 @@ class SessionTreeHydratorTest {
 
     @Test
     fun `gpter-blocker stale hydration is dropped when epoch bumped mid-flight`() = runTest {
+        stubLegacyTree()
         val store = SharedStateStore()
         val root = session("A")
         val child = session("C", "A")
@@ -148,6 +166,7 @@ class SessionTreeHydratorTest {
 
     @Test
     fun `gpter-blocker hydration commits normally when epoch is unchanged`() = runTest {
+        stubLegacyTree()
         // Negative control: no invalidation mid-flight → epoch unchanged →
         // commit succeeds. Ensures the guard doesn't false-positive.
         val store = SharedStateStore()
@@ -170,6 +189,7 @@ class SessionTreeHydratorTest {
 
     @Test
     fun `glmer-minor inFlight does not leak when id is filtered out before launch`() = runTest {
+        stubLegacyTree()
         val store = SharedStateStore()
         // "A" is NOT in the store yet → mapNotNull(byId::get) filters it out.
         // Pre-fix: inFlight.add("A") happened BEFORE the filter, so "A" was

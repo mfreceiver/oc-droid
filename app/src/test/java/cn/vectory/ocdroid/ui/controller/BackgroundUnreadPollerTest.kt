@@ -80,6 +80,7 @@ class BackgroundUnreadPollerTest {
         children: Map<String, List<Session>> = emptyMap(),
     ) {
         every { settings.currentWorkdir } returns "/repo"
+        every { repository.supportsBulkSessionTree } returns false
         coEvery { repository.getSessions(any()) } returns Result.success(sessions)
         coEvery { repository.getSessionStatus() } returns Result.success(statuses)
         coEvery { repository.getChildren(any()) } answers {
@@ -216,9 +217,12 @@ class BackgroundUnreadPollerTest {
         // redirects to getSlimapiSessionsStatus and preserves the store's
         // existing activeSessionIds (null → fail-closed fallback).
         every { repository.usesSlimStatusFanOut } returns true
+        every { repository.supportsBulkSessionTree } returns true
         every { settings.currentWorkdir } returns "/repo"
         coEvery { repository.getSessions(any()) } returns Result.success(listOf(root("A", updated = 500L)))
         coEvery { repository.getChildren("A") } returns Result.success(emptyList())
+        coEvery { repository.getSlimapiSessions(any(), any(), any(), any()) } returns
+            Result.success(cn.vectory.ocdroid.data.model.SlimSessionsPage(listOf(root("A", updated = 500L)), true))
         // Stub ONLY the slim endpoint, NOT the legacy getSessionStatus.
         // Before the fix, the unstubbed getSessionStatus throws MockKException → RED.
         coEvery { repository.getSlimapiSessionsStatus("/repo") } returns Result.success(
@@ -252,6 +256,7 @@ class BackgroundUnreadPollerTest {
         // `emptyList()`), so ALM does NOT treat this as an authoritative empty.
         val a = root("A")
         every { settings.currentWorkdir } returns "/repo"
+        every { repository.supportsBulkSessionTree } returns false
         store.mutateHost { it.copy(currentHostProfileId = "host-1") }
         store.mutateSessionList { it.copy(completenessEpoch = 5L) }
         coEvery { repository.getSessions(any()) } returns Result.success(listOf(a))
@@ -273,6 +278,7 @@ class BackgroundUnreadPollerTest {
     fun `host switch during final tree request prevents stale commit and alert`() = runTest {
         val a = root("A")
         every { settings.currentWorkdir } returns "/repo"
+        every { repository.supportsBulkSessionTree } returns false
         store.mutateHost { it.copy(currentHostProfileId = "host-1") }
         coEvery { repository.getSessions(any()) } returns Result.success(listOf(a))
         coEvery { repository.getSessionStatus() } returns Result.success(emptyMap())
@@ -293,6 +299,7 @@ class BackgroundUnreadPollerTest {
         var background = true
         var generation = 1L
         every { settings.currentWorkdir } returns "/repo"
+        every { repository.supportsBulkSessionTree } returns false
         coEvery { repository.getSessions(any()) } returns Result.success(listOf(a))
         coEvery { repository.getSessionStatus() } returns Result.success(emptyMap())
         coEvery { repository.getChildren("A") } coAnswers {
@@ -347,6 +354,7 @@ class BackgroundUnreadPollerTest {
         // 3. Drive an ABORTING poll: SSE bumps completenessEpoch mid-poll →
         //    the CAS rejects the commit → poll returns Aborted (was emptyList).
         every { settings.currentWorkdir } returns "/repo"
+        every { repository.supportsBulkSessionTree } returns false
         store.mutateHost { it.copy(currentHostProfileId = "host-1") }
         store.mutateSessionList { it.copy(completenessEpoch = 5L) }
         val a = root("A")
@@ -412,6 +420,7 @@ class BackgroundUnreadPollerTest {
         //    with no idle entry in the store, so the committed snapshot's
         //    `idleSince` map excludes A → alerts is empty → Authoritative(empty).
         every { settings.currentWorkdir } returns "/repo"
+        every { repository.supportsBulkSessionTree } returns false
         store.mutateHost { it.copy(currentHostProfileId = "host-1") }
         val a = root("A")
         coEvery { repository.getSessions(any()) } returns Result.success(listOf(a))
@@ -482,6 +491,7 @@ class BackgroundUnreadPollerTest {
         val t3 = 3_000L
 
         every { settings.currentWorkdir } returns "/repo"
+        every { repository.supportsBulkSessionTree } returns false
 
         // Seed the request-start authority state: A is busy (the value the
         // concurrent poller re-commits UNCHANGED at t2). Seeded via the SAME
