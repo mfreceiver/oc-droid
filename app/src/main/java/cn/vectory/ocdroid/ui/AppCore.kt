@@ -119,7 +119,7 @@ class AppCore @Inject constructor(
      *  and without duplicating controller instances. AppCore retains the
      *  effect-bus collector → [dispatchEffect] routing + the cross-domain
      *  orchestration methods; it does not construct the controllers. */
-    internal val foregroundCatchUpController: ForegroundCatchUpController,
+    private val foregroundCatchUpController: ForegroundCatchUpController,
     internal val composerController: ComposerController,
     internal val sessionSwitcher: SessionSwitcher,
     internal val hostProfileController: HostProfileController,
@@ -141,7 +141,7 @@ class AppCore @Inject constructor(
      * subscribes to [cn.vectory.ocdroid.di.AppLifecycleMonitor.isInForeground]
      * and self-starts/stops the sweep. AppCore never calls into it directly.
      */
-    internal val unreadSoakController: cn.vectory.ocdroid.ui.controller.UnreadSoakController,
+    private val unreadSoakController: cn.vectory.ocdroid.ui.controller.UnreadSoakController,
     /**
      * §P0-E(b)(c): the GET drain/consumer for durable error localization.
      * Injected here purely so Hilt constructs the @Singleton early — its init
@@ -150,7 +150,7 @@ class AppCore @Inject constructor(
      * [cn.vectory.ocdroid.data.repository.OpenCodeRepository.getMessages].
      * AppCore never calls into it directly.
      */
-    internal val errorRecoveryCoordinator: ErrorRecoveryCoordinator,
+    private val errorRecoveryCoordinator: ErrorRecoveryCoordinator,
     /**
      * R-20 Phase 1 (review-fix #1): provider for the current host's
      * profileId. Injected via the SAME `@Named("currentProfileId")`
@@ -177,21 +177,21 @@ class AppCore @Inject constructor(
      * which captures the identity at collection start). Hilt auto-provides
      * the @Singleton instance (same one CC / SSC / HPC inject).
      */
-    internal val identityStore: ConnectionIdentityStore,
+    private val identityStore: ConnectionIdentityStore,
     /**
      * CP3 (notify Phase-0): the process-wide SSE event stream. CC publishes
      * each [cn.vectory.ocdroid.service.events.IdentifiedSseEvent] here (CP3
      * replaced the direct ControllerEffect.OnSseEvent emission). Injected
      * here so AppCore can pass it to the bridge.
      */
-    internal val sseEventStream: SseEventStream,
+    private val sseEventStream: SseEventStream,
     /**
      * CP3 (notify Phase-0): the identity-checked SSE event bridge. Subscribes
      * to [sseEventStream.events], validates epoch (§2), routes to the §11
      * control/delta dual-channel. AppCore collects both channels and re-emits
      * them as [ControllerEffect.OnSseEvent] for SSC's identity-checked fold.
      */
-    internal val sseEventBridge: SseEventBridge,
+    private val sseEventBridge: SseEventBridge,
     /**
      * T13 (round-2 review fix — AppCore dispatch): the process-level
      * [ProcessStatusPoller], injected so [dispatchSessionSyncEffect] can
@@ -209,7 +209,7 @@ class AppCore @Inject constructor(
      * (the L3 background loop owner) so the backoff state machine is
      * process-coherent.
      */
-    internal val processStatusPoller: cn.vectory.ocdroid.service.streaming.ProcessStatusPoller,
+    private val processStatusPoller: cn.vectory.ocdroid.service.streaming.ProcessStatusPoller,
 ) {
     /**
      * §Wave2.1-split-l2 (rev-gpt APPROVED EXCEPTION): _lazy composition_ of the 5
@@ -247,7 +247,7 @@ class AppCore @Inject constructor(
      * orchestrators into AppCore. Then remove this `lazy` composition block and
      * add the 5 params to AppCore's `@Inject constructor`.
      */
-    internal val sessionOpener by lazy { SessionOpener(store, repository, appScope, sessionSwitcher) }
+    private val sessionOpener by lazy { SessionOpener(store, repository, appScope, sessionSwitcher) }
     internal val refreshOrchestrator by lazy {
         RefreshOrchestrator(
             store, repository, settingsManager, effectBus, appScope,
@@ -256,7 +256,7 @@ class AppCore @Inject constructor(
             serverCompatProfile, tokenStreamCoordinator,
         )
     }
-    internal val sendOrchestrator by lazy {
+    private val sendOrchestrator by lazy {
         SendOrchestrator(
             store, repository, settingsManager, effectBus, appScope,
             currentProfileId, sessionSwitcher, connectionCoordinator,
@@ -269,7 +269,7 @@ class AppCore @Inject constructor(
             sendOrchestrator, refreshOrchestrator,
         )
     }
-    internal val commandOrchestrator by lazy {
+    private val commandOrchestrator by lazy {
         CommandOrchestrator(
             store, repository, repository, settingsManager, effectBus, appScope,
             currentProfileId, composerController,
@@ -302,7 +302,7 @@ class AppCore @Inject constructor(
     // unchanged. The single authoritative writer per slice is now
     // SharedStateStore.mutateXxx; these are thin pass-throughs.
     internal fun writeConnection(transform: (ConnectionState) -> ConnectionState) = store.mutateConnection(transform)
-    internal fun writeTraffic(transform: (TrafficState) -> TrafficState) = store.mutateTraffic(transform)
+    private fun writeTraffic(transform: (TrafficState) -> TrafficState) = store.mutateTraffic(transform)
     internal fun writeComposer(transform: (ComposerState) -> ComposerState) = store.mutateComposer(transform)
     internal fun writeFile(transform: (FileState) -> FileState) = store.mutateFile(transform)
     internal fun writeSettings(transform: (SettingsState) -> SettingsState) = store.mutateSettings(transform)

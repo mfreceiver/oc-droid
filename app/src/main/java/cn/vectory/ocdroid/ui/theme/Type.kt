@@ -199,30 +199,6 @@ fun markdownTypography(
     quote = TextStyle(fontFamily = family, fontSize = sizes.quote.sp, lineHeight = (sizes.quote * 1.4f).sp),
 )
 
-/** Markdown typography with headers one size smaller than default. */
-@Deprecated(
-    "Use LocalMarkdownFontSizes.current + markdownTypography(sizes) instead",
-    ReplaceWith("markdownTypography(LocalMarkdownFontSizes.current)")
-)
-@Composable
-fun markdownTypographyCompact() = markdownTypography(
-    h1 = MaterialTheme.typography.headlineLarge,
-    h2 = MaterialTheme.typography.headlineMedium,
-    h3 = MaterialTheme.typography.headlineSmall,
-    h4 = MaterialTheme.typography.titleLarge,
-    h5 = MaterialTheme.typography.titleMedium,
-    h6 = MaterialTheme.typography.titleSmall,
-    text = MaterialTheme.typography.bodyLarge,
-    code = MaterialTheme.typography.bodyMedium.copy(fontFamily = BundledMonoFamily),
-    inlineCode = MaterialTheme.typography.bodyLarge.copy(fontFamily = BundledMonoFamily),
-    quote = MaterialTheme.typography.bodyMedium,
-    paragraph = MaterialTheme.typography.bodyLarge,
-    ordered = MaterialTheme.typography.bodyLarge,
-    bullet = MaterialTheme.typography.bodyLarge,
-    list = MaterialTheme.typography.bodyLarge,
-    table = MaterialTheme.typography.bodyLarge
-)
-
 /**
  * Slightly smaller typography for Files and Chat columns in tablet layout.
  *
