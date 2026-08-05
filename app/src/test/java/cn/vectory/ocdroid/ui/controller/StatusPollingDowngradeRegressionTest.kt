@@ -369,7 +369,7 @@ class StatusPollingDowngradeRegressionTest {
     // ═══════════════════════════════════════════════════════════════════════
 
     @Test
-    fun `slim cold-start issues exactly one slim bulk call per registered workdir`() = runTest {
+    fun `slim cold-start issues a single global call covering all registered workdirs`() = runTest {
         val repository = slimRepository()
         seedSessions(
             session("s1", "/work-a"),
@@ -384,10 +384,10 @@ class StatusPollingDowngradeRegressionTest {
         )
         advanceUntilIdle()
 
-        // 方案A point 2: cold-start issues ONE bulk per workdir (2 workdirs → 2 calls).
-        // No legacy endpoints touched.
+        // Slim P2: upstream `directory` is a no-op — ONE call covers ALL
+        // registered workdirs. Only the first directory is called.
         coVerify(exactly = 1) { repository.getSlimapiSessionsStatus("/work-a") }
-        coVerify(exactly = 1) { repository.getSlimapiSessionsStatus("/work-b") }
+        coVerify(exactly = 0) { repository.getSlimapiSessionsStatus("/work-b") }
         coVerify(exactly = 0) { repository.getSessionStatus() }
         coVerify(exactly = 0) { repository.getActiveSessionIds() }
     }
@@ -493,10 +493,10 @@ class StatusPollingDowngradeRegressionTest {
         launchLoadSessionStatus(scope, repository, slices) // default SWEEP
         advanceUntilIdle()
 
-        // P0-1: SSE effectively OFF (SseDisabled) → no digest relay → the sweep
-        // MUST fan out through the slim REST path (one bulk per workdir).
+        // Slim P2: upstream `directory` is a no-op — ONE call covers ALL
+        // workdirs. Only the first directory is called.
         coVerify(exactly = 1) { repository.getSlimapiSessionsStatus("/work-a") }
-        coVerify(exactly = 1) { repository.getSlimapiSessionsStatus("/work-b") }
+        coVerify(exactly = 0) { repository.getSlimapiSessionsStatus("/work-b") }
     }
 
     @Test
@@ -810,25 +810,24 @@ class StatusPollingDowngradeRegressionTest {
     // ═══════════════════════════════════════════════════════════════════════
 
     @Test
-    fun `P0-1 partial success partial failure preserves failed-directory prior BUSY status`() = runTest {
-        // rev-ogpt P0-1 core regression: two directories A (success) + B
-        // (failure). Sessions of the failed directory B MUST retain their
-        // prior BUSY status — they MUST NOT be downgraded to idle just
-        // because another directory's fetch happened to succeed.
+    fun `P2 single global call success covers all workdirs - sessions present and absent`() = runTest {
+        // Slim P2: ONE call returns the host-wide global map. All workdirs
+        // are covered. Sessions present in the global response are folded
+        // verbatim; sessions absent from the global response (genuinely idle
+        // upstream) are authoritative-normalized to idle. No per-directory
+        // partial-failure exists.
         val repository = slimRepository()
         seedSessions(
             session("s-a", "/work-a"),
             session("s-b", "/work-b"),
         )
-        // Prior state: s-b is BUSY (upstream mid-task). s-a is unknown.
-        // §P0-A: status is now the authority projection — seed via authority so
-        // the failed-dir preservation (which reads authority.bySid) sees it.
+        // Prior state: s-b is BUSY. With P2 single-call success, the global
+        // map overwrites — s-b absent from the global response → idle.
         store.dispatch(seedStatusAuthorityEvent("s-b", SessionStatus(type = "busy")))
-        // /work-a fetch succeeds; /work-b fetch FAILS (transport error).
+        // Only /work-a is called (first dir) — returns global map w/ s-a=idle.
         coEvery { repository.getSlimapiSessionsStatus("/work-a") } returns
             Result.success(mapOf("s-a" to SessionStatus(type = "idle")))
-        coEvery { repository.getSlimapiSessionsStatus("/work-b") } returns
-            Result.failure(java.io.IOException("transport error /work-b"))
+        // /work-b is NEVER called — the global map covers it.
 
         launchLoadSessionStatus(
             scope,
@@ -838,63 +837,18 @@ class StatusPollingDowngradeRegressionTest {
         )
         advanceUntilIdle()
 
-        // P0-1 fix-11a core: s-b's prior BUSY status MUST be preserved — the
-        // failed /work-b fetch MUST NOT downgrade it to idle.
-        val sBStatus = slices.sessionList.value.sessionStatuses["s-b"]
-        assertNotNull("failed-directory session status must not be dropped", sBStatus)
-        assertEquals(
-            "failed-directory prior BUSY must be preserved (not downgraded to idle)",
-            "busy",
-            sBStatus?.type,
-        )
-        // Sanity: the successful /work-a fetch DID land (s-a folded to idle).
-        assertEquals(
-            "successful-directory session is normalized from REST snapshot",
-            "idle",
-            slices.sessionList.value.sessionStatuses["s-a"]?.type,
-        )
+        val statuses = slices.sessionList.value.sessionStatuses
+        // s-a: present in global response → folded as idle.
+        assertEquals("s-a folded from global response", "idle", statuses["s-a"]?.type)
+        // s-b: absent from global response → authoritative-normalized to idle
+        // (the global call succeeded, so all dirs are covered).
+        assertEquals("s-b absent from global response is normalized to idle", "idle", statuses["s-b"]?.type)
     }
 
     @Test
-    fun `P0-1 partial success partial failure preserves failed-directory prior RETRY status`() = runTest {
-        // Variant: prior status is RETRY (not busy). The preservation
-        // contract is the same — any non-idle prior status MUST survive a
-        // directory fetch failure (the prior snapshot is preserved verbatim,
-        // not just for "busy").
-        val repository = slimRepository()
-        seedSessions(
-            session("s-a", "/work-a"),
-            session("s-b", "/work-b"),
-        )
-        // §P0-A: status is now the authority projection — seed via authority.
-        store.dispatch(seedStatusAuthorityEvent("s-b", SessionStatus(type = "retry")))
-        coEvery { repository.getSlimapiSessionsStatus("/work-a") } returns
-            Result.success(mapOf("s-a" to SessionStatus(type = "idle")))
-        coEvery { repository.getSlimapiSessionsStatus("/work-b") } returns
-            Result.failure(java.io.IOException("transport error /work-b"))
-
-        launchLoadSessionStatus(
-            scope,
-            repository,
-            slices,
-            trigger = SessionStatusLoadTrigger.COLD_START,
-        )
-        advanceUntilIdle()
-
-        val sBStatus = slices.sessionList.value.sessionStatuses["s-b"]
-        assertNotNull("failed-directory session status must not be dropped", sBStatus)
-        assertEquals(
-            "failed-directory prior RETRY must be preserved (not downgraded to idle)",
-            "retry",
-            sBStatus?.type,
-        )
-    }
-
-    @Test
-    fun `P0-1 all directories fail preserves prior snapshot and completes false`() = runTest {
-        // fix-10 contract (must NOT regress under fix-11a): ALL directories
-        // failing MUST preserve the prior snapshot and signal complete(false)
-        // so the caller can retry / fall back.
+    fun `P2 single global call failure preserves prior snapshot and completes false`() = runTest {
+        // fix-10 contract preserved under P2: a single failed call preserves
+        // the prior snapshot and signals complete(false).
         val repository = slimRepository()
         seedSessions(
             session("s-a", "/work-a"),
@@ -924,25 +878,24 @@ class StatusPollingDowngradeRegressionTest {
         val statuses = slices.sessionList.value.sessionStatuses
         assertEquals("prior s-a BUSY preserved", "busy", statuses["s-a"]?.type)
         assertEquals("prior s-b RETRY preserved", "retry", statuses["s-b"]?.type)
+        // Only /work-a called (first dir), /work-b not called.
+        coVerify(exactly = 1) { repository.getSlimapiSessionsStatus("/work-a") }
+        coVerify(exactly = 0) { repository.getSlimapiSessionsStatus("/work-b") }
     }
 
     @Test
-    fun `P0-1 all directories succeed normalizes idle for authoritative sessions absent from REST snapshot`() = runTest {
-        // fix-11a non-regression: the all-success path MUST still
-        // authoritative-normalize — sessions absent from the REST snapshot
-        // (idle upstream) get explicit idle. This is the unchanged normal
-        // path; fix-11a's partial-failure carve-out MUST NOT weaken it.
+    fun `P2 single global call success with multiple dirs normalizes idle for authoritative sessions absent from REST response`() = runTest {
+        // The single global call returns the host-wide map. Sessions absent
+        // from it (idle upstream) get explicit idle normalization for ALL
+        // covered workdirs.
         val repository = slimRepository()
         seedSessions(
             session("s-a", "/work-a"),
             session("s-b", "/work-b"),
         )
-        // REST snapshots: only s-a returned as busy; s-b absent upstream
-        // (= idle per /session/status semantics — idle entries are omitted).
+        // Single global call to /work-a returns s-a=busy; s-b absent = idle.
         coEvery { repository.getSlimapiSessionsStatus("/work-a") } returns
             Result.success(mapOf("s-a" to SessionStatus(type = "busy")))
-        coEvery { repository.getSlimapiSessionsStatus("/work-b") } returns
-            Result.success(emptyMap())
 
         launchLoadSessionStatus(
             scope,
@@ -953,61 +906,34 @@ class StatusPollingDowngradeRegressionTest {
         advanceUntilIdle()
 
         val statuses = slices.sessionList.value.sessionStatuses
-        // s-a: busy from REST snapshot.
-        assertEquals(
-            "successful REST entry folded verbatim",
-            "busy",
-            statuses["s-a"]?.type,
-        )
-        // s-b: absent from REST snapshot → authoritative-normalized to idle
-        // (the unchanged normalize-to-idle behavior for SUCCESSFUL dirs).
-        assertEquals(
-            "absent REST entry normalized to idle on the all-success path",
-            "idle",
-            statuses["s-b"]?.type,
-        )
+        // s-a: busy from global REST response.
+        assertEquals("global REST entry folded verbatim", "busy", statuses["s-a"]?.type)
+        // s-b: absent from global REST response → authoritative-normalized to idle.
+        assertEquals("absent from global response normalized to idle", "idle", statuses["s-b"]?.type)
+        // Only first directory called.
+        coVerify(exactly = 1) { repository.getSlimapiSessionsStatus("/work-a") }
+        coVerify(exactly = 0) { repository.getSlimapiSessionsStatus("/work-b") }
     }
 
     @Test
-    fun `P2-2 failed directory session with no prior entry is not fabricated as idle`() = runTest {
-        // rev-ogpt P2-2 boundary: a failed directory's session that has
-        // NO prior entry in current.sessionStatuses MUST NOT appear in
-        // the restSnapshot. There is nothing to preserve (no prior
-        // status), and fabricating an idle entry would mislabel an
-        // unknown state as authoritative-idle. The failed-directory
-        // carve-out preserves PRIOR entries verbatim; it does NOT
-        // fabricate new ones.
-        //
-        // This complements the Group 7 P0-1 tests:
-        //  - P0-1 asserts: prior BUSY/RETRY for a failed-directory
-        //    session is preserved (not downgraded to idle).
-        //  - P2-2 asserts (THIS test): a failed-directory session with
-        //    NO prior entry is dropped (not fabricated as idle).
-        //
-        // Both behaviors are correct: "preserve prior" naturally implies
-        // "nothing to preserve → nothing fabricated". P2-2 pins the
-        // boundary so a future normalization change cannot regress to
-        // "absent + failed directory → idle" (which would mask the
-        // transport failure as a fabricated idle, the same shape of bug
-        // as P0-1 but for the no-prior case).
+    fun `P2 session absent from global response and with no prior is idle-normalized (covered workdir)`() = runTest {
+        // With P2 single-call success, ALL workdirs are covered. Sessions
+        // absent from the global response AND with no prior entry are
+        // authoritative-normalized to idle (the correct behavior — the host
+        // is genuinely idle for those sessions).
         val repository = slimRepository()
         seedSessions(
             session("s-a", "/work-a"),
             session("s-b-1", "/work-b"),
             session("s-b-2", "/work-b"),
         )
-        // Prior state: ONLY s-a has a status. NEITHER s-b-1 nor s-b-2
-        // has a prior entry — the failed directory's sessions are
-        // entirely unseen.
+        // Prior state: ONLY s-a has a status. s-b-1 and s-b-2 have NO prior.
         store.mutateSessionList {
             it.withProjection(mapOf("s-a" to SessionStatus(type = "busy")))
         }
-        // /work-a succeeds (s-a returned as idle upstream); /work-b
-        // FAILS (transport error — s-b-1 / s-b-2 statuses are unknown).
+        // Single global call to /work-a returns s-a=idle; s-b sessions absent.
         coEvery { repository.getSlimapiSessionsStatus("/work-a") } returns
             Result.success(mapOf("s-a" to SessionStatus(type = "idle")))
-        coEvery { repository.getSlimapiSessionsStatus("/work-b") } returns
-            Result.failure(java.io.IOException("transport error /work-b"))
 
         launchLoadSessionStatus(
             scope,
@@ -1018,36 +944,19 @@ class StatusPollingDowngradeRegressionTest {
         advanceUntilIdle()
 
         val statuses = slices.sessionList.value.sessionStatuses
-        // P2-2 core: s-b-1 and s-b-2 had NO prior entry; the failed
-        // /work-b fetch MUST NOT fabricate idle entries for them. They
-        // remain absent from sessionStatuses (no entry to preserve, no
-        // entry fabricated).
-        assertNull(
-            "failed-directory session with no prior entry MUST NOT be fabricated as idle " +
-                "(s-b-1 should be absent from sessionStatuses)",
-            statuses["s-b-1"],
-        )
-        assertNull(
-            "failed-directory session with no prior entry MUST NOT be fabricated as idle " +
-                "(s-b-2 should be absent from sessionStatuses)",
-            statuses["s-b-2"],
-        )
-        // Sanity: the successful /work-a fetch DID land — s-a was
-        // updated from prior BUSY → REST idle (proves the test exercised
-        // the success path, not a global short-circuit).
+        // P2: s-b-1 and s-b-2 are in covered workdirs and absent from the
+        // global response → authoritative-normalized to idle.
         assertEquals(
-            "successful-directory session is updated from REST snapshot (proves the success path ran)",
+            "s-b-1 absent from global response is idle-normalized (covered workdir)",
             "idle",
-            statuses["s-a"]?.type,
+            statuses["s-b-1"]?.type,
         )
-        // Sanity: no normalization touched the failed-directory sessions
-        // — the restSnapshot for /work-b was entirely skipped (no entry
-        // fabricated, no entry overwritten, no entry dropped).
         assertEquals(
-            "only the successful-directory session has a status entry; " +
-                "failed-directory sessions with no prior are NOT fabricated",
-            setOf("s-a"),
-            statuses.keys,
+            "s-b-2 absent from global response is idle-normalized (covered workdir)",
+            "idle",
+            statuses["s-b-2"]?.type,
         )
+        // s-a: updated from prior BUSY → REST idle.
+        assertEquals("s-a updated from REST snapshot (proves the success path ran)", "idle", statuses["s-a"]?.type)
     }
 }
