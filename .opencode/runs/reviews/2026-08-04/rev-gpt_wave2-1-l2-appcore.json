@@ -1,0 +1,46 @@
+{
+  "reviewer": "rev-gpt",
+  "bundle_id": "wave2-split-2026-08-04",
+  "scope": "wave2-1-l2-appcore",
+  "scope_desc": "Wave2.1 Lane 2 — AppCore orchestrator extraction (Pattern B constructor injection). AppCoreOrchestration 1581→311 LOC (-1270); 5 internal orchestrators extracted (SessionOpener/Refresh/Send/DraftSession/Command); AppCore returns to thin engine. Interface-ization rejected (core-five overlap + single-module no compile boundary + Kotlin override non-narrowable visibility). materializeDraftSession A–E strict ordering preserved. Deviation: fixer used `lazy` rather than Hilt ctor injection to avoid breaking manually-constructed AppCore tests.",
+  "branch": "wave2/split",
+  "diff_base": "36b9da78",
+  "diff_head": "c0544b86",
+  "fixup_commit": "bf80eb4a",
+  "merge_commit": "3fe718c1",
+  "date": "2026-08-04",
+  "review_stage": "process (per-lane, during wave2-1)",
+  "review_session": "ses_032400b3a",
+  "verdict": "CONCERNS",
+  "must_fix": [],
+  "should_fix": [
+    {
+      "id": "S1",
+      "severity": "orange",
+      "desc": "Visibility drift — the 5 extracted orchestrators + 3 entry points were made public, and @MainThread annotation was dropped during extraction.",
+      "location": "app/src/main/java/cn/vectory/ocdroid/ui/{AppCore.kt,CommandOrchestrator.kt,DraftSessionOrchestrator.kt,RefreshOrchestrator.kt,SendOrchestrator.kt,SessionOpener.kt}",
+      "disposition": "RESOLVED via follow-up commit bf80eb4a 'refactor(wave2-1-l2): address rev-gpt CONCERNS (visibility narrowing + Hilt exception kdoc)'. 5 orchestrators → internal; 3 entry points → internal; @MainThread restored (grep-verified).",
+      "status": "resolved"
+    },
+    {
+      "id": "S2",
+      "severity": "orange",
+      "desc": "Hilt ownership bypassed — fixer used `lazy` property composition instead of Hilt constructor injection for the orchestrators, weakening DI ownership.",
+      "location": "app/src/main/java/cn/vectory/ocdroid/ui/AppCore.kt:217-274 (lazy orchestrator block)",
+      "disposition": "RESOLVED (accepted-exception) via bf80eb4a: Hilt-lazy combination recorded as an approved exception with KDoc rationale + TODO(Wave2.2). Justification: pure ctor injection would break manually-constructed AppCore test harnesses. Full Hilt ctor injection + test-factory migration tracked as Wave2.2 follow-up.",
+      "status": "resolved-as-approved-exception"
+    }
+  ],
+  "nits": [],
+  "dimensions_verified": {
+    "ordering_invariant": "materializeDraftSession A–E strict ordering preserved (PASS).",
+    "dependency_graph": "acyclic — no circular dependency among extracted orchestrators.",
+    "state_duplication": "none — no shared mutable state duplicated across orchestrators."
+  },
+  "gate_evidence": {
+    "fixup_check_sh": "exit 0 post-bf80eb4a",
+    "fixup_diff_stat": "6 files changed, +48/-16 (visibility keyword narrowing + Hilt kdoc; behavior-preserving)"
+  },
+  "provenance": "Reconstructed from orchestrator execution report ses_0325a2f10ffeA2QU0OdRpo8oZM.md (wave2-split bundle §2 review-results table + per-lane decisions) cross-checked against git history (bf80eb4a diff). The original rev-gpt per-session finding output (ses_032400b3a) was not persisted to disk. The two CONCERNS, their severities, and the bf80eb4a closure are git-grounded. Per-finding prose reflects the orchestrator's structured summary of that review session.",
+  "timestamp": "2026-08-04"
+}

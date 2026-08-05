@@ -1,0 +1,51 @@
+{
+  "reviewer": "rev-gpt",
+  "bundle_id": "wave2-split-2026-08-04",
+  "scope": "wave2-1-l3-ssc",
+  "scope_desc": "Wave2.1 Lane 3 — SessionSyncCoordinator state-machine modularization. SSC 1525→510 LOC (-1015); 5 state-machine modules extracted into ui/controller/sse/ sub-package (SseGapReconcileController/DeltaFlushScheduler/QuestionReconcileWorker/SseDiagLogger/StatusFanOutApplier). Chain-of-Responsibility dispatch preserved (SseEventRouter remains sole dispatch point). Modules extracted via shared-state access matrix. Main.immediate confinement KDoc added to all 5 modules; currentProcessingIdentity frame-scope preserved (not read inside launched coroutine); MutableMap/var deliberately NOT upgraded to concurrency primitives (fail-loud over silent-error).",
+  "branch": "wave2/split",
+  "diff_base": "36b9da78",
+  "diff_head": "58c8a398",
+  "merge_commit": "c01353e0",
+  "date": "2026-08-04",
+  "review_stage": "process (per-lane, during wave2-1)",
+  "review_session": "ses_032445162",
+  "verdict": "PASS",
+  "must_fix": [],
+  "should_fix": [],
+  "nits": [
+    {
+      "id": "N1",
+      "severity": "yellow",
+      "desc": "Cosmetic — SseGapReconcileController carries a few unused constructor parameters (e.g. connectedOnceBefore/skeletonReloadCoordinator/slices references). Non-blocking; cleanup candidate.",
+      "location": "app/src/main/java/cn/vectory/ocdroid/ui/controller/sse/SseGapReconcileController.kt",
+      "status": "deferred-Wave2.2 (tracked)"
+    },
+    {
+      "id": "N2",
+      "severity": "yellow",
+      "desc": "Cosmetic — SseDiagLogger carries a few unused constructor parameters (e.g. noisySseLogEvents). Non-blocking.",
+      "location": "app/src/main/java/cn/vectory/ocdroid/ui/controller/sse/SseDiagLogger.kt",
+      "status": "deferred-Wave2.2 (tracked)"
+    },
+    {
+      "id": "N3",
+      "severity": "yellow",
+      "desc": "Observation — NOISY_SSE_LOG_EVENTS still imported from data.api at SessionSyncCoordinator.kt:115; the Wave2.0 SSC-Pre-a relocation appears not to have landed. Confirm whether tracked.",
+      "location": "app/src/main/java/cn/vectory/ocdroid/ui/SessionSyncCoordinator.kt:115",
+      "status": "verify-tracking"
+    }
+  ],
+  "dimensions_verified": {
+    "dispatch_invariant": "Chain-of-Responsibility preserved — SseEventRouter remains sole SSE dispatch point; no parallel dispatch path introduced.",
+    "frame_scope": "currentProcessingIdentity kept frame-scoped — never read inside a launched coroutine (avoid stale-frame race).",
+    "main_immediate_confinement": "Main.immediate confinement KDoc added to all 5 extracted modules.",
+    "concurrency_discipline": "MutableMap/var deliberately retained (not upgraded to AtomicRef/lock) — explicit fail-loud-over-silent-error stance."
+  },
+  "gate_evidence": {
+    "single_lane_check_sh": "exit 0 (wave2-split-l3 worktree)",
+    "detekt_baseline": "223 maintained (no new violations)"
+  },
+  "provenance": "Reconstructed from orchestrator execution report ses_0325a2f10ffeA2QU0OdRpo8oZM.md (wave2-split bundle §2 review-results table + per-lane decisions + §5 Wave2.2 follow-up list). The original rev-gpt per-session finding output (ses_032445162) was not persisted to disk. The PASS verdict and the cosmetic-nit severities are grounded in the orchestrator's structured summary. Per-finding prose reflects that session.",
+  "timestamp": "2026-08-04"
+}
