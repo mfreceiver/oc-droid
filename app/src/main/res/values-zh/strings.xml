@@ -397,14 +397,11 @@
     <plurals name="tool_count_shell">
         <item quantity="other">%1$d 条命令</item>
     </plurals>
-    <plurals name="tool_count_web">
-        <item quantity="other">%1$d 次网络</item>
-    </plurals>
     <plurals name="tool_count_thinking">
         <item quantity="other">%1$d 次思考</item>
     </plurals>
-    <plurals name="tool_count_other">
-        <item quantity="other">%1$d 个工具</item>
+    <plurals name="tool_count_control">
+        <item quantity="other">%1$d 项控制</item>
     </plurals>
     <string name="chat_error_details">错误详情</string>
     <string name="host_profile_test_connection">测试连接</string>

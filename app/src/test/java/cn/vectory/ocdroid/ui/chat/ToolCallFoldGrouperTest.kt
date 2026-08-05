@@ -158,8 +158,8 @@ class ToolCallFoldGrouperTest {
     @Test
     fun `foldCounts follows TOOL_CATEGORY_DISPLAY_ORDER`() {
         // Verify that iterating TOOL_CATEGORY_DISPLAY_ORDER picks up counts in
-        // the canonical order (READS before EDITS before SHELL before WEB
-        // before THINKING before OTHER).
+        // the canonical order (READS before EDITS before SHELL before THINKING
+        // before CONTROL).
         val fold = ToolRenderItem.FoldedToolRun(listOf(
             ToolRenderItem.Basic(bashPart("b1")),   // SHELL
             ctxGroup(readPart("r1")),               // READS

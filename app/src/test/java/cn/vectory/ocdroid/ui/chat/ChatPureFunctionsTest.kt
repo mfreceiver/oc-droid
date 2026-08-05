@@ -12,7 +12,6 @@ import androidx.compose.material.icons.filled.FileOpen
 import androidx.compose.material.icons.filled.Forum
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Psychology
-import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Terminal
@@ -185,7 +184,7 @@ class ChatPureFunctionsTest {
         val cases = listOf(
             null,            // → Build (default for null tool)
             "question",      // → LiveHelp
-            "webfetch",      // → Public
+            "webfetch",      // → Search
             "task",          // → AccountTree
             "todowrite",     // → Checklist
             "todoread",      // → Checklist
@@ -207,12 +206,13 @@ class ChatPureFunctionsTest {
         // Every result is non-null.
         vectors.forEach { assertNotNull("toolIcon($it) returned null", it) }
 
-        // Distinct icons expected (Build, LiveHelp, Public, AccountTree,
-        // Checklist, FileOpen, Search, Edit, Terminal).
+        // Distinct icons expected (Build, LiveHelp, Search, AccountTree,
+        // Checklist, FileOpen, Edit, Terminal). webfetch now resolves to
+        // Search (Public retired), so it no longer adds a distinct vector.
         val distinctCount = vectors.toSet().size
         assertEquals(
-            "expected 9 distinct ImageVectors across the branch table",
-            9,
+            "expected 8 distinct ImageVectors across the branch table",
+            8,
             distinctCount
         )
     }
@@ -300,7 +300,7 @@ class ChatPureFunctionsTest {
         // Lock the original builtin mappings so the new branches above them
         // can't accidentally shadow a builtin.
         assertEquals(Icons.AutoMirrored.Filled.LiveHelp, toolIcon("question"))
-        assertEquals(Icons.Default.Public, toolIcon("webfetch"))
+        assertEquals(Icons.Default.Search, toolIcon("webfetch"))
         assertEquals(Icons.Default.AccountTree, toolIcon("task"))
         assertEquals(Icons.Default.Checklist, toolIcon("todowrite"))
         assertEquals(Icons.Default.Checklist, toolIcon("todoread"))
@@ -336,10 +336,10 @@ class ChatPureFunctionsTest {
             Icons.Default.AccountTree,
             toolIcon("task")
         )
-        // webfetch → Public, NOT FileOpen (which read/list map to).
+        // webfetch → Search, NOT FileOpen (which read/list map to).
         assertEquals(
-            "webfetch must map to Public",
-            Icons.Default.Public,
+            "webfetch must map to Search",
+            Icons.Default.Search,
             toolIcon("webfetch")
         )
     }

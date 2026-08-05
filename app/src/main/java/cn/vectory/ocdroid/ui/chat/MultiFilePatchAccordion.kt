@@ -129,7 +129,7 @@ internal fun MultiFilePatchAccordion(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Icon(
-                        Icons.Default.Edit,
+                        parts.firstOrNull()?.tool?.let { toolIcon(it) } ?: Icons.Default.Edit,
                         contentDescription = null,
                         modifier = Modifier.size(14.dp),
                         tint = MaterialTheme.colorScheme.onSurfaceVariant

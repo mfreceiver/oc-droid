@@ -25,12 +25,15 @@ import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Extension
 import androidx.compose.material.icons.filled.FileOpen
 import androidx.compose.material.icons.filled.Forum
+import androidx.compose.material.icons.filled.HourglassBottom
+import androidx.compose.material.icons.filled.LibraryBooks
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Psychology
-import androidx.compose.material.icons.filled.Public
+import androidx.compose.material.icons.filled.RateReview
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Storage
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.Warning
@@ -76,29 +79,34 @@ import cn.vectory.ocdroid.ui.theme.AppMotion
  *    to a generic builtin prefix below:
  *  - ctx_* / recall_*           → Psychology (context memory / dreamer recall)
  *  - session_*                  → Forum (cross-session messaging)
- *  - gh_grep_*                  → Search (code search)
- *  - ast_grep_search            → Search (AST code search)
+ *  - gh_grep_* / ast_grep_search → Search (code search)
  *  - ast_grep_replace           → Edit (AST code rewrite)
  *  - web-reader / web_reader    → Search (web retrieval)
- *  - one-search_*               → Search (web retrieval)
- *  - web-search-prime_*         → Search (web retrieval)
+ *  - one-search_* / web-search-prime_* → Search (web retrieval)
+ *  - websearch / websearch_*    → Search (web search; builtin)
+ *  - webfetch / web_fetch       → Search (web fetch; Public icon retired)
+ *  - file_search                → Search (file search)
+ *  - list_mcp_* / read_mcp_*    → Storage (MCP resource inspection)
  *
- * 2. Builtin / single-token tools:
+ * 2. Specific builtin / single-token tools:
+ *  - context7                   → LibraryBooks (docs library)
+ *  - write_ocmar_review         → RateReview (review report writer)
+ *  - wait_for_user              → HourglassBottom (blocking pause)
+ *  - invalid                    → ErrorOutline (failed tool)
  *  - skill                      → Extension (skill loader)
  *  - see_image                  → Visibility (vision analysis)
  *  - notify_task_done           → Notifications (completion ping)
  *  - cancel_task / force_cancel_task → Cancel
  *  - schedule_list              → Schedule
- *  - websearch                  → Search (web search; builtin)
  *  - question                   → LiveHelp (clarifying question tool)
- *  - webfetch                   → Public (web fetch)
  *  - task                       → AccountTree (sub-agent task)
  *  - todowrite/todoread         → Checklist (todo management)
+ *  - local_shell                → Terminal (shell)
  *  - read/list                  → FileOpen (file inspection)
  *  - glob/grep                  → Search (file search)
  *  - edit/write/apply_patch/patch → Edit (file mutation)
  *  - bash/terminal/cmd/shell    → Terminal (shell)
- *  - anything else              → Build (generic tool)
+ *  - anything else              → Build (generic tool / unknown MCP fallback)
  *
  * Prefix safety: all namespace prefixes (`ctx_`, `session_`, `gh_grep`, …)
  * are structurally disjoint from every builtin prefix — none is a prefix of
@@ -119,21 +127,30 @@ internal fun toolIcon(toolName: String?): ImageVector {
         lower.startsWith("gh_grep") -> Icons.Default.Search
         lower.startsWith("ast_grep_search") -> Icons.Default.Search
         lower.startsWith("ast_grep_replace") -> Icons.Default.Edit
+        // ── web/检索统一 Search（Public 废弃）──
         lower.startsWith("web-reader") || lower.startsWith("web_reader") -> Icons.Default.Search
-        lower.startsWith("one-search") -> Icons.Default.Search
-        lower.startsWith("web-search-prime") -> Icons.Default.Search
-        // ── Builtin / single-token tools ──
+        lower.startsWith("one-search") || lower.startsWith("web-search-prime") -> Icons.Default.Search
+        lower.startsWith("websearch") || lower.startsWith("web_search") -> Icons.Default.Search
+        lower.startsWith("webfetch") || lower.startsWith("web_fetch") -> Icons.Default.Search
+        lower.startsWith("file_search") -> Icons.Default.Search
+        // ── MCP 资源（必须在通用 read/list 之前）──
+        lower.startsWith("list_mcp") || lower.startsWith("read_mcp") -> Icons.Default.Storage
+        // ── 文档/评审/等待/失败 ──
+        lower.startsWith("context7") -> Icons.Default.LibraryBooks
+        lower.startsWith("write_ocmar_review") -> Icons.Default.RateReview
+        lower.startsWith("wait_for_user") -> Icons.Default.HourglassBottom
+        lower.startsWith("invalid") -> Icons.Default.ErrorOutline
+        // ── 特定 builtin ──
         lower.startsWith("skill") -> Icons.Default.Extension
         lower.startsWith("see_image") -> Icons.Default.Visibility
         lower.startsWith("notify_task_done") -> Icons.Default.Notifications
         lower.startsWith("cancel_task") || lower.startsWith("force_cancel_task") -> Icons.Default.Cancel
         lower.startsWith("schedule_list") -> Icons.Default.Schedule
-        lower.startsWith("websearch") -> Icons.Default.Search
-        // ── Original builtin rules (unchanged) ──
         lower.startsWith("question") -> Icons.AutoMirrored.Filled.LiveHelp
-        lower.startsWith("webfetch") -> Icons.Default.Public
         lower.startsWith("task") -> Icons.Default.AccountTree
         lower.startsWith("todowrite") || lower.startsWith("todoread") -> Icons.Default.Checklist
+        lower.startsWith("local_shell") -> Icons.Default.Terminal
+        // ── 通用 builtin ──
         lower.startsWith("read") || lower.startsWith("list") -> Icons.Default.FileOpen
         lower.startsWith("glob") || lower.startsWith("grep") -> Icons.Default.Search
         lower.startsWith("edit") ||

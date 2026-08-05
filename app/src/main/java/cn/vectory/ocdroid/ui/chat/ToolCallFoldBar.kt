@@ -13,12 +13,11 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.HelpOutline
+import androidx.compose.material.icons.filled.AccountTree
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material.icons.filled.Lightbulb
-import androidx.compose.material.icons.filled.Public
+import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
@@ -52,15 +51,14 @@ private fun toolCategoryIcon(cat: ToolCategory): ImageVector = when (cat) {
     ToolCategory.READS -> Icons.Default.Description
     ToolCategory.EDITS -> Icons.Default.Edit
     ToolCategory.SHELL -> Icons.Default.Terminal
-    ToolCategory.WEB -> Icons.Default.Public
-    ToolCategory.THINKING -> Icons.Default.Lightbulb
-    ToolCategory.OTHER -> Icons.AutoMirrored.Filled.HelpOutline
+    ToolCategory.THINKING -> Icons.Default.Psychology
+    ToolCategory.CONTROL -> Icons.Default.AccountTree
 }
 
 /**
  * Collapsed summary bar for a [ToolRenderItem.FoldedToolRun]. Shows one
  * Icon + animated count per non-zero category, in [TOOL_CATEGORY_DISPLAY_ORDER]
- * (READS·EDITS·SHELL·WEB·THINKING·OTHER). A trailing [CircularProgressIndicator]
+ * (READS·EDITS·SHELL·THINKING·CONTROL). A trailing [CircularProgressIndicator]
  * appears when [isRunning] (some part in the segment is still in flight), and a
  * [ChevronRight] signals the row is expandable.
  *
@@ -87,26 +85,23 @@ internal fun ToolCallFoldBar(
     val readsCount = counts[ToolCategory.READS] ?: 0
     val editsCount = counts[ToolCategory.EDITS] ?: 0
     val shellCount = counts[ToolCategory.SHELL] ?: 0
-    val webCount = counts[ToolCategory.WEB] ?: 0
     val thinkingCount = counts[ToolCategory.THINKING] ?: 0
-    val otherCount = counts[ToolCategory.OTHER] ?: 0
+    val controlCount = counts[ToolCategory.CONTROL] ?: 0
     val sReads = pluralStringResource(R.plurals.tool_count_reads, readsCount, readsCount)
     val sEdits = pluralStringResource(R.plurals.tool_count_edits, editsCount, editsCount)
     val sShell = pluralStringResource(R.plurals.tool_count_shell, shellCount, shellCount)
-    val sWeb = pluralStringResource(R.plurals.tool_count_web, webCount, webCount)
     val sThinking = pluralStringResource(R.plurals.tool_count_thinking, thinkingCount, thinkingCount)
-    val sOther = pluralStringResource(R.plurals.tool_count_other, otherCount, otherCount)
+    val sControl = pluralStringResource(R.plurals.tool_count_control, controlCount, controlCount)
     val a11yDescription = remember(
-        sReads, sEdits, sShell, sWeb, sThinking, sOther,
-        readsCount, editsCount, shellCount, webCount, thinkingCount, otherCount
+        sReads, sEdits, sShell, sThinking, sControl,
+        readsCount, editsCount, shellCount, thinkingCount, controlCount
     ) {
         listOf(
             readsCount to sReads,
             editsCount to sEdits,
             shellCount to sShell,
-            webCount to sWeb,
             thinkingCount to sThinking,
-            otherCount to sOther,
+            controlCount to sControl,
         ).filter { it.first > 0 }.joinToString(" · ") { it.second }
     }
 
