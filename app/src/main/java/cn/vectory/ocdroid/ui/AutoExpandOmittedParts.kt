@@ -2,7 +2,7 @@ package cn.vectory.ocdroid.ui
 
 import cn.vectory.ocdroid.data.model.MessageWithParts
 import cn.vectory.ocdroid.data.model.Part
-import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.data.repository.MessageRepository
 import cn.vectory.ocdroid.ui.chat.ExpandPartsUseCase
 import cn.vectory.ocdroid.ui.chat.PartExpandState
 import cn.vectory.ocdroid.ui.chat.PartKey
@@ -61,7 +61,7 @@ import kotlinx.coroutines.launch
  */
 internal fun launchAutoExpandOmittedParts(
     scope: CoroutineScope,
-    repository: OpenCodeRepository,
+    repository: MessageRepository,
     store: SharedStateStore,
     sessionId: String,
     currentProfileId: () -> String,
