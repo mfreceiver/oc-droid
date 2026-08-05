@@ -1,0 +1,36 @@
+{
+  "reviewer": "rev-kimi",
+  "engine": "k3 (Kimi K3)",
+  "scope": "wave2-3 (feature/wave2-3): doc/KDoc cleanup + DI narrowing",
+  "bundle_id": "wave2-3-impl-2026-08-05",
+  "base": "513b5f75 (main)",
+  "head": "c47f1a94",
+  "commits_reviewed": ["0044ad80", "9a9e4928", "c47f1a94"],
+  "verdict": "approve-with-nits",
+  "completion_assessment": "all-addressed",
+  "method": "直读源码独立核实（非仅信作者说明）",
+  "nits_status": {
+    "nit1": "confirmed-pre-resolved (AutoExpandOmittedParts 已收 MessageRepository，无 stale rationale；不改正确)",
+    "nit2": "addressed-via-explicit-deferral (方法集验证准确 Connection+Session / Session+FileVcs；deferral 理由链核实成立，与 oracle §3.4 一致)",
+    "nit3": "fixed-accurately (Kotlin override-no-default 事实核实为真；4 个 OCR override token 均无 default)",
+    "nit4": "fixed-accurately (§6b missing-only 断言语义核实；doc-fix 在 oracle 两选项内，保守合理)",
+    "nit5": "narrowed-safely (@Binds bindSessionRepository 存在 RepositoryInterfaceModule:23-24；唯一消费者 ForegroundSessionTreeHydrator ctor 恰收 SessionRepository；wiring 静态可证不破)",
+    "nit6": "comment-accurate (CommandOrchestrator 双接口签名 + 两条 @Binds 均在)",
+    "nit7": "fully-cleaned (3 test 文件 7 处 setCurrentDirectory，HEAD 0 残留)",
+    "stale-qualifier_SlimMessageSetMerge97": "fixed (phase B 歧义消解)"
+  },
+  "discipline": {
+    "write_boundary_violations": "none",
+    "freeze_touch": "仅 §6b KDoc doc-only hunk；§1/§4/§6a 未动；断言体未动；6 接口定义仅 MessageRepository KDoc（签名零改动）；slim-token 4 方法定义未动；OpenCodeRepository.kt 零触碰；测试可执行代码零改动"
+  },
+  "author_nits_addressed_in_c47f1a94": [
+    "nit-a: nit#3 KDoc §6b pinning 措辞 overstated → reword 区分 compile-time 耦合 vs method-surface freeze pin",
+    "nit-b: nit#2 threading 链补 'SessionListActions wrappers; AppCore COLD_START direct call'",
+    "nit-c: 引用格式统一 'wave2.3'"
+  ],
+  "author_nits_out_of_scope": [
+    "nit-d: 4 处生产代码 stale setCurrentDirectory 注释（SessionViewModel:335 / HostProfileController:426 / SessionSwitcher:538 / OCR:723）— oracle nit#7 明确只圈 test 文件，故不在本波范围；建议后续 doc-sweep"
+  ],
+  "verification": "check.sh BUILD SUCCESSFUL ×3（作者报告；rev-kimi 只读未独立复跑，但静态 wiring 核查强支持可编译）",
+  "summary": "两批次与 oracle §4 清单逐项对齐：7 nits + 1 stale qualifier 全部处理。所有 KDoc 事实陈述经直读源码核实为真；nit#5 DI 收窄 binding 存在、wiring 不破；纪律干净。🟡 小瑕疵已在 c47f1a94 全部落地（1 处范围外已说明）。approve-with-nits。"
+}
