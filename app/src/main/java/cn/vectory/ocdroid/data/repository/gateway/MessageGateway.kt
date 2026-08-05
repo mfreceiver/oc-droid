@@ -9,9 +9,13 @@ import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.data.repository.ProbeResult
 import cn.vectory.ocdroid.data.repository.SLIMAPI_LOCAL_HISTORY_BOUND
 import cn.vectory.ocdroid.data.repository.ServerCompatProfile
+import cn.vectory.ocdroid.data.repository.http.SlimapiErrorCodes
 import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.runSuspendCatching
 import java.io.IOException
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 
 /**
  * Gateway for message operations: load, actions, skeleton reload.
@@ -22,6 +26,7 @@ import java.io.IOException
 internal class MessageGateway(
     private val bundleProvider: () -> ClientBundle,
     private val serverCompatProfile: ServerCompatProfile,
+    private val json: Json,
 ) {
     private val api: OpenCodeApi get() = bundleProvider().restApi
 
@@ -132,6 +137,38 @@ internal class MessageGateway(
         ProbeResult(ok = false, httpStatus = null)
     }
 
+    /**
+     * §slimapi-client-impl-v1 §5 G6 (lite-v2 N×/full loop). Expands each
+     * requested message id via an individual `GET /slimapi/messages/{sid}/full/{mid}`
+     * call (the V1 batch endpoint `…/full?ids=` and the ExpandBatchEngine
+     * retry/halving/backoff machinery were RETIRED in lite-v2 — see
+     * OpenCodeRepository.kt retire note above expandMessagesFullBatch).
+     *
+     * Outcome branching (consumed by T15 PartExpandState):
+     *  - at least one id resolves → [ExpandOutcome.Ok] (carries resolved
+     *    `items` + per-message `failures` with their parsed envelope codes);
+     *  - any id fails with `session_not_found` → [ExpandOutcome.SessionMissing]
+     *    (the whole session is gone upstream — every per-id call against a
+     *    missing session returns this code, so a single occurrence is
+     *    sufficient; mirrors the G2 status handling the UI expects);
+     *  - every id fails with anything else → [ExpandOutcome.Failed]
+     *    (representative code = first non-null envelope code, or null when
+     *    all failures are transport-level IOException).
+     *
+     * ## Legacy fallback — deliberately absent (design decision)
+     *
+     * This method has NO legacy `GET /session/{sid}/message` fallback. This
+     * does NOT violate the catalog's 404-fallback rule: the catalog's
+     * "404 → cache 60s → per-id /full/{mid}" rule described the OLD batch
+     * endpoint (`/full?ids=`) → per-id transition (slim-mode-api-routing.md
+     * §5.4 G6), which is itself RETIRED. In lite-v2 the client is already on
+     * the per-id `/full/{mid}` path, and the oc-slimapi sidecar is the
+     * sole transport in slim mode (always present when
+     * [ServerCompatProfile.slimConnection] is true). A legacy fallback would
+     * re-introduce the very REST passthrough slim mode exists to eliminate,
+     * so none is wired. If a future deployment must tolerate sidecar
+     * degradation, that is a separate design decision (see audit P1.5).
+     */
     suspend fun expandMessagesFullBatch(
         sessionId: String,
         messageIds: Set<String>,
@@ -142,7 +179,25 @@ internal class MessageGateway(
         for (mid in messageIds) {
             getSlimapiMessageFull(sessionId, mid)
                 .onSuccess { items += it }
-                .onFailure { failures += ExpandOutcome.MessageFailure(mid, code = null) }
+                .onFailure { throwable ->
+                    val code = parseEnvelopeCode(throwable)
+                    failures += ExpandOutcome.MessageFailure(mid, code = code)
+                }
+        }
+        // Session gone upstream — any session_not_found is sufficient (a missing
+        // session 404s every per-id call with this code).
+        if (failures.any { it.code == SlimapiErrorCodes.SESSION_NOT_FOUND }) {
+            return ExpandOutcome.SessionMissing(sessionId)
+        }
+        // Total failure (no id resolved) — collapse to Failed so the UI can
+        // distinguish all-failed from partial-success. Representative code is
+        // the first non-null envelope code; null when every failure was
+        // transport-level (IOException).
+        if (items.isEmpty() && failures.isNotEmpty()) {
+            return ExpandOutcome.Failed(
+                sessionId = sessionId,
+                code = failures.firstNotNullOfOrNull { it.code },
+            )
         }
         return ExpandOutcome.Ok(items = items, failures = failures, usedBatch = false)
     }
@@ -218,6 +273,32 @@ internal class MessageGateway(
             }
         }
         return null
+    }
+
+    /**
+     * Best-effort extract the sidecar's machine-readable error code from a
+     * per-id `/full/{mid}` failure. Non-2xx responses are thrown by Retrofit
+     * as [retrofit2.HttpException] (the suspend API returns the body
+     * directly, not `Response<*>`); transport failures surface as
+     * [IOException] and yield `null` (no envelope to parse). Mirrors
+     * [OpenCodeRepository.parseErrorCode] / SessionGateway's private copy;
+     * kept per-gateway to stay self-contained (same convention as the other
+     * gateways). One-shot errorBody read is safe inside runCatching.
+     */
+    private fun parseEnvelopeCode(throwable: Throwable): String? {
+        val httpException = throwable as? retrofit2.HttpException ?: return null
+        val rawBody = runCatching { httpException.response()?.errorBody()?.string() }.getOrNull()
+        return parseErrorCodeFromRaw(rawBody)
+    }
+
+    private fun parseErrorCodeFromRaw(rawBody: String?): String? {
+        if (rawBody == null) return null
+        return try {
+            val obj = json.decodeFromString<JsonObject>(rawBody)
+            (obj["code"] as? JsonPrimitive)?.content
+        } catch (e: Exception) {
+            null
+        }
     }
 
     companion object {

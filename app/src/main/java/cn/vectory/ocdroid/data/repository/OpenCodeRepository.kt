@@ -257,6 +257,7 @@ class OpenCodeRepository @Inject constructor(
     private val messageGateway = MessageGateway(
         bundleProvider = { requireClientBundle() },
         serverCompatProfile = serverCompatProfile,
+        json = json,
     )
     private val interactionGateway = InteractionGateway(
         bundleProvider = { requireClientBundle() },

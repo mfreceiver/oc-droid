@@ -339,18 +339,19 @@ class OpenCodeRepositorySlimapiEndpointsTest {
     }
 
     @Test
-    fun `expand single message failure returns Ok with the message in failures`() = runBlocking {
-        // lite-v2-dev shim: if a single getSlimapiMessageFull fails (e.g. 404),
-        // the message is reported as a per-id failure in Ok.failures.
+    fun `expand single message failure returns Failed with parsed code`() = runBlocking {
+        // lite-v2-dev shim: if every getSlimapiMessageFull call fails (e.g. 404
+        // with a machine-readable envelope code), the outcome collapses to
+        // [Failed] with the parsed code — the UI shows a generic "expand
+        // failed" affordance with retry (T15 PartExpandState).
         server.enqueue(jsonResponse("""{"code":"not_found"}""", 404))
 
         val outcome = repository.expandMessagesFullBatch("sess-1", setOf("m1"))
 
-        assertTrue("Ok on per-message failure: $outcome", outcome is ExpandOutcome.Ok)
-        val ok = outcome as ExpandOutcome.Ok
-        assertTrue("m1 surfaced as failure: ${ok.failures.map { it.messageId }}",
-            ok.failures.any { it.messageId == "m1" })
-        assertFalse("usedBatch=false", ok.usedBatch)
+        assertTrue("Failed on total failure: $outcome", outcome is ExpandOutcome.Failed)
+        val failed = outcome as ExpandOutcome.Failed
+        assertEquals("sess-1", failed.sessionId)
+        assertEquals("not_found", failed.code)
         assertEquals("1 HTTP request", 1, server.requestCount)
     }
 

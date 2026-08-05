@@ -5,26 +5,36 @@ import cn.vectory.ocdroid.data.model.MessageWithParts
 /**
  * §slimapi-client-impl-v1 §5 G6 (Task 3) — boundary-normalised outcome
  * of an expand-multiple-messages-full call
- * ([OpenCodeRepository.expandMessagesFullBatch]). Every retry / halve /
- * backoff / fallback decision the repository makes internally collapses
+ * ([OpenCodeRepository.expandMessagesFullBatch]). lite-v2 runs a plain
+ * N×/full loop: one `GET /slimapi/messages/{sid}/full/{mid}` per requested
+ * id, with no batch engine and no retry/halving/backoff (the V1
+ * ExpandBatchEngine + batch endpoint were RETIRED — see the retire note in
+ * OpenCodeRepository above expandMessagesFullBatch). The loop collapses
  * into exactly one of these three shapes so the UI (T15 usecase +
  * T16 MessageRow) never pattern-matches on `retrofit2.Response` / HTTP
  * status / error-code strings.
  *
  * ## Branch table (set by `OpenCodeRepository.expandMessagesFullBatch`)
  *
- * | outcome                                  | type            | notes |
- * | ---                                      | ---             | ---   |
- * | 200 + envelope                           | [Ok]            | `items` resolved; per-message failures ride in `failures` (HTTP stays 200 even when some ids fail) |
- * | 404 + `session_not_found`                | [SessionMissing]| the entire session is gone upstream — UI clears local cache (mirrors G2 status handling) |
- * | 404 + `thin_route_not_found` (transitional) | [Ok]         | sidecar hasn't deployed the batch endpoint; repo falls back to N parallel single-full calls (`usedBatch = false`) |
- * | 404 (other)                              | [Failed]        | programming error / unmapped route — NO fallback |
- * | 413 after exhaustive halving             | [Failed]        | even single-id is too large upstream |
- * | 503 after exhaustive backoff             | [Failed]        | repo exhausted 3 retries with exponential backoff |
- * | 400 / 422 / other 4xx 5xx                | [Failed]        | bad request — fix and retry upstream |
- * | Network / IO failure                     | [Failed]        | `code = null` (no sidecar envelope) |
- * | Budget exhausted / cancelled /        | [Failed]        | `code = null` + `exhausted = true` (keep skeleton + show retry affordance) |
- * | exhausted                                    |                |                                                                       |
+ * | outcome                                  | type              | notes |
+ * | ---                                      | ---               | ---   |
+ * | ≥1 id resolves (200 envelope)            | [Ok]              | `items` resolved; per-message failures ride in `failures` with their parsed `{"code":…}` (HTTP stays 200 even when some ids fail) |
+ * | 404 + `session_not_found` (any id)       | [SessionMissing]  | the entire session is gone upstream — UI clears local cache (mirrors G2 status handling); a single occurrence is sufficient since a missing session 404s every per-id call |
+ * | every id fails (non-session_not_found)   | [Failed]          | representative `code` = first non-null envelope code; `null` when all failures are transport-level IOException. UI shows generic "expand failed" affordance with retry |
+ * | Network / IO failure only                | [Failed]          | `code = null` (no sidecar envelope) |
+ *
+ * The `usedBatch` flag on [Ok] is always `false` in lite-v2 (per-id loop,
+ * never the retired batch endpoint) and is retained only as a telemetry
+ * hook for the transitional batch path that no longer exists.
+ *
+ * ## Legacy fallback — absent by design
+ *
+ * There is intentionally NO legacy `GET /session/{sid}/message` fallback.
+ * The catalog's 404-fallback rule described the old batch→per-id
+ * transition (slim-mode-api-routing.md §5.4 G6), which is itself retired;
+ * the client is already on the per-id path and the sidecar is the sole
+ * slim transport. See [OpenCodeRepository.expandMessagesFullBatch] KDoc
+ * for the full rationale.
  *
  * ## Purity
  *
