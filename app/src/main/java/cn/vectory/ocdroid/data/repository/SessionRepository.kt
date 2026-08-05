@@ -24,4 +24,12 @@ interface SessionRepository {
         limit: Int? = null,
         search: String? = null,
     ): Result<SlimSessionsPage>
+
+    /**
+     * §slimapi-p3: P3 fan-out collapse — whether this repository supports a
+     * single bulk fetch of ALL sessions (roots + children) via
+     * [getSlimapiSessions] with `roots=false`. When true, the tree hydrator
+     * can issue ONE call instead of N per-node BFS requests.
+     */
+    val supportsBulkSessionTree: Boolean
 }

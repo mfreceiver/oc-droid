@@ -444,6 +444,16 @@ class OpenCodeRepository @Inject constructor(
      *  `/session/status`）。lite-v2 起等价于 slimConnection（plan §4.4）。 */
     override val usesSlimStatusFanOut: Boolean get() = connectionGateway.usesSlimStatusFanOut
 
+    /** §slimapi-p3: P3 fan-out collapse — bulk session tree via slimapi
+     *  is available when the connection is slim-capable (same flag as
+     *  [usesSlimStatusFanOut] and other slim paths). */
+    override val supportsBulkSessionTree: Boolean get() = connectionGateway.usesSlimStatusFanOut
+
+    /** §rev-ds ISSUE 2: global question aggregation is a slim sidecar feature,
+     *  independent of status-endpoint support. Same flag as [usesSlimStatusFanOut]
+     *  — both map to [ConnectionGateway.slimConnection]/[ServerCompatProfile.slimConnection]. */
+    override val supportsGlobalQuestionFetch: Boolean get() = connectionGateway.usesSlimStatusFanOut
+
     private data class CandidateSsl(
         val config: SslConfig,
         val clientCertError: String?,

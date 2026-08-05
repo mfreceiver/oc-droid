@@ -4,6 +4,7 @@ import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.repository.SessionRepository
 import cn.vectory.ocdroid.ui.AppAction
 import cn.vectory.ocdroid.ui.SharedStateStore
+import cn.vectory.ocdroid.util.DebugLog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -23,12 +24,71 @@ private data class RootHydration(
     val complete: Boolean,
 )
 
-/** Recursively loads roots with bounded root-level concurrency. */
+/**
+ * §slimapi-p3: P3 fan-out collapse — loads complete session trees.
+ *
+ * **Slim path** (when [repository.supportsBulkSessionTree]): issues ONE bulk
+ * fetch via [SessionRepository.getSlimapiSessions] with `roots=false`, which
+ * returns ALL sessions (roots + children). The flat list is then grouped by
+ * `parentId` client-side to produce the [CompleteTreeHydration] output.
+ * This replaces the per-node BFS (N = 18+ HTTP requests) with a single call.
+ *
+ * **Legacy path**: keeps the existing per-node BFS via [hydrateRoot]
+ * unchanged as fallback for non-slim connections.
+ *
+ * Output shape [CompleteTreeHydration] is IDENTICAL in both paths so
+ * downstream consumers ([ForegroundSessionTreeHydrator.request], etc.)
+ * are completely unchanged.
+ */
 internal suspend fun loadCompleteSessionTrees(
     repository: SessionRepository,
     roots: List<Session>,
     maxConcurrency: Int = 6,
     shouldContinue: () -> Boolean = { true },
+): CompleteTreeHydration = coroutineScope {
+    if (repository.supportsBulkSessionTree) {
+        // §slimapi-p3: slim bulk path — ONE call to /slimapi/sessions?roots=false
+        val page = repository.getSlimapiSessions(roots = false).getOrElse {
+            DebugLog.w("SessionTree", "Bulk session tree fetch failed: ${it.message} — falling back to legacy BFS")
+            return@coroutineScope legacyBfsLoad(repository, roots, maxConcurrency, shouldContinue)
+        }
+        if (shouldContinue()) {
+            val allSessions = page.sessions
+            // §rev-ds ISSUE 1: X-Complete=false means the bulk page is unreliable
+            // (truncated). Fall back to legacy BFS which fetches the full tree
+            // correctly per-node without depending on `complete`, terminates
+            // cleanly (no re-request storm), matches the `getOrElse` failure
+            // fallback pattern above.
+            if (page.complete == false) {
+                DebugLog.w("SessionTree", "Bulk session tree fetch returned X-Complete=false — falling back to legacy BFS")
+                return@coroutineScope legacyBfsLoad(repository, roots, maxConcurrency, shouldContinue)
+            }
+            val childrenByParent = allSessions
+                .filter { it.parentId != null }
+                .groupBy { it.parentId!! }
+            val allRootIds = allSessions
+                .filter { it.parentId == null }
+                .map { it.id }
+                .toSet()
+            // Cross-check against requested roots: only roots present in the
+            // bulk fetch are considered complete.
+            val requestedRootIds = roots.distinctBy { it.id }.map { it.id }.toSet()
+            val completeRootIds = allRootIds.intersect(requestedRootIds)
+            return@coroutineScope CompleteTreeHydration(childrenByParent, completeRootIds)
+        } else {
+            return@coroutineScope CompleteTreeHydration(emptyMap(), emptySet())
+        }
+    }
+    // Legacy path: per-node BFS (unchanged behavior).
+    legacyBfsLoad(repository, roots, maxConcurrency, shouldContinue)
+}
+
+/** Legacy BFS-based tree hydration — one HTTP call per node. */
+private suspend fun legacyBfsLoad(
+    repository: SessionRepository,
+    roots: List<Session>,
+    maxConcurrency: Int,
+    shouldContinue: () -> Boolean,
 ): CompleteTreeHydration = coroutineScope {
     val semaphore = Semaphore(maxConcurrency.coerceAtLeast(1))
     val hydrated = roots.distinctBy { it.id }.map { root ->

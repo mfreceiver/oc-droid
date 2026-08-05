@@ -19,11 +19,18 @@ import java.util.concurrent.atomic.AtomicInteger
 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class SessionTreeHydratorTest {
     private val repository = mockk<OpenCodeRepository>()
+
+    /** Stubs the repository to use the legacy BFS path (non-slim). */
+    private fun stubLegacyTree() {
+        io.mockk.every { repository.supportsBulkSessionTree } returns false
+    }
+
     private fun session(id: String, parentId: String? = null) =
         Session(id = id, directory = "/repo", parentId = parentId)
 
     @Test
     fun `recursive hydration marks root complete only after every descendant succeeds`() = runTest {
+        stubLegacyTree()
         val root = session("A")
         val child = session("C", "A")
         val grandchild = session("G", "C")
@@ -40,6 +47,7 @@ class SessionTreeHydratorTest {
 
     @Test
     fun `descendant request failure leaves root incomplete`() = runTest {
+        stubLegacyTree()
         val root = session("A")
         val child = session("C", "A")
         coEvery { repository.getChildren("A") } returns Result.success(listOf(child))
@@ -53,6 +61,7 @@ class SessionTreeHydratorTest {
 
     @Test
     fun `root hydration concurrency is bounded`() = runTest {
+        stubLegacyTree()
         val active = AtomicInteger()
         val maxActive = AtomicInteger()
         val roots = (1..8).map { session("R$it") }
@@ -72,6 +81,7 @@ class SessionTreeHydratorTest {
 
     @Test
     fun `status failure caches complete tree while descendants remain unknown`() = runTest {
+        stubLegacyTree()
         val store = SharedStateStore()
         val root = session("A")
         val child = session("C", "A")
@@ -95,6 +105,7 @@ class SessionTreeHydratorTest {
 
     @Test
     fun `gpter-blocker stale hydration is dropped when epoch bumped mid-flight`() = runTest {
+        stubLegacyTree()
         val store = SharedStateStore()
         val root = session("A")
         val child = session("C", "A")
@@ -148,6 +159,7 @@ class SessionTreeHydratorTest {
 
     @Test
     fun `gpter-blocker hydration commits normally when epoch is unchanged`() = runTest {
+        stubLegacyTree()
         // Negative control: no invalidation mid-flight → epoch unchanged →
         // commit succeeds. Ensures the guard doesn't false-positive.
         val store = SharedStateStore()
@@ -168,8 +180,97 @@ class SessionTreeHydratorTest {
 
     // ── §glmer-minor (v097 review-fix): inFlight must not leak for filtered ids ─
 
+    // ── §rev-ds ISSUE 3: slim bulk path unit tests ──────────────────────────
+
+    @Test
+    fun `bulk grouping with nested chains and orphan`() = runTest {
+        // Fixture: three roots, depth-2 chain, and one orphan (parentId pointing
+        // to non-existent session).
+        val root1 = session("R1")
+        val root2 = session("R2")
+        val root3 = session("R3")
+        val child = session("C1", "R1")
+        val grandchild = session("GC1", "C1")
+        val orphan = session("ORPHAN", "GONE")  // parentId "GONE" not in response
+        val allSessions = listOf(root1, root2, root3, child, grandchild, orphan)
+
+        io.mockk.every { repository.supportsBulkSessionTree } returns true
+        coEvery { repository.getSlimapiSessions(any(), any(), any(), any()) } returns
+            Result.success(cn.vectory.ocdroid.data.model.SlimSessionsPage(allSessions, complete = true))
+
+        val result = loadCompleteSessionTrees(repository, listOf(root1, root2, root3), maxConcurrency = 2)
+
+        // Roots present in response are in completeRootIds.
+        assertEquals(setOf("R1", "R2", "R3"), result.completeRootIds)
+
+        // Children grouped by parentId.
+        assertEquals(listOf("C1"), result.childrenByParent["R1"]?.map { it.id })
+        assertEquals(listOf("GC1"), result.childrenByParent["C1"]?.map { it.id })
+        // Orphan is present in the map under its parentId key (grouped correctly).
+        assertEquals(listOf("ORPHAN"), result.childrenByParent["GONE"]?.map { it.id })
+    }
+
+    @Test
+    fun `complete false falls back to legacy BFS`() = runTest {
+        val root = session("A")
+        val child = session("C", "A")
+        val allSessions = listOf(root, child)
+
+        // Bulk returns X-Complete=false.
+        io.mockk.every { repository.supportsBulkSessionTree } returns true
+        coEvery { repository.getSlimapiSessions(any(), any(), any(), any()) } returns
+            Result.success(cn.vectory.ocdroid.data.model.SlimSessionsPage(allSessions, complete = false))
+        // Legacy BFS stubs.
+        coEvery { repository.getChildren("A") } returns Result.success(listOf(child))
+        coEvery { repository.getChildren("C") } returns Result.success(emptyList())
+
+        val result = loadCompleteSessionTrees(repository, listOf(root), maxConcurrency = 2)
+
+        // Must have fallen back to legacy BFS: root is complete, children correct.
+        assertEquals(setOf("A"), result.completeRootIds)
+        assertEquals(listOf("C"), result.childrenByParent["A"]?.map { it.id })
+    }
+
+    @Test
+    fun `bulk failure falls back to legacy BFS`() = runTest {
+        val root = session("A")
+        val child = session("C", "A")
+
+        // Bulk throws.
+        io.mockk.every { repository.supportsBulkSessionTree } returns true
+        coEvery { repository.getSlimapiSessions(any(), any(), any(), any()) } returns
+            Result.failure(IllegalStateException("bulk offline"))
+        // Legacy BFS stubs.
+        coEvery { repository.getChildren("A") } returns Result.success(listOf(child))
+        coEvery { repository.getChildren("C") } returns Result.success(emptyList())
+
+        val result = loadCompleteSessionTrees(repository, listOf(root), maxConcurrency = 2)
+
+        assertEquals(setOf("A"), result.completeRootIds)
+        assertEquals(listOf("C"), result.childrenByParent["A"]?.map { it.id })
+    }
+
+    @Test
+    fun `requested root absent from bulk response is not in completeRootIds`() = runTest {
+        val rootA = session("A")
+        val rootB = session("B")
+        // Bulk response only contains A, not B.
+        val allSessions = listOf(rootA)
+
+        io.mockk.every { repository.supportsBulkSessionTree } returns true
+        coEvery { repository.getSlimapiSessions(any(), any(), any(), any()) } returns
+            Result.success(cn.vectory.ocdroid.data.model.SlimSessionsPage(allSessions, complete = true))
+
+        val result = loadCompleteSessionTrees(repository, listOf(rootA, rootB), maxConcurrency = 2)
+
+        // A is complete, B is NOT (absent from bulk response).
+        assertTrue("A in completeRootIds", "A" in result.completeRootIds)
+        assertFalse("B NOT in completeRootIds", "B" in result.completeRootIds)
+    }
+
     @Test
     fun `glmer-minor inFlight does not leak when id is filtered out before launch`() = runTest {
+        stubLegacyTree()
         val store = SharedStateStore()
         // "A" is NOT in the store yet → mapNotNull(byId::get) filters it out.
         // Pre-fix: inFlight.add("A") happened BEFORE the filter, so "A" was

@@ -194,8 +194,13 @@ internal suspend fun AppCore.resolveQuestionDirectory(requestId: String): String
 // ════════════════════════════════════════════════════════════════════════════
 
 /**
- * §issue-1 Phase 2a Fix B: the ONE shared workdir-set computation for pending-
- * question fan-out. Used at BOTH fan-out sites so they cannot drift.
+ * §issue-1 Phase 2a Fix B (§rev-ds round-2 FIX 1): the ONE shared workdir-set
+ * computation for the LEGACY pending-question fan-out. Used by RefreshOrchestrator
+ * to pass the full pre-P3 directory set to ForegroundCatchUpController (the slim
+ * path ignores this argument and makes a single global call).
+ *
+ * Unions `directorySessionKeys` + `currentWorkdir` + `recentWorkdirs`, normalizes
+ * each via [WorkdirPaths.normalizeDirectory], filters blank, and distincts.
  */
 internal fun computeQuestionFanOutWorkdirs(
     directorySessionKeys: Set<String>,

@@ -443,20 +443,61 @@ class ForegroundCatchUpControllerTest {
         io.mockk.every { isInForeground } returns foregroundFlow
     }
 
-    // ── §R18 Phase 3 Wave 1 (P1-9): multi-workdir pending questions fan-out ──
+    // ── §slimapi-p3 / §rev-ds ISSUE 2: slim/legacy fan-out split ──
 
     @Test
-    fun `catchUpPendingQuestionsAllWorkdirs fans out per workdir and merges results by id`() {
-        // §P1-9: catch-up across all known workdirs so a question that arrived
-        // for a non-current workdir during background doesn't disappear. The
-        // controller owns its [SharedStateStore] and merges per-workdir results
-        // into the sessionList slice via mutateSessionList.
+    fun `slim path catchUpPendingQuestionsAllWorkdirs makes a single global call and merges results by id`() {
+        // §slimapi-p3: slim path — `supportsGlobalQuestionFetch=true` → single
+        // `getPendingQuestions(null)` returns ALL pending questions.
         store.mutateSessionList {
             SessionListState(pendingQuestions = listOf(
                 QuestionRequest(id = "existing", sessionId = "s0", questions = emptyList())
             ))
         }
         val repository = mockk<OpenCodeRepository>(relaxed = true)
+        io.mockk.every { repository.supportsGlobalQuestionFetch } returns true
+        coEvery { repository.getPendingQuestions(null) } returns Result.success(
+            listOf(
+                QuestionRequest(id = "qa", sessionId = "sa", questions = emptyList()),
+                QuestionRequest(id = "qb", sessionId = "sb", questions = emptyList()),
+            )
+        )
+
+        val testScope = TestScope(UnconfinedTestDispatcher())
+        val controller = ForegroundCatchUpController(
+            appLifecycleMonitor = stubMonitor(),
+            scope = testScope,
+            store = store,
+            settingsManager = settingsManager,
+            effects = effects,
+            clock = { nowMs },
+        )
+
+        controller.catchUpPendingQuestionsAllWorkdirs(repository = repository)
+        testScope.testScheduler.advanceUntilIdle()
+
+        val ids = store.sessionListFlow.value.pendingQuestions.map { it.id }.toSet()
+        assertTrue("qa from global fetch", "qa" in ids)
+        assertTrue("qb from global fetch", "qb" in ids)
+        assertTrue("existing preserved (gap-fill merge)", "existing" in ids)
+        // Exactly ONE global call — no per-dir fan-out.
+        coVerify(exactly = 1) { repository.getPendingQuestions(null) }
+        coVerify(exactly = 0) { repository.getPendingQuestions("/a") }
+        coVerify(exactly = 0) { repository.getPendingQuestions("/b") }
+        testScope.cancel()
+    }
+
+    @Test
+    fun `legacy path catchUpPendingQuestionsAllWorkdirs fans out per-dir`() {
+        // §rev-ds ISSUE 2: legacy path — `supportsGlobalQuestionFetch=false` →
+        // per-dir fan-out over the provided workdirs.
+        store.mutateSessionList {
+            SessionListState(pendingQuestions = listOf(
+                QuestionRequest(id = "existing", sessionId = "s0", questions = emptyList())
+            ))
+        }
+        val repository = mockk<OpenCodeRepository>(relaxed = true)
+        io.mockk.every { repository.supportsGlobalQuestionFetch } returns false
         coEvery { repository.getPendingQuestions("/a") } returns Result.success(
             listOf(QuestionRequest(id = "qa", sessionId = "sa", questions = emptyList()))
         )
@@ -464,7 +505,6 @@ class ForegroundCatchUpControllerTest {
             listOf(QuestionRequest(id = "qb", sessionId = "sb", questions = emptyList()))
         )
 
-        // Use an unconfined scope so per-workdir launches are drained eagerly.
         val testScope = TestScope(UnconfinedTestDispatcher())
         val controller = ForegroundCatchUpController(
             appLifecycleMonitor = stubMonitor(),
@@ -475,69 +515,31 @@ class ForegroundCatchUpControllerTest {
             clock = { nowMs },
         )
 
-        controller.catchUpPendingQuestionsAllWorkdirs(
-            repository = repository,
-            workdirs = listOf("/a", "/b"),
-        )
+        controller.catchUpPendingQuestionsAllWorkdirs(repository = repository, workdirs = listOf("/a", "/b"))
         testScope.testScheduler.advanceUntilIdle()
 
         val ids = store.sessionListFlow.value.pendingQuestions.map { it.id }.toSet()
-        assertTrue("qa from /a", "qa" in ids)
-        assertTrue("qb from /b", "qb" in ids)
+        assertTrue("qa from /a fetch", "qa" in ids)
+        assertTrue("qb from /b fetch", "qb" in ids)
         assertTrue("existing preserved (gap-fill merge)", "existing" in ids)
+        // Two per-dir calls, no global call.
+        coVerify(exactly = 0) { repository.getPendingQuestions(null) }
         coVerify(exactly = 1) { repository.getPendingQuestions("/a") }
         coVerify(exactly = 1) { repository.getPendingQuestions("/b") }
         testScope.cancel()
     }
 
-    @Test
-    fun `catchUpPendingQuestionsAllWorkdirs is a no-op for an empty workdir list`() {
-        val repository = mockk<OpenCodeRepository>(relaxed = true)
-        val testScope = TestScope(UnconfinedTestDispatcher())
-        val controller = ForegroundCatchUpController(
-            appLifecycleMonitor = stubMonitor(),
-            scope = testScope,
-            store = store,
-            settingsManager = settingsManager,
-            effects = effects,
-            clock = { nowMs },
-        )
-
-        controller.catchUpPendingQuestionsAllWorkdirs(
-            repository = repository,
-            workdirs = emptyList(),
-        )
-        testScope.testScheduler.advanceUntilIdle()
-
-        coVerify(exactly = 0) { repository.getPendingQuestions(any()) }
-        testScope.cancel()
-    }
-
-    // ── §fix-refresh-storm P0-2: per-directory single-flight dedup ─────────────
+    // ── §slimapi-p3: slim single-flight guard (AtomicBoolean) ───────────
 
     @Test
-    fun `fix-refresh-storm P0-2 concurrent triggers for the same workdir collapse to one in-flight getPendingQuestions`() {
-        // §fix-refresh-storm P0-2: three triggers (manual refresh / SSE
-        // reconnect / foreground probe) call catchUpPendingQuestionsAllWorkdirs
-        // back-to-back for the SAME workdir set. Without dedup that is 3× the
-        // /question calls. The in-flight set must collapse the 2nd and 3rd
-        // triggers for each dir into a no-op (the 1st trigger's in-flight
-        // request satisfies them via the shared sessionList merge).
-        //
-        // NOTE on scheduling: the controller's scope uses an
-        // UnconfinedTestDispatcher, so each scope.launch body runs to
-        // completion (or its first suspension point) EAGERLY during the
-        // launch call itself. getPendingQuestions is a suspend fn mocked by
-        // mockk — under UnconfinedTestDispatcher it completes synchronously,
-        // so by the time the 2nd trigger's add(dir) runs, the 1st trigger's
-        // finally has already removed dir → the 2nd trigger would re-add and
-        // call again. To pin the DEDUP (not just "ran once"), we gate the
-        // mock on a CompletableDeferred so the in-flight request STAYS
-        // in-flight across the 2nd/3rd trigger calls.
+    fun `slim path concurrent triggers collapse to one in-flight global getPendingQuestions(null)`() {
+        // §slimapi-p3: three triggers → AtomicBoolean.compareAndSet collapses
+        // the 2nd and 3rd into no-ops.
         val repository = mockk<OpenCodeRepository>(relaxed = true)
+        io.mockk.every { repository.supportsGlobalQuestionFetch } returns true
         val gate = CompletableDeferred<Unit>()
-        coEvery { repository.getPendingQuestions("/a") } coAnswers {
-            gate.await() // stay in-flight until the test releases
+        coEvery { repository.getPendingQuestions(null) } coAnswers {
+            gate.await()
             Result.success(emptyList<cn.vectory.ocdroid.data.model.QuestionRequest>())
         }
         val testScope = TestScope(UnconfinedTestDispatcher())
@@ -550,41 +552,24 @@ class ForegroundCatchUpControllerTest {
             clock = { nowMs },
         )
 
-        // Fire THREE triggers for the same workdir list, advancing the
-        // scheduler just enough to let each scope.launch enter the suspend
-        // point (gate.await) without completing it.
         repeat(3) {
-            controller.catchUpPendingQuestionsAllWorkdirs(
-                repository = repository,
-                workdirs = listOf("/a"),
-            )
+            controller.catchUpPendingQuestionsAllWorkdirs(repository = repository)
             testScope.testScheduler.advanceUntilIdle()
         }
 
-        // While the first request is still gated in-flight, ONLY ONE
-        // getPendingQuestions call has been made — the 2nd and 3rd triggers
-        // were dedup'd by the in-flight set.
-        coVerify(exactly = 1) { repository.getPendingQuestions("/a") }
+        coVerify(exactly = 1) { repository.getPendingQuestions(null) }
 
-        // Release the gate; the in-flight request completes and the finally
-        // removes /a from the set.
         gate.complete(Unit)
         testScope.testScheduler.advanceUntilIdle()
-        // Still exactly one call (release did not trigger a new one).
-        coVerify(exactly = 1) { repository.getPendingQuestions("/a") }
+        coVerify(exactly = 1) { repository.getPendingQuestions(null) }
         testScope.cancel()
     }
 
     @Test
-    fun `fix-refresh-storm P0-2 workdir is released after failure so a later trigger can fire`() {
-        // §fix-refresh-storm P0-2: the try/finally MUST remove the dir from
-        // the in-flight set on EVERY exit path. This test pins the FAILURE
-        // path: getPendingQuestions returns Result.failure → onFailure logs →
-        // finally removes dir → a subsequent trigger for the same dir MUST be
-        // able to fire again (no permanent in-flight leak). Mirrors the
-        // success path (covered by the existing fan-out test).
+    fun `slim path inFlight is released after failure so a later trigger can fire`() {
         val repository = mockk<OpenCodeRepository>(relaxed = true)
-        coEvery { repository.getPendingQuestions("/a") } returns
+        io.mockk.every { repository.supportsGlobalQuestionFetch } returns true
+        coEvery { repository.getPendingQuestions(null) } returns
             Result.failure(java.io.IOException("503"))
         val testScope = TestScope(UnconfinedTestDispatcher())
         val controller = ForegroundCatchUpController(
@@ -596,21 +581,38 @@ class ForegroundCatchUpControllerTest {
             clock = { nowMs },
         )
 
-        // First trigger: fails, finally removes /a.
-        controller.catchUpPendingQuestionsAllWorkdirs(
-            repository = repository,
-            workdirs = listOf("/a"),
-        )
+        controller.catchUpPendingQuestionsAllWorkdirs(repository = repository)
         testScope.testScheduler.advanceUntilIdle()
-        coVerify(exactly = 1) { repository.getPendingQuestions("/a") }
+        coVerify(exactly = 1) { repository.getPendingQuestions(null) }
 
-        // Second trigger: /a was released by the finally → fires again.
-        controller.catchUpPendingQuestionsAllWorkdirs(
-            repository = repository,
-            workdirs = listOf("/a"),
-        )
+        controller.catchUpPendingQuestionsAllWorkdirs(repository = repository)
         testScope.testScheduler.advanceUntilIdle()
-        coVerify(exactly = 2) { repository.getPendingQuestions("/a") }
+        coVerify(exactly = 2) { repository.getPendingQuestions(null) }
+        testScope.cancel()
+    }
+
+    // ── §rev-ds ISSUE 2: legacy per-dir single-flight ────────────────────
+
+    @Test
+    fun `legacy path empty workdirs list is no-op`() {
+        // §rev-ds: legacy path with empty workdirs must not crash and not
+        // make any pending-questions calls.
+        val repository = mockk<OpenCodeRepository>(relaxed = true)
+        io.mockk.every { repository.supportsGlobalQuestionFetch } returns false
+        val testScope = TestScope(UnconfinedTestDispatcher())
+        val controller = ForegroundCatchUpController(
+            appLifecycleMonitor = stubMonitor(),
+            scope = testScope,
+            store = store,
+            settingsManager = settingsManager,
+            effects = effects,
+            clock = { nowMs },
+        )
+
+        controller.catchUpPendingQuestionsAllWorkdirs(repository = repository, workdirs = emptyList())
+        testScope.testScheduler.advanceUntilIdle()
+
+        coVerify(exactly = 0) { repository.getPendingQuestions(any()) }
         testScope.cancel()
     }
 }

@@ -50,4 +50,17 @@ interface InteractionRepository {
         response: PermissionResponse,
         routeToken: String?,
     ): Result<Unit>
+
+    /**
+     * §rev-ds ISSUE 2: whether this connection supports a single global
+     * `/question` fetch that aggregates questions across ALL workdirs (slim
+     * sidecar feature). When true, callers issue ONE `getPendingQuestions(null)`
+     * call; when false, callers must fan-out per workdir (legacy behavior).
+     *
+     * Wired to [cn.vectory.ocdroid.data.repository.gateway.ConnectionGateway.slimConnection]
+     * via the same capability flag that [usesSlimStatusFanOut] and [supportsBulkSessionTree]
+     * use — global question aggregation is a slim sidecar feature, independent
+     * of status-endpoint support.
+     */
+    val supportsGlobalQuestionFetch: Boolean
 }

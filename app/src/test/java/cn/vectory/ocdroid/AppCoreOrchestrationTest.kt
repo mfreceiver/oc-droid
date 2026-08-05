@@ -1130,24 +1130,15 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
         assertFalse(core.chatFlow.value.isLoadingMessages)
     }
 
-    // §issue-1 Phase 2a Fix B: fan-out site (2) now INCLUDES per-fp recent_workdirs
-    // (flipped green from the Phase 1b characterization that asserted their absence).
+    // §slimapi-p3: P3 fan-out collapse — single global /question=null call
+    // replaces the per-workdir fan-out. Verify the call fires once with null dir.
     @Test
-    fun `catchUpAfterDisconnectOrForeground fans out pending-questions catch-up across known workdirs plus recent_workdirs`() = runTest {
-        // Probe says nothing new → reload skipped; we just verify the workdir
-        // fan-out side-effect on foregroundCatchUpController (computed via the
-        // shared computeQuestionFanOutWorkdirs helper, same as site 1).
+    fun `catchUpAfterDisconnectOrForeground fires a single global pending-questions catch-up call`() = runTest {
+        // §slimapi-p3: the workdir set no longer determines the fetch — one
+        // global getPendingQuestions(null) returns ALL questions.
         coEvery { repository.probeLatestMessageIdForCurrent(any()) } returns
             cn.vectory.ocdroid.data.repository.ProbeResult(ok = true, messageID = "anchor", updatedAt = 100L)
-        // §issue-1 Fix B: recent_workdirs (per-fp) now part of the catch-up fan-out.
-        every { settingsManager.getRecentWorkdirs(any()) } returns listOf("/recent-1")
-        // Capture the EXACT workdir set passed to
-        // foregroundCatchUpController.catchUpPendingQuestionsAllWorkdirs (site 2).
-        val queriedDirs = mutableListOf<String>()
-        coEvery { repository.getPendingQuestions(any()) } answers {
-            queriedDirs += firstArg<String>()
-            Result.success(emptyList())
-        }
+        coEvery { repository.getPendingQuestions(any()) } returns Result.success(emptyList())
         val core = wire()
         core.writeChat {
             it.copy(currentSessionId = "s1", messages = listOf(Message(id = "anchor", role = "user")))
@@ -1160,13 +1151,9 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
         core.catchUpAfterDisconnectOrForeground("s1")
         advanceUntilIdle()
 
-        // §issue-1 Fix B: exact workdir SET = directorySessions.keys + currentWorkdir
-        // + recent_workdirs (per-fp). A question on a recently-used-but-disconnected
-        // workdir (/recent-1) is now caught up — no longer missed.
-        assertEquals(
-            "catch-up fan-out set must be directorySessions.keys + currentWorkdir + recent_workdirs",
-            setOf("/wA", "/wB", "/wC", "/recent-1"),
-            queriedDirs.toSet())
+        // Exactly ONE global call with null directory — no per-dir fan-out.
+        coVerify(exactly = 1) { repository.getPendingQuestions(null) }
+        coVerify(exactly = 0) { repository.getPendingQuestions("/wA") }
     }
 
     // ── R-20 Phase 2 复审 #2: launchCatchUp live fp provider ────────────────
@@ -1380,122 +1367,6 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
             (event as UiEvent.Info).resId)
     }
 
-    // ── §issue-1 Phase 2a Fix B / Phase 2 gate 🟡3: computeQuestionFanOutWorkdirs ──
-    //
-    // Pure helper (no AppCore wiring) — direct unit tests for the workdir-set
-    // computation shared by BOTH pending-question fan-out sites. Pins dedup,
-    // blank filtering, null-currentWorkdir, and order/distinct correctness so a
-    // future refactor of the helper cannot silently drop a source.
-
-    @Test
-    fun `computeQuestionFanOutWorkdirs dedupes a workdir present in all three sources to a single entry`() {
-        // /dup appears in directorySessions.keys AND currentWorkdir AND
-        // recent_workdirs → appears exactly once in the output.
-        val result = computeQuestionFanOutWorkdirs(
-            directorySessionKeys = setOf("/dup", "/a"),
-            currentWorkdir = "/dup",
-            recentWorkdirs = listOf("/dup", "/b"))
-        assertEquals(listOf("/dup", "/a", "/b"), result)
-        assertEquals("no duplicate entries", 3, result.toSet().size)
-    }
-
-    @Test
-    fun `computeQuestionFanOutWorkdirs filters blank and empty entries from every source`() {
-        // Blank/empty strings in any of the three inputs are excluded (the
-        // server rejects blank directories; currentWorkdir can be "" before a
-        // host is configured).
-        val result = computeQuestionFanOutWorkdirs(
-            directorySessionKeys = setOf("/ok", "", "   "),
-            currentWorkdir = "",
-            recentWorkdirs = listOf("/recent", "", "  "))
-        assertEquals(listOf("/ok", "/recent"), result)
-    }
-
-    @Test
-    fun `computeQuestionFanOutWorkdirs handles null currentWorkdir without crashing`() {
-        // null currentWorkdir is dropped by listOfNotNull — no NPE, no phantom
-        // "null" string entry.
-        val result = computeQuestionFanOutWorkdirs(
-            directorySessionKeys = setOf("/a"),
-            currentWorkdir = null,
-            recentWorkdirs = listOf("/b"))
-        assertEquals(listOf("/a", "/b"), result)
-    }
-
-    @Test
-    fun `computeQuestionFanOutWorkdirs returns empty list when every source is empty or blank`() {
-        // Edge: nothing to fan out → loadPendingQuestionsAllWorkdirs early-returns.
-        val result = computeQuestionFanOutWorkdirs(
-            directorySessionKeys = emptySet(),
-            currentWorkdir = null,
-            recentWorkdirs = emptyList())
-        assertTrue(result.isEmpty())
-    }
-
-    @Test
-    fun `computeQuestionFanOutWorkdirs preserves first-seen order and drops later duplicates`() {
-        // distinct() keeps the FIRST occurrence. Order = directorySessions.keys
-        // (insertion order, LinkedHashSet) then currentWorkdir then recent_workdirs.
-        // A workdir repeated across sources collapses to its earliest position.
-        val result = computeQuestionFanOutWorkdirs(
-            directorySessionKeys = setOf("/x"),
-            currentWorkdir = "/x", // dup of a key
-            recentWorkdirs = listOf("/x", "/y"), // /x dup again, /y new
-        )
-        assertEquals(listOf("/x", "/y"), result)
-    }
-
-    // ── slimapi v0.2.2 T4 (P2b): fan-out normalize-dedup ──
-    //
-    // Server-side normalize-dedup (v0.2.2) is now more lenient: it strips
-    // trailing slash + dedups, preserving root "/". The client MUST
-    // normalize the same way BEFORE deduping so both sides agree on the
-    // fan-out count (otherwise "/app" + "/app/" could fan out as 2
-    // routeTokens pre-server-normalize, or surface as 2 distinct dirs in
-    // the request envelope). T4-C2 pin.
-
-    @Test
-    fun `computeQuestionFanOutWorkdirs dedups slash-variants after normalize`() {
-        // T4-C2 brief matrix: ["/app","/app/","/app","/b"] → ["/app","/b"].
-        // Spread across all three sources to prove the normalize-dedup
-        // fires for cross-source variants too, not just within one source.
-        val result = computeQuestionFanOutWorkdirs(
-            directorySessionKeys = setOf("/app", "/app/"),
-            currentWorkdir = "/app",
-            recentWorkdirs = listOf("/b"))
-        assertEquals(listOf("/app", "/b"), result)
-    }
-
-    @Test
-    fun `computeQuestionFanOutWorkdirs dedups slash entries after normalize preserving root`() {
-        // T4-M2 (final review D8): renamed — at the fan-out layer blank
-        // entries are FILTERED OUT (`.filter { isNotBlank }` BEFORE
-        // `.map normalizeDirectory`), NOT normalized to "/". The single
-        // "/" in the output comes from the actual "/" key (root form is
-        // preserved by normalizeDirectory), not from the "" entries.
-        // Pre-rename name ("normalizes root and empty to slash") implied
-        // empty was normalized to "/", which is misleading.
-        val result = computeQuestionFanOutWorkdirs(
-            directorySessionKeys = setOf("", "/"),
-            currentWorkdir = "/",
-            recentWorkdirs = listOf(""))
-        assertEquals(listOf("/"), result)
-    }
-
-    @Test
-    fun `computeQuestionFanOutWorkdirs preserves first-seen post-normalize form`() {
-        // The OUTPUT is the normalized form (so the server receives a
-        // clean canonical path), and first-seen order survives the
-        // normalize-dedup. The first variant encountered wins the slot,
-        // but its OUTPUT shape is the normalized one.
-        val result = computeQuestionFanOutWorkdirs(
-            directorySessionKeys = setOf("/proj-a/"), // trailing-slash variant seen first
-            currentWorkdir = "/proj-a",
-            recentWorkdirs = listOf("/proj-b/"))
-        // /proj-a/ is normalized to /proj-a (NOT the raw "/proj-a/" form);
-        // /proj-b/ is normalized to /proj-b.
-        assertEquals(listOf("/proj-a", "/proj-b"), result)
-    }
 
     // ── §unified-nav A5: materialized-session route adoption ordering ──────────
 
@@ -1955,5 +1826,87 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
             "stale-fp EvictSession must NOT remove session from current host's list",
             core.store.sessionListFlow.value.sessions.any { it.id == sid },
         )
+    }
+
+    // ── §rev-ds round-2 FIX 1: computeQuestionFanOutWorkdirs ──────────────────
+    //
+    // Pure helper — direct unit tests for the workdir-set computation
+    // shared by BOTH pending-question fan-out sites. Pins dedup,
+    // blank filtering, null-currentWorkdir, and order/distinct correctness so a
+    // future refactor of the helper cannot silently drop a source.
+    // Restored from pre-P3 (removed in 24ad5734).
+
+    @Test
+    fun `computeQuestionFanOutWorkdirs dedupes a workdir present in all three sources to a single entry`() {
+        val result = computeQuestionFanOutWorkdirs(
+            directorySessionKeys = setOf("/dup", "/a"),
+            currentWorkdir = "/dup",
+            recentWorkdirs = listOf("/dup", "/b"))
+        assertEquals(listOf("/dup", "/a", "/b"), result)
+        assertEquals("no duplicate entries", 3, result.toSet().size)
+    }
+
+    @Test
+    fun `computeQuestionFanOutWorkdirs filters blank and empty entries from every source`() {
+        val result = computeQuestionFanOutWorkdirs(
+            directorySessionKeys = setOf("/ok", "", "   "),
+            currentWorkdir = "",
+            recentWorkdirs = listOf("/recent", "", "  "))
+        assertEquals(listOf("/ok", "/recent"), result)
+    }
+
+    @Test
+    fun `computeQuestionFanOutWorkdirs handles null currentWorkdir without crashing`() {
+        val result = computeQuestionFanOutWorkdirs(
+            directorySessionKeys = setOf("/a"),
+            currentWorkdir = null,
+            recentWorkdirs = listOf("/b"))
+        assertEquals(listOf("/a", "/b"), result)
+    }
+
+    @Test
+    fun `computeQuestionFanOutWorkdirs returns empty list when every source is empty or blank`() {
+        val result = computeQuestionFanOutWorkdirs(
+            directorySessionKeys = emptySet(),
+            currentWorkdir = null,
+            recentWorkdirs = emptyList())
+        assertTrue(result.isEmpty())
+    }
+
+    @Test
+    fun `computeQuestionFanOutWorkdirs preserves first-seen order and drops later duplicates`() {
+        val result = computeQuestionFanOutWorkdirs(
+            directorySessionKeys = setOf("/x"),
+            currentWorkdir = "/x",
+            recentWorkdirs = listOf("/x", "/y"),
+        )
+        assertEquals(listOf("/x", "/y"), result)
+    }
+
+    @Test
+    fun `computeQuestionFanOutWorkdirs dedups slash-variants after normalize`() {
+        val result = computeQuestionFanOutWorkdirs(
+            directorySessionKeys = setOf("/app", "/app/"),
+            currentWorkdir = "/app",
+            recentWorkdirs = listOf("/b"))
+        assertEquals(listOf("/app", "/b"), result)
+    }
+
+    @Test
+    fun `computeQuestionFanOutWorkdirs dedups slash entries after normalize preserving root`() {
+        val result = computeQuestionFanOutWorkdirs(
+            directorySessionKeys = setOf("", "/"),
+            currentWorkdir = "/",
+            recentWorkdirs = listOf(""))
+        assertEquals(listOf("/"), result)
+    }
+
+    @Test
+    fun `computeQuestionFanOutWorkdirs preserves first-seen post-normalize form`() {
+        val result = computeQuestionFanOutWorkdirs(
+            directorySessionKeys = setOf("/proj-a/"),
+            currentWorkdir = "/proj-a",
+            recentWorkdirs = listOf("/proj-b/"))
+        assertEquals(listOf("/proj-a", "/proj-b"), result)
     }
 }

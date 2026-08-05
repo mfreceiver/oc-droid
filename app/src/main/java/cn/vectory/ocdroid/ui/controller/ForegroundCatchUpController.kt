@@ -12,6 +12,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * R-16 M1 → R-17 batch3b: owns the foreground/background three-tier catch-up
@@ -88,17 +89,20 @@ class ForegroundCatchUpController(
     @Volatile private var hasObservedForegroundState: Boolean = false
 
     /**
-     * §fix-refresh-storm P0-2: per-workdir in-flight dedup for
-     * [catchUpPendingQuestionsAllWorkdirs]. Three independent triggers (manual
-     * refresh / SSE reconnect server.connected / foreground freshness probe)
-     * can fire within 7s, each fanning out to ALL workdirs — without dedup
-     * that is N workdirs × 3 triggers = 3N redundant /question calls. The set
-     * collapses concurrent triggers for the SAME workdir into ONE in-flight
-     * request. ConcurrentHashMap.newKeySet because the caller thread (UI /
-     * AppCore) and the scope's dispatcher may differ.
+     * §slimapi-p3: P3 fan-out collapse — single global in-flight guard for
+     * [catchUpPendingQuestionsAllWorkdirs] slim path. Three independent triggers
+     * (manual refresh / SSE reconnect server.connected / foreground freshness probe)
+     * can fire within 7s. AtomicBoolean.compareAndSet for thread-safe check-then-set
+     * (the legacy @Volatile Boolean read-then-write was non-atomic across threads).
      */
-    private val inFlightQuestionDirs: MutableSet<String> =
-        java.util.concurrent.ConcurrentHashMap.newKeySet()
+    private val slimInFlight = AtomicBoolean(false)
+
+    /**
+     * §rev-ds: legacy per-dir in-flight guard for [catchUpPendingQuestionsAllWorkdirs]
+     * legacy path. ConcurrentHashMap-backed set, same pattern as the per-dir fan-out
+     * that existed before the P3 collapse.
+     */
+    private val legacyInFlightDirs = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
 
     /** Timestamp (epoch ms) of the most recent message load (throttle anchor). */
     @Volatile private var lastLoadAtMs: Long = 0L
@@ -260,23 +264,23 @@ class ForegroundCatchUpController(
     // ── §R18 Phase 3 Wave 1 (P1-9): multi-workdir pending questions fan-out ──
 
     /**
-     * §P1-9: catch-up pending questions across EVERY known workdir (the in-
-     * memory `directorySessions` keys + `currentWorkdir`), not just the single
-     * [SettingsManager.currentWorkdir]. Without this, questions arriving for
-     * a background workdir (one the user previously connected to but isn't
-     * viewing right now) are lost: the AppCore dispatch handler for
-     * `LoadPendingQuestions` reads only `currentWorkdir`, so a `question.asked`
-     * SSE event for any other workdir is fetched-then-immediately-overwritten
-     * by the next currentWorkdir poll.
+     * §slimapi-p3: P3 fan-out collapse — single global /question=null call.
      *
-     * This controller does NOT own [cn.vectory.ocdroid.ui.SliceFlows] (the
-     * batch 3b migration gave it only the [SharedStateStore.chatFlow] +
-     * [SharedStateStore.composerFlow] it writes), so the workdir set is
-     * supplied by the caller (typically AppCore, which has both). Each
-     * workdir's `getPendingQuestions(dir)` is launched in [scope]; results
-     * are merged by id into the sessionList slice via
+     * Previously this method fanned out to EVERY known workdir (the in-memory
+     * `directorySessions` keys + `currentWorkdir`) by calling
+     * `getPendingQuestions(dir)` once per workdir (up to 8×). The `/question`
+     * directory parameter is a no-op for filtering (only instance routing), so
+     * a single `directory=null` (dir-less) global call returns ALL pending
+     * questions across all workdirs, reducing the refresh fan-out from 8→1.
+     *
+     * Results are merged by id into the sessionList slice via
      * [SharedStateStore.mutateSessionList] (`byGet` wins, pre-existing fills
      * gaps — same merge semantics as `launchLoadPendingQuestions`).
+     *
+     * The caller no longer supplies `workdirs` — the global fetch is
+     * authoritative for all workdirs. Single-flight (boolean [inFlight])
+     * collapses concurrent triggers from manual refresh / SSE reconnect
+     * / foreground probe into ONE in-flight request.
      *
      * §scope-note: AppCore (out of this wave's write scope) needs to call
      * this from its catch-up paths to wire production. The method is
@@ -284,32 +288,48 @@ class ForegroundCatchUpController(
      */
     fun catchUpPendingQuestionsAllWorkdirs(
         repository: InteractionRepository,
-        workdirs: List<String>,
+        workdirs: List<String> = emptyList(),
         tag: String = "ForegroundCatchUp",
     ) {
-        if (workdirs.isEmpty()) return
-        workdirs.forEach { dir ->
-            // §fix-refresh-storm P0-2: per-directory single-flight. add() is
-            // atomic — returns false if dir is already in-flight → skip this
-            // trigger; the in-flight request will merge the result into the
-            // shared sessionList slice via mutateSessionList, so the skipped
-            // trigger's data need is satisfied by the running request.
-            if (!inFlightQuestionDirs.add(dir)) return@forEach
+        if (repository.supportsGlobalQuestionFetch) {
+            // §slimapi-p3: slim path — single global call.
+            // AtomicBoolean.compareAndSet for thread-safe check-then-set.
+            if (!slimInFlight.compareAndSet(false, true)) return
             scope.launch {
                 try {
-                    repository.getPendingQuestions(dir)
+                    repository.getPendingQuestions(directory = null)
                         .onSuccess { questions ->
                             mergePendingQuestionsById(store::mutateSessionList, questions)
                         }
                         .onFailure { error ->
-                            DebugLog.w(tag, "catchUp getPendingQuestions failed for $dir: ${error.message}")
+                            DebugLog.w(tag, "catchUp getPendingQuestions(null) failed: ${error.message}")
                         }
                 } finally {
-                    // MUST remove on every exit path (success / failure /
-                    // CancellationException when the scope is torn down). A
-                    // missing remove would permanently block that workdir's
-                    // future catch-ups (stuck in-flight).
-                    inFlightQuestionDirs.remove(dir)
+                    slimInFlight.set(false)
+                }
+            }
+        } else {
+            // §rev-ds round-2 FIX 2: legacy per-dir fan-out — each dir gets its
+            // own scope.launch (concurrent), matching pre-P3 concurrency. Per-dir
+            // single-flight via legacyInFlightDirs (ConcurrentHashMap-backed set).
+            val uniqueDirs = workdirs
+                .filter { it.isNotBlank() }
+                .distinct()
+            if (uniqueDirs.isEmpty()) return
+            uniqueDirs.forEach { dir ->
+                if (!legacyInFlightDirs.add(dir)) return@forEach
+                scope.launch {
+                    try {
+                        repository.getPendingQuestions(dir)
+                            .onSuccess { questions ->
+                                mergePendingQuestionsById(store::mutateSessionList, questions)
+                            }
+                            .onFailure { error ->
+                                DebugLog.w(tag, "catchUp getPendingQuestions($dir) failed: ${error.message}")
+                            }
+                    } finally {
+                        legacyInFlightDirs.remove(dir)
+                    }
                 }
             }
         }
