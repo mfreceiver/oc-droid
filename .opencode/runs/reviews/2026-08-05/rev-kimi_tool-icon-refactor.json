@@ -1,0 +1,55 @@
+{
+  "review_id": "rev-kimi_tool-icon-refactor",
+  "date": "2026-08-05",
+  "reviewer": "rev-kimi",
+  "scope": "tool-icon-refactor",
+  "bundle_id": "tool-icon-refactor-2026-08-05",
+  "branch": "feature/tool-icon-refactor",
+  "commit": "0d4f17a2",
+  "spec": "tmp/tool-icon-refactor-handoff.md",
+  "verdict": "APPROVE_WITH_NITS",
+  "completion_assessment": "FULL",
+  "spec_conformance_score": 97,
+  "correctness": {
+    "findings": [
+      "5 类枚举完整迁移：ToolCategory{READS,EDITS,SHELL,THINKING,CONTROL} + DISPLAY_ORDER 与 spec §1a/1b 一致；toolCategoryIcon 的 when 对 5 成员穷举（编译期保证无遗漏），全仓库 grep ToolCategory.WEB/OTHER 0 命中。",
+      "write_ocmar_review bug 双层修复属实：isWriteFileOperation(:54) 以前缀匹配前的精确等值判断返回 false → 走 Basic；categoryCounts Basic 分支中 write_ocmar_review 不匹配任何 SHELL/EDITS/READS 前缀 → else CONTROL；单卡 toolIcon 显式分支 RateReview 位于通用 write/edit 之前。修复链路完整。",
+      "toolIcon 分支优先级正确：list_mcp/read_mcp(Storage) 在通用 read/list(FileOpen) 之前，read_mcp 不会被吞；write_ocmar_review 在通用 write 之前；ast_grep_search→Search / ast_grep_replace→Edit 顺序正确。",
+      "categoryCounts Basic 判定顺序与 spec §1d 逐字一致（SHELL 含 local_shell → ast_grep_replace→EDITS → 13 个 READS 前缀 → else CONTROL）。",
+      "fold 与单卡 icon 一致性核查：categoryCounts READS 的 13 前缀中，see_image→Visibility、context7→LibraryBooks 在单卡层为更丰富图标，fold 层归 READS——系 spec 明示的『折叠粗/单卡细』设计，非缺陷；其余前缀两层对齐。",
+      "ChatPureFunctionsTest distinct=8 经验证正确：case 表产生 Build×2/LiveHelp/Search×3/AccountTree/Checklist×2/FileOpen×2/Edit×4/Terminal×4 = 8 distinct，webfetch 并入 Search 后不再新增，与评审方计算一致。"
+    ],
+    "blocking_issues": []
+  },
+  "completeness": {
+    "findings": [
+      "10 文件全部按 spec 改动：枚举/分类器、FoldBar（icon+a11y count 变量+remember 依赖同步）、Summary（animate/plurals/listOf/remember 依赖均 6→5）、toolIcon 重写、Accordion 解耦、两套 strings.xml、三个测试文件。",
+      "spec §8c 四个新增路由测试全覆盖：write_ocmar_review(isWriteFileOperation==false + Basic→CONTROL)、invalid→CONTROL、ast_grep_replace→EDITS、list_mcp/read_mcp isContextTool==true；ast_garp_search→READS 由 namespace READS 参数化测试覆盖。",
+      "既有断言更新完整：webfetch→READS、namespace web 族→READS、session/ctx/recall 族→CONTROL、Basic read→CONTROL、webfetch icon Public→Search（2 处）、distinct 9→8、FoldGrouperTest 顺序注释五类化。",
+      "无遗漏消费者：ToolCategory 其余引用方（ChatMessageRow 仅用 THINKING、ChatPatchCards/util 测试用的是另一枚举 ContextCategory、FoldGrouper.foldCounts 泛型委托 categoryCounts）均不受枚举收缩影响。"
+    ],
+    "blocking_issues": []
+  },
+  "discipline": {
+    "findings": [
+      "单 commit（0d4f17a2）一次性迁移全部消费者，无中间态枚举提交——符合 spec §4 关键约束。",
+      "资源无残留：tool_count_web/tool_count_other 在 values 与 values-zh 双 locale 均已删除，全仓库 0 引用；tool_count_control 双 locale 已加且引用闭环。",
+      "chat 包内 Icons.Default.Public/Lightbulb/HelpOutline 0 命中（仅存注释说明 Public retired）。未使用 Public import 在评审后已删除并 amend 入同一 commit。"
+    ],
+    "blocking_issues": []
+  },
+  "spec_conformance": {
+    "deviations": [
+      "MultiFilePatchAccordion 用 parts.firstOrNull()?.tool 而非 spec 字面 part.tool——合理偏离：作用域内无 part 变量（composable 接收 parts: List<Part>），与相邻 toolLabel(:108) 的取值方式一致，且保留 spec §5a 强制要求的 ?: Edit 兜底。是对 spec 意图的唯一忠实解释。",
+      "zh strings 用 %1$d 项控制（spec 示例写 %d），与文件内既有条目（%1$d 条命令/次思考）风格一致——优于此 spec 字面，属正确取舍。"
+    ],
+    "blocking_issues": []
+  },
+  "must_fix": [],
+  "should_fix": [],
+  "nitpick": [
+    "删除 ChatPureFunctionsTest.kt 未使用的 filled.Public import（卫生项，消除编译警告）——已在 commit 0d4f17a2 修复。",
+    "isWriteFileOperation 对 write_ocmar_review 用精确等值而非前缀——当前 MCP tool 名固定故正确；若未来出现 write_ocmar_review_* 变体会重新误入 PatchCard，可在注释中标注此假设（非必须）。"
+  ],
+  "summary": "高质量重构：5 类迁移完整、write_ocmar_review 空卡 bug 双层修复链路闭环、分支优先级（list_mcp/read_mcp、write_ocmar_review 前置）正确、路由测试锁定到位、单 commit 无中间态、资源零残留。Accordion 的 parts.firstOrNull() 偏离系 spec 字面变量不存在的合理落地。仅 1 个未使用 import 的卫生 nit（已修），无阻塞项。建议放行。"
+}
