@@ -80,7 +80,8 @@ class OrchestratorViewModel @Inject constructor(
 
     // ── Nav ─────────────────────────────────────────────────────────────────
 
-    fun setLastNavPage(page: Int) {
+    @Suppress("DEPRECATION")
+    fun setLastNavPage(page: Int) { // lastNavPage retained for the NavigationPrefs one-time migration; full removal is a separate epic.
         val clamped = page.coerceIn(0, 2)
         if (core.store.navFlow.value.lastNavPage == clamped) return
         core.settingsManager.lastNavPage = clamped

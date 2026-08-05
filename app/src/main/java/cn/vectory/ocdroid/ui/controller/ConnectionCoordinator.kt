@@ -648,7 +648,7 @@ class ConnectionCoordinator(
                             // dispatch and return would otherwise write the previous
                             // host's sessions into the new host's directorySessions.
                             // CP1: identityStore.isCurrent checks epoch + fp fields.
-                            if (fetchIdentity != null && identityStore != null &&
+                            if (fetchIdentity != null &&
                                 !identityStore.isCurrent(fetchIdentity)
                             ) return@launch
                             appendDirectorySessions(workdir, sessions)
@@ -660,7 +660,7 @@ class ConnectionCoordinator(
                             // user-initiated refreshDirectorySessions are the
                             // fallbacks. Log for diagnosability without surfacing
                             // a user-facing error.
-                            if (fetchIdentity == null || identityStore == null ||
+                            if (fetchIdentity == null ||
                                 identityStore.isCurrent(fetchIdentity)
                             ) {
                                 reportNonFatalIssue(TAG, "directory restore failed for $workdir", error)
@@ -691,7 +691,7 @@ class ConnectionCoordinator(
                 try {
                     repository.getSessions(MainViewModelTimings.sessionFullLoadLimit)
                         .onSuccess { sessions ->
-                            if (fetchIdentity != null && identityStore != null &&
+                            if (fetchIdentity != null &&
                                 !identityStore.isCurrent(fetchIdentity)
                             ) return@launch
                             val fp = currentProfileId()
@@ -711,7 +711,7 @@ class ConnectionCoordinator(
                                         try {
                                             repository.getSessionsForDirectory(rawWorkdir)
                                                 .onSuccess { dirSessions ->
-                                                    if (fetchIdentity != null && identityStore != null &&
+                                                    if (fetchIdentity != null &&
                                                         !identityStore.isCurrent(fetchIdentity)
                                                     ) return@launch
                                                     appendDirectorySessions(rawWorkdir, dirSessions)
@@ -754,13 +754,13 @@ class ConnectionCoordinator(
         scope.launch {
             repository.getSessionsForDirectory(wd)
                 .onSuccess { sessions ->
-                    if (fetchIdentity != null && identityStore != null &&
+                    if (fetchIdentity != null &&
                         !identityStore.isCurrent(fetchIdentity)
                     ) return@launch
                     appendDirectorySessions(wd, sessions)
                 }
                 .onFailure { error ->
-                    if (fetchIdentity == null || identityStore == null ||
+                    if (fetchIdentity == null ||
                         identityStore.isCurrent(fetchIdentity)
                     ) {
                         reportNonFatalIssue(TAG, "refreshDirectorySessions failed for $wd", error)

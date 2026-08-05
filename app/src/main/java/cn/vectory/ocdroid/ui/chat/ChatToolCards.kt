@@ -26,7 +26,7 @@ import androidx.compose.material.icons.filled.Extension
 import androidx.compose.material.icons.filled.FileOpen
 import androidx.compose.material.icons.filled.Forum
 import androidx.compose.material.icons.filled.HourglassBottom
-import androidx.compose.material.icons.filled.LibraryBooks
+import androidx.compose.material.icons.automirrored.filled.LibraryBooks
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Psychology
@@ -136,7 +136,7 @@ internal fun toolIcon(toolName: String?): ImageVector {
         // ── MCP 资源（必须在通用 read/list 之前）──
         lower.startsWith("list_mcp") || lower.startsWith("read_mcp") -> Icons.Default.Storage
         // ── 文档/评审/等待/失败 ──
-        lower.startsWith("context7") -> Icons.Default.LibraryBooks
+        lower.startsWith("context7") -> Icons.AutoMirrored.Filled.LibraryBooks
         lower.startsWith("write_ocmar_review") -> Icons.Default.RateReview
         lower.startsWith("wait_for_user") -> Icons.Default.HourglassBottom
         lower.startsWith("invalid") -> Icons.Default.ErrorOutline

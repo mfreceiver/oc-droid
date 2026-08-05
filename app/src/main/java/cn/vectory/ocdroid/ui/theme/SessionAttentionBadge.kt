@@ -22,7 +22,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ErrorOutline
-import androidx.compose.material.icons.filled.HelpOutline
+import androidx.compose.material.icons.automirrored.filled.HelpOutline
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
@@ -121,7 +121,7 @@ internal fun SessionAttentionBadge(
             val dotAlpha = if (breathe) breathAlpha else 1f
             val dotScale = if (breathe) breathScale else 1f
             Icon(
-                imageVector = Icons.Filled.HelpOutline,
+                imageVector = Icons.AutoMirrored.Filled.HelpOutline,
                 contentDescription = stringResource(R.string.cd_pending_input_marker),
                 modifier = modifier
                     .size(Dimens.iconXs)

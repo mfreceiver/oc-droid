@@ -61,6 +61,7 @@ class OpenCodeApp : Application() {
         appCore.cleanup()
     }
 
+    @Suppress("DEPRECATION") // TRIM_MEMORY_* constants deprecated, no replacement; level handling intentional.
     override fun onTrimMemory(level: Int) {
         super.onTrimMemory(level)
         // R-03: release the markdown image in-memory bitmap cache under

@@ -7,6 +7,7 @@ import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.util.SettingsManager
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlin.ConsistentCopyVisibility
 
 enum class EffectiveConnectionSource { Manual, Profile }
 
@@ -15,6 +16,7 @@ enum class EffectiveConnectionSource { Manual, Profile }
  * The internal [bundle] keeps the exact immutable bundle reference available
  * to the token-stream provider without weakening the type at the boundary.
  */
+@ConsistentCopyVisibility
 data class ResolvedEndpoint internal constructor(
     internal val bundle: ClientBundle,
 ) {

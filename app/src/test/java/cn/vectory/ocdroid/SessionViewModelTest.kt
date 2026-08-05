@@ -29,7 +29,6 @@ import cn.vectory.ocdroid.ui.UiEvent
 import cn.vectory.ocdroid.ui.BannerHysteresisOwner
 import cn.vectory.ocdroid.ui.BannerHysteresisState
 import cn.vectory.ocdroid.ui.currentSession
-import cn.vectory.ocdroid.ui.loadSessionsForEffect
 import cn.vectory.ocdroid.ui.NavRoute
 import cn.vectory.ocdroid.ui.session.buildSessionTree
 import cn.vectory.ocdroid.ui.visibleMessages

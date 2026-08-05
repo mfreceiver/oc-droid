@@ -633,7 +633,7 @@ class PartExpandStateTest {
         // The mapping of outcome to state is inside ExpandPartsUseCase,
         // but we can test the result state directly via the sealed interface.
         // Here we just verify that the Exhausted state exists and is distinct from Failed.
-        assertTrue(PartExpandState.Exhausted is PartExpandState)
-        assertFalse(PartExpandState.Exhausted is PartExpandState.Failed)
+        assertEquals(PartExpandState.Exhausted, PartExpandState.Exhausted)
+        assertNotEquals(PartExpandState.Exhausted, PartExpandState.Failed(code = null))
     }
 }

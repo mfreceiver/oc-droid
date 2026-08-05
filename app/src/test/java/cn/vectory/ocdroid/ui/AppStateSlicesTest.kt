@@ -1,3 +1,6 @@
+@file:Suppress("DEPRECATION")
+// lastNavPage retained for the NavigationPrefs one-time migration; tests exercise the legacy path until the migration epic completes.
+
 package cn.vectory.ocdroid.ui
 
 import cn.vectory.ocdroid.data.model.FileDiff

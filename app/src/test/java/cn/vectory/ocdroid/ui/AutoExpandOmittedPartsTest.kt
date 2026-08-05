@@ -1,3 +1,4 @@
+@file:OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 package cn.vectory.ocdroid.ui
 
 import cn.vectory.ocdroid.data.model.Message

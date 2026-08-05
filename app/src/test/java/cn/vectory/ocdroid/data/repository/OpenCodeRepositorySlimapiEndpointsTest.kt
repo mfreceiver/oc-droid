@@ -108,7 +108,6 @@ class OpenCodeRepositorySlimapiEndpointsTest {
         val result = repository.getSlimapiSessions(directories = listOf("/w"), roots = true, limit = 50)
 
         assertTrue(result.isSuccess)
-        assertTrue(result.getOrThrow() is SlimSessionsPage)
         val request = server.takeRequest()
         assertTrue("path contains directory: ${request.path}", request.path!!.contains("directory=%2Fw"))
         assertTrue("path contains roots=true: ${request.path}", request.path!!.contains("roots=true"))

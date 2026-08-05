@@ -29,7 +29,6 @@ import cn.vectory.ocdroid.ui.SharedEffectBus
 import cn.vectory.ocdroid.ui.SharedStateStore
 import cn.vectory.ocdroid.ui.UiEvent
 import cn.vectory.ocdroid.ui.currentSession
-import cn.vectory.ocdroid.ui.loadSessionsForEffect
 import cn.vectory.ocdroid.ui.session.buildSessionTree
 import cn.vectory.ocdroid.ui.visibleMessages
 import cn.vectory.ocdroid.util.ThemeMode

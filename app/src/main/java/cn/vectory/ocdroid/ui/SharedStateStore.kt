@@ -548,6 +548,7 @@ internal fun stampDisconnectedSince(
  * This is the mechanical replacement for the pre-B1 `MutableStateFlow<XxxState>
  * .asStateFlow()` view — same read contract, backed by one composite source.
  */
+@OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class, kotlinx.coroutines.ExperimentalForInheritanceCoroutinesApi::class)
 private class DerivedStateFlow<T, R>(
     private val source: StateFlow<T>,
     private val selector: (T) -> R,

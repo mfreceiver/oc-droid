@@ -373,6 +373,7 @@ private object PartSourceSerializer : KSerializer<String?> {
     override val descriptor: SerialDescriptor =
         PrimitiveSerialDescriptor("PartSource", PrimitiveKind.STRING)
 
+    @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
     override fun serialize(encoder: Encoder, value: String?) {
         if (value != null) encoder.encodeString(value) else encoder.encodeNull()
     }

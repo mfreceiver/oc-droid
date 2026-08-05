@@ -164,7 +164,7 @@ internal suspend fun AppCore.resolveQuestionDirectory(requestId: String): String
     if (fetched == null || fetched.directory.isNullOrBlank()) {
         DebugLog.d(
             "Question",
-            "resolveQuestionDirectory req=$requestId sid=$sessionId parentFound=${session != null} dir=${session?.directory ?: "null"} branch=3(fetch-fail/null) fetchedDir=${fetched?.directory ?: "null"} return=null"
+            "resolveQuestionDirectory req=$requestId sid=$sessionId parentFound=false dir=${session?.directory ?: "null"} branch=3(fetch-fail/null) fetchedDir=${fetched?.directory ?: "null"} return=null"
         )
         return null
     }
@@ -184,7 +184,7 @@ internal suspend fun AppCore.resolveQuestionDirectory(requestId: String): String
     }
     DebugLog.d(
         "Question",
-        "resolveQuestionDirectory req=$requestId sid=$sessionId parentFound=${session != null} dir=${session?.directory ?: "null"} branch=2($casPath) fetchedDir=\"${fetchedDir}\" return=\"${resolved}\""
+            "resolveQuestionDirectory req=$requestId sid=$sessionId parentFound=false dir=${session?.directory ?: "null"} branch=2($casPath) fetchedDir=\"${fetchedDir}\" return=\"${resolved}\""
     )
     return resolved
 }
@@ -248,22 +248,6 @@ internal fun shouldAutoUnanchorOnColdStart(
  */
 internal const val SSE_FEEDBACK_TICK_MS = 30_000L
 
-// ════════════════════════════════════════════════════════════════════════════
-// Backward-compat extension shims for callers outside the Wave2.1 write domain
-// (ChatViewModel, ChatScaffold, RevertConversation). These forward to the
-// member methods on [AppCore] that in turn delegate to [RefreshOrchestrator].
-// ════════════════════════════════════════════════════════════════════════════
-
-internal fun AppCore.performGlobalColdStartRefresh(
-    currentId: String,
-    forceInitialWindow: Boolean = false,
-    explicit: Boolean = false,
-): Boolean = this.performGlobalColdStartRefresh(currentId, forceInitialWindow, explicit)
-
-internal fun AppCore.performForceRefresh(sessionId: String) = this.performForceRefresh(sessionId)
-
-internal fun AppCore.loadSessionsForEffect() = this.loadSessionsForEffect()
-
 // §Wave2.1-split-l2: extension function shims for functions moved into
 // orchestrator classes. These preserve the original AppCore extension
 // signatures so AppCoreOrchestrationTest continues to compile.
@@ -272,8 +256,6 @@ internal fun AppCore.loadSessionsForEffect() = this.loadSessionsForEffect()
 
 internal fun AppCore.catchUpAfterDisconnectOrForeground(sessionId: String) =
     refreshOrchestrator.catchUpAfterDisconnectOrForeground(sessionId)
-
-internal fun AppCore.executeCommand(command: String, arguments: String) = this.executeCommand(command, arguments)
 
 internal fun AppCore.loadMessagesForEffect(
     sessionId: String,
@@ -287,12 +269,6 @@ internal fun AppCore.materializeDraftSession(
     capturedCommandText: String? = null,
     commandPost: (suspend (sessionId: String) -> Unit)? = null,
 ) = draftSessionOrchestrator.materializeDraftSession(capturedPayload, capturedCommandText, commandPost)
-
-internal fun AppCore.openSessionFromDeepLink(sessionId: String) = this.openSessionFromDeepLink(sessionId)
-
-internal fun AppCore.resetLocalDataAndResync() = this.resetLocalDataAndResync()
-
-internal fun AppCore.sendMessage() = this.sendMessage()
 
 /**
  * §grouping-rewrite Round-2 D2 (+ Round-3 N1): classify a `/command` POST

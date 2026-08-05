@@ -96,6 +96,7 @@ class MotionTest {
         assertEquals(LinearEasing, tween.easing)
     }
 
+    @Suppress("UNCHECKED_CAST") // test-only cast of a parameterized TweenSpec
     @Test
     fun `expandSizeSpec is TweenSpec IntSize with SHORT duration + EmphasizedDecelerate easing`() {
         val spec = AppMotion.expandSizeSpec
@@ -123,7 +124,6 @@ class MotionTest {
     @Test
     fun `springMedium factory returns FiniteAnimationSpec (reserved API smoke)`() {
         // 前瞻 API（Phase 6 Card morph 预留）—— 烟雾测试确认可构造、非 null
-        val spec = AppMotion.springMedium<Float>()
-        assertTrue("springMedium must return a FiniteAnimationSpec", spec is FiniteAnimationSpec<*>)
+        AppMotion.springMedium<Float>()
     }
 }

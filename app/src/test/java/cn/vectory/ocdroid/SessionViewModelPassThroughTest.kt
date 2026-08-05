@@ -5,7 +5,6 @@ import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.ui.NavRoute
 import cn.vectory.ocdroid.ui.ScrollCheckpoint
 import cn.vectory.ocdroid.ui.SessionViewModel
-import cn.vectory.ocdroid.ui.loadSessionsForEffect
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every

@@ -179,6 +179,17 @@ android {
     }
 }
 
+// KT-73255: Kotlin 2.2 changed the default use-site target for Java annotations
+// applied to constructor value parameters (val/var). Pin the legacy param-property
+// semantics project-wide so @Inject/@ApplicationContext etc. keep landing where
+// Hilt expects, without per-site @param:/@field: prefixes. Officially recommended
+// migration per the compiler warning text.
+kotlin {
+    compilerOptions {
+        freeCompilerArgs.addAll("-Xannotation-default-target=param-property")
+    }
+}
+
 // Archive the release APK to APK/oc-droid-<versionName>.apk.
 //   release.sh:  ./gradlew assembleRelease archiveReleaseApk -PreleaseVersion=<tag>
 //                → versionName = clean tag (e.g. 0.8.1) → APK/oc-droid-0.8.1.apk

@@ -88,7 +88,6 @@ import cn.vectory.ocdroid.ui.controller.questionsInTree
 import cn.vectory.ocdroid.ui.controller.rootIdOf
 import cn.vectory.ocdroid.ui.inferCurrentAgent
 import cn.vectory.ocdroid.ui.inferCurrentModel
-import cn.vectory.ocdroid.ui.performForceRefresh
 import cn.vectory.ocdroid.ui.resolveMessage
 import cn.vectory.ocdroid.ui.showTimed
 import cn.vectory.ocdroid.ui.visibleMessages

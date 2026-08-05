@@ -1,3 +1,4 @@
+@file:OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 package cn.vectory.ocdroid.service.streaming
 
 import cn.vectory.ocdroid.data.model.HealthResponse

@@ -113,7 +113,6 @@ class SslConfigFactoryTest {
 
         val cfg = buildMutualTlsConfig(ClientCertMaterial(p12Bytes, pw.toCharArray(), caPem))
 
-        assertTrue("private CA mode → MutualTLS", cfg is SslConfig.MutualTLS)
         // End-to-end: MockWebServer 呈服务端证书（CA 签），客户端出示 client 证书 +
         // 只信 CA → 握手成功（v3-gpter R2#5：私有 CA 严格，防 WebPKI MITM）。
         val serverCert = newSigned(ca, cn = "server", san = "localhost")
@@ -144,7 +143,6 @@ class SslConfigFactoryTest {
         // caBytes=null → 平台 CA 模式（服务端证书为公开签发时，如 Let's Encrypt）。
         // 这里仅断返回类型正确；end-to-end 需平台信任的证书，不在 JVM 单测范围。
         val cfg = buildMutualTlsConfig(ClientCertMaterial(p12Bytes, pw.toCharArray(), null))
-        assertTrue("platform CA mode → MutualTLS", cfg is SslConfig.MutualTLS)
     }
 
     @Test
@@ -157,8 +155,6 @@ class SslConfigFactoryTest {
         val bundle = ca1.certificate.toPem() + ca2.certificate.toPem()
 
         val cfg = buildMutualTlsConfig(ClientCertMaterial(p12Bytes, pw.toCharArray(), bundle))
-
-        assertTrue("CA bundle → MutualTLS", cfg is SslConfig.MutualTLS)
     }
 
     @Test

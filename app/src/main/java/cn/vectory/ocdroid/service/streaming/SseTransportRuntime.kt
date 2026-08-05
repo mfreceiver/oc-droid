@@ -95,7 +95,7 @@ class SseTransportRuntimeStore @Inject constructor() {
      * directly from `_state`, avoiding a second writable MutableStateFlow that
      * could be observed out of sync with the runtime state.
      */
-    @OptIn(ExperimentalCoroutinesApi::class)
+    @OptIn(ExperimentalCoroutinesApi::class, kotlinx.coroutines.ExperimentalForInheritanceCoroutinesApi::class)
     val sseConnectedFlow: StateFlow<Boolean> = object : StateFlow<Boolean> {
         override val replayCache: List<Boolean>
             get() = listOf(value)

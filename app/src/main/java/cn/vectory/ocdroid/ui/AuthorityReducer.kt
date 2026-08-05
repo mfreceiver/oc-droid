@@ -786,7 +786,7 @@ private fun applyPrune(cur: AuthorityState, op: AuthorityOp.PruneSessions): Auth
     // bySid entry was pruned (scopeKey matched) OR has no bySid entry (was
     // already absent — queued retry for a sid that no longer exists).
     val sidsToClean = cur.retryQueue.keys.filter { sid ->
-        sid in op.sids && (cur.bySid[sid]?.scopeKey?.let { it == null || it == op.scopeKey } ?: true)
+        sid in op.sids && (cur.bySid[sid]?.scopeKey?.let { it == op.scopeKey } ?: true)
     }
     val nextRetryQueue = if (sidsToClean.isEmpty()) cur.retryQueue else cur.retryQueue - sidsToClean.toSet()
     return if (nextById.size == cur.bySid.size && nextRetryQueue === cur.retryQueue) {

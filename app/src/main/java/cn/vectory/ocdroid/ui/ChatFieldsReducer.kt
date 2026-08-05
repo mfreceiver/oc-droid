@@ -324,30 +324,6 @@ internal fun reduceExpandedPartsContentCommitted(state: StoreState, action: AppA
     ).withRouteContentSynced(action.expectedRouteInstance, action.expectedSessionId)
 }
 
-// ── B-P0-2: evict a single message confirmed deleted by R2 /full reconcile ─
-
-@Suppress("DEPRECATION")
-internal fun reduceMessageRemovedFromFull(state: StoreState, action: AppAction.MessageRemovedFromFull): StoreState {
-    // B-P0-2 (MAJOR 4): evict the message from messages + partsByMessage by
-    // messageId. The per-message watermark was already removed by
-    // the in-memory slim state under the slim commit token guard.
-    // sessionId is informational — eviction is by messageId.
-    //
-    // §Stage-B C5 (CRITICAL) — M5 cleanup backport: the legacy call site
-    // (ControllerModule.onMessageGone) is migrated to [MessageRemovedConfirmed]
-    // by a parallel lane; until then this reducer retains source compat
-    // AND applies the same overlay cleanup the new reducer does, so the
-    // legacy dispatch path cannot leave ghost text from the removed
-    // message's parts. The new route-token / bundle-stamp guard is NOT
-    // retrofitted here (the legacy action carries neither field); the
-    // freeze-protocol guard lives in [reduceMessageRemovedConfirmed].
-    val msgId = action.messageId
-    val partIds = state.chat.partsByMessage[msgId].orEmpty().map { it.id }.toSet()
-    return state.copy(
-        chat = state.chat.evictMessageAndPartOverlay(msgId, partIds),
-    )
-}
-
 /**
  * §Stage-B C5 (CRITICAL): `/full` 200 Reconciled single-message merge —
  * non-authoritative (preserves STREAMING token-stream-owned parts).
@@ -446,9 +422,8 @@ internal fun reduceErrorLocalizationSettled(
  * `partsByMessage` AND clear every streaming-overlay entry owned by
  * [partIds] (streamOwned / streamingPartTexts / deltaBuffer /
  * fullTextBuffer / pendingFlushPartIds / matching streamingReasoningPart).
- * Used by both [reduceMessageRemovedFromFull] (legacy) and
- * [reduceMessageRemovedConfirmed] (route-aware) so the overlay-cleanup
- * contract is identical across the two dispatch shapes. Pure.
+ * Used by [reduceMessageRemovedConfirmed] so the overlay-cleanup
+ * contract is identical across dispatch shapes. Pure.
  */
 private fun ChatState.evictMessageAndPartOverlay(
     msgId: String,

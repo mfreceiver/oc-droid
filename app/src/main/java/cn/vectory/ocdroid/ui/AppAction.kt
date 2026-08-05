@@ -465,44 +465,7 @@ sealed interface AppAction {
         val sessionId: String,
     ) : AppAction
 
-    /**
-     * B-P0-2 (MAJOR 4): a single message was deleted upstream and the
-     * R2 /full reconcile confirmed it via HTTP 404 (OR the token stream
-     * delivered a `message.removed` frame). The reducer evicts the
-     * message from `messages` + `partsByMessage`; the per-message
-     * watermark entry was already removed by
-     * the in-memory slim state under the slim commit token guard (the
-     * onMessageGone wiring drives BOTH the watermark removal AND this dispatch).
-     *
-     * The [cn.vectory.ocdroid.data.repository.maxMessageTuple] cache is
-     * NOT a separate structure — it is derived on demand from
-     * `messages` (the merger scans the list). Evicting the message
-     * here drops its tuple automatically on the next derivation.
-     *
-     * `sessionId` is informational (the eviction is by `messageId`);
-     * it is retained for diagnostic logging + future per-session
-     * accounting.
-     *
-     * §Stage-B C5 (CRITICAL): superseded by [MessageRemovedConfirmed],
-     * which carries the §7.2 route token + bundle stamp required for the
-     * freeze protocol (route-owned transcript + LoadedContent dual
-     * projection MUST be guarded by route token + bundle stamp; an
-     * async `/full` 404 / token `message.removed` MUST NOT mutate
-     * transcript state when there is no active route). The legacy call
-     * site (ControllerModule.onMessageGone) is migrated by a parallel
-     * lane; the reducer here retains source compatibility and ALSO
-     * clears the streaming overlay (matches the new contract).
-     */
-    @Deprecated(
-        "Use MessageRemovedConfirmed (carries route token + bundle stamp per the freeze protocol).",
-        replaceWith = ReplaceWith(
-            "MessageRemovedConfirmed(sessionId, messageId, expectedRouteInstance = 0L, bundleStamp = bundleStamp)",
-        ),
-    )
-    data class MessageRemovedFromFull(
-        val sessionId: String,
-        val messageId: String,
-    ) : AppAction
+
 
     /**
      * §Stage-B C5 (CRITICAL): `/full` 200 Reconciled merge for a SINGLE
@@ -874,7 +837,6 @@ internal fun reduce(
     is AppAction.SessionSelected -> reduceSessionSelected(state, action)
     is AppAction.SlimChatContentCleared -> reduceSlimChatContentCleared(state, action)
     is AppAction.SlimChatContentClearedForRoute -> reduceSlimChatContentClearedForRoute(state, action)
-    is AppAction.MessageRemovedFromFull -> reduceMessageRemovedFromFull(state, action)
     is AppAction.SlimFullMessageReconciled -> reduceSlimFullMessageReconciled(state, action)
     is AppAction.MessageRemovedConfirmed -> reduceMessageRemovedConfirmed(state, action)
     is AppAction.ChatCleared -> reduceChatCleared(state, action)

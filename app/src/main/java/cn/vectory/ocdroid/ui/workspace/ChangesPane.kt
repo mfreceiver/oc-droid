@@ -21,7 +21,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Tab
-import androidx.compose.material3.TabRow
+import androidx.compose.material3.PrimaryTabRow
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -111,7 +111,7 @@ fun ChangesPane(
         // 与项目其它顶部导航（BottomBar / SectionHeader）的视觉语言一致；full-
         // bleed 条 + 紧跟 HorizontalDivider，是项目主流的 section 切换形态。
         // 复用既有 ChangesPaneMode 枚举与 label，不引入新字符串。
-        TabRow(
+        PrimaryTabRow(
             selectedTabIndex = mode.ordinal,
         ) {
             ChangesPaneMode.entries.forEach { entry ->

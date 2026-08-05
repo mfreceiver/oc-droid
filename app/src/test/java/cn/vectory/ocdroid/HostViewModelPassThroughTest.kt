@@ -14,6 +14,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNotNull
 import org.junit.Test
 
 /**
@@ -97,7 +98,7 @@ class HostViewModelPassThroughTest : MainViewModelTestBase() {
 
         val settings = vm.getSavedConnectionSettings()
         // The controller returns a ConnectionFormSettings (non-null).
-        assertEquals(true, settings is ConnectionFormSettings)
+        assertNotNull(settings)
     }
 
     @Test

@@ -30,11 +30,6 @@ import org.junit.Test
  *  - [AppAction.SlimFullMessageReconciled] MUST be a no-op when the
  *    bundle stamp or route token no longer matches the live state.
  *
- * The legacy [AppAction.MessageRemovedFromFull] reducer (deprecated,
- * retained for source compat until the parallel ControllerModule lane
- * migrates the call site) is also pinned: it must continue to evict the
- * message AND clear the streaming overlay (the M5 backport) so the
- * legacy dispatch path cannot leave ghost text either.
  */
 @Suppress("DEPRECATION")
 class StageBFreezeProtocolReducerTest {
@@ -409,39 +404,4 @@ class StageBFreezeProtocolReducerTest {
         assertEquals("stale bundle rejected", prior, out)
     }
 
-    // ── Legacy MessageRemovedFromFull backport ────────────────────────────
-
-    @Test
-    fun `legacy MessageRemovedFromFull evicts message AND clears streaming overlay (M5 backport)`() {
-        // The legacy action carries no route token / bundle stamp. The
-        // reducer must continue to evict the message (source compat) AND
-        // now ALSO clear the streaming overlay (the M5 backport — same
-        // contract as MessageRemovedConfirmed so the legacy dispatch path
-        // cannot leave ghost text).
-        val chat = ChatState(
-            currentSessionId = "ses-A",
-            messages = listOf(msg("m1")),
-            partsByMessage = mapOf("m1" to listOf(part("p1", "m1", "x"))),
-            streamOwned = mapOf("p1" to StreamOwnedState.STREAMING),
-            streamingPartTexts = mapOf("p1" to "x"),
-            deltaBuffer = mapOf("p1" to "d"),
-            fullTextBuffer = mapOf("p1" to "f"),
-            pendingFlushPartIds = setOf("p1"),
-        )
-        val prior = StoreState.initial().copy(chat = chat)
-        val out = reduce(
-            prior,
-            AppAction.MessageRemovedFromFull(
-                sessionId = "ses-A",
-                messageId = "m1",
-            ),
-        )
-        assertTrue("flat messages evicted", out.chat.messages.none { it.id == "m1" })
-        assertTrue("flat partsByMessage evicted", !out.chat.partsByMessage.containsKey("m1"))
-        assertTrue("streamOwned cleared", out.chat.streamOwned.isEmpty())
-        assertTrue("streamingPartTexts cleared", out.chat.streamingPartTexts.isEmpty())
-        assertTrue("deltaBuffer cleared", out.chat.deltaBuffer.isEmpty())
-        assertTrue("fullTextBuffer cleared", out.chat.fullTextBuffer.isEmpty())
-        assertTrue("pendingFlushPartIds cleared", out.chat.pendingFlushPartIds.isEmpty())
-    }
 }

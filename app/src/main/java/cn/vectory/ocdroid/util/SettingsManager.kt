@@ -1,3 +1,7 @@
+@file:Suppress("DEPRECATION")
+// Holding pattern: androidx.security.crypto 1.1.0 stable API is @Deprecated by Google
+// with no official 1:1 replacement (project spec forbids switching to DataStore).
+// Suppress here until a replacement ships; revisit on security-crypto update.
 package cn.vectory.ocdroid.util
 
 import android.content.Context

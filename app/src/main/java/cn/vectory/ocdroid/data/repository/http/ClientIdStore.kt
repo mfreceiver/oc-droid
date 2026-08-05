@@ -1,3 +1,7 @@
+@file:Suppress("DEPRECATION")
+// Holding pattern: androidx.security.crypto 1.1.0 stable API is @Deprecated by Google
+// with no official 1:1 replacement (project spec forbids switching to DataStore).
+// Suppress project-wide here until a replacement ships; revisit on security-crypto update.
 package cn.vectory.ocdroid.data.repository.http
 
 import android.content.Context
@@ -60,7 +64,7 @@ interface ClientIdStore {
  */
 @Singleton
 class EspClientIdStore @Inject constructor(
-    @param:ApplicationContext context: Context
+    @ApplicationContext context: Context
 ) : ClientIdStore {
     private val prefs = EncryptedSharedPreferences.create(
         context,

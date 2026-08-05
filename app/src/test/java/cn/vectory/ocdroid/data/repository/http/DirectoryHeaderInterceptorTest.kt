@@ -2,6 +2,7 @@ package cn.vectory.ocdroid.data.repository.http
 
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import org.junit.After
@@ -76,7 +77,7 @@ class DirectoryHeaderInterceptorTest {
         client.newCall(
             Request.Builder().url(server.url("/session/abc/prompt_async"))
                 .header(HttpHeaders.DIRECTORY_HEADER, "/workdir/project")
-                .post(okhttp3.RequestBody.create(null, ByteArray(0)))
+                .post(ByteArray(0).toRequestBody(null))
                 .build()
         ).execute().use { /* drain */ }
 
@@ -142,7 +143,7 @@ class DirectoryHeaderInterceptorTest {
 
         client.newCall(
             Request.Builder().url(server.url("/session/abc"))
-                .put(okhttp3.RequestBody.create(null, ByteArray(0)))
+                .put(ByteArray(0).toRequestBody(null))
                 .header(HttpHeaders.DIRECTORY_HEADER, "/workdir/project")
                 .build()
         ).execute().use { /* drain */ }

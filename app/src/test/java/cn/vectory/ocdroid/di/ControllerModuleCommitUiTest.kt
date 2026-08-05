@@ -1,3 +1,4 @@
+@file:OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 package cn.vectory.ocdroid.di
 
 import cn.vectory.ocdroid.data.model.Message
@@ -529,6 +530,7 @@ class ControllerModuleCommitUiTest {
  *
  * @param failCount number of initial CAS calls to fail (default: 1).
  */
+@OptIn(kotlinx.coroutines.ExperimentalForInheritanceCoroutinesApi::class)
 private class ControlledCasStateFlow(
     initial: StoreState,
     private val failCount: Int = 1,

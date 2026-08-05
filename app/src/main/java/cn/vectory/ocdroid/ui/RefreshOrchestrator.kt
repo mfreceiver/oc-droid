@@ -241,7 +241,7 @@ internal class RefreshOrchestrator @Inject constructor(
                 )
             }
         }
-        if (currentWasArchived && previousCurrentId != null) {
+        if (currentWasArchived) {
             effectBus.tryEmitEffect(
                 ControllerEffect.EvictSession(currentProfileId(), previousCurrentId)
             )
