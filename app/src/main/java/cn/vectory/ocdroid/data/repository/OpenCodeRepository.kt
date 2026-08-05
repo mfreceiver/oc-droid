@@ -350,7 +350,27 @@ class OpenCodeRepository @Inject constructor(
         )
     }
 
-    /** lite-v2-dev: always current (slim state machine retired). */
+    /**
+     * lite-v2-dev: validates [token] against the live repository state.
+     *
+     * NOT a constant-true stub — the slim state machine is retired, but this
+     * method still performs real freshness checks comparing the values
+     * captured at [captureSlimCommitToken] time against the current
+     * [ConnectionIdentityStore] epoch/identity and the published
+     * [ClientBundle] generation/endpoint fingerprint:
+     *  1. [SlimCommitToken.issuedReady] held at capture time (both identity
+     *     and bundle were present);
+     *  2. the captured identity epoch still equals the live store's epoch;
+     *  3. the captured [ConnectionIdentity] still equals the live identity;
+     *  4. the captured [ClientBundle] generation still equals the live gen;
+     *  5. the captured endpoint fingerprint still equals the live endpoint.
+     *
+     * Returns `false` when any check fails — e.g. [beginReconfigure] bumped
+     * the epoch, [configure] published a new bundle generation, or the
+     * endpoint rotated. This guards stale writes for the bundle-generation
+     * rotation window that epoch/route coverage alone does not catch (a
+     * generation bump without a synchronized epoch bump).
+     */
     @Deprecated("lite-v2 compatibility shim", level = DeprecationLevel.WARNING)
     fun isSlimCommitTokenCurrent(token: SlimCommitToken): Boolean {
         val capture = identityStoreOrFallback().capture()
