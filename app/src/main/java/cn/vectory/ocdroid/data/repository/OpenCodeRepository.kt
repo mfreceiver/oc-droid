@@ -449,6 +449,11 @@ class OpenCodeRepository @Inject constructor(
      *  [usesSlimStatusFanOut] and other slim paths). */
     override val supportsBulkSessionTree: Boolean get() = connectionGateway.usesSlimStatusFanOut
 
+    /** §rev-ds ISSUE 2: global question aggregation is a slim sidecar feature,
+     *  independent of status-endpoint support. Same flag as [usesSlimStatusFanOut]
+     *  — both map to [ConnectionGateway.slimConnection]/[ServerCompatProfile.slimConnection]. */
+    override val supportsGlobalQuestionFetch: Boolean get() = connectionGateway.usesSlimStatusFanOut
+
     private data class CandidateSsl(
         val config: SslConfig,
         val clientCertError: String?,

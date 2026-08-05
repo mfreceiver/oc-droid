@@ -54,11 +54,14 @@ internal suspend fun loadCompleteSessionTrees(
         }
         if (shouldContinue()) {
             val allSessions = page.sessions
-            // X-Complete=false means the tree is incomplete — log warning and
-            // return incomplete (roots not marked complete) so a later tick re-fetches.
+            // §rev-ds ISSUE 1: X-Complete=false means the bulk page is unreliable
+            // (truncated). Fall back to legacy BFS which fetches the full tree
+            // correctly per-node without depending on `complete`, terminates
+            // cleanly (no re-request storm), matches the `getOrElse` failure
+            // fallback pattern above.
             if (page.complete == false) {
-                DebugLog.w("SessionTree", "Bulk session tree fetch returned X-Complete=false — tree is incomplete")
-                return@coroutineScope CompleteTreeHydration(emptyMap(), emptySet())
+                DebugLog.w("SessionTree", "Bulk session tree fetch returned X-Complete=false — falling back to legacy BFS")
+                return@coroutineScope legacyBfsLoad(repository, roots, maxConcurrency, shouldContinue)
             }
             val childrenByParent = allSessions
                 .filter { it.parentId != null }

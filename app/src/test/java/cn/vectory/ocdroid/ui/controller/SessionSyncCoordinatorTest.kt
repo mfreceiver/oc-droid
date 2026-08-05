@@ -1533,6 +1533,7 @@ class SessionSyncCoordinatorTest {
             )
         }
         val repository = mockk<cn.vectory.ocdroid.data.repository.OpenCodeRepository>(relaxed = true)
+        io.mockk.every { repository.supportsGlobalQuestionFetch } returns true
         coEvery { repository.getPendingQuestions(null) } returns Result.success(
             listOf(QuestionRequest(id = "qc", sessionId = "sc", questions = emptyList()))
         )
@@ -1561,6 +1562,7 @@ class SessionSyncCoordinatorTest {
             it.copy(directorySessions = mapOf("/dup" to listOf(Session(id = "sx", directory = "/dup"))))
         }
         val repository = mockk<cn.vectory.ocdroid.data.repository.OpenCodeRepository>(relaxed = true)
+        io.mockk.every { repository.supportsGlobalQuestionFetch } returns true
         coEvery { repository.getPendingQuestions(null) } returns Result.success(emptyList())
 
         coordinator.loadPendingQuestionsAllWorkdirs(repository)
@@ -1575,6 +1577,7 @@ class SessionSyncCoordinatorTest {
         // no longer gated on any workdir being known.
         seed { it.copy(directorySessions = emptyMap()) }
         val repository = mockk<cn.vectory.ocdroid.data.repository.OpenCodeRepository>(relaxed = true)
+        io.mockk.every { repository.supportsGlobalQuestionFetch } returns true
         coEvery { repository.getPendingQuestions(null) } returns Result.success(emptyList())
 
         coordinator.loadPendingQuestionsAllWorkdirs(repository)
@@ -1588,6 +1591,7 @@ class SessionSyncCoordinatorTest {
         // §slimapi-p3: single global call failure doesn't wipe the slice.
         seed { it.copy(directorySessions = emptyMap()) }
         val repository = mockk<cn.vectory.ocdroid.data.repository.OpenCodeRepository>(relaxed = true)
+        io.mockk.every { repository.supportsGlobalQuestionFetch } returns true
         coEvery { repository.getPendingQuestions(null) } returns Result.failure(java.io.IOException("network down"))
 
         coordinator.loadPendingQuestionsAllWorkdirs(repository)
@@ -1645,6 +1649,7 @@ class SessionSyncCoordinatorTest {
         var maxConcurrentCalls = 0
         var callCount = 0
         val repository = mockk<cn.vectory.ocdroid.data.repository.OpenCodeRepository>(relaxed = true)
+        io.mockk.every { repository.supportsGlobalQuestionFetch } returns true
         coEvery { repository.getPendingQuestions(any()) } coAnswers {
             concurrentCalls++
             maxConcurrentCalls = maxOf(maxConcurrentCalls, concurrentCalls)
@@ -1725,6 +1730,7 @@ class SessionSyncCoordinatorTest {
         every { settingsManager.currentWorkdir } returns "/p"
         every { settingsManager.getRecentWorkdirs("test-fp") } returns emptyList()
         val repository = mockk<cn.vectory.ocdroid.data.repository.OpenCodeRepository>(relaxed = true)
+        io.mockk.every { repository.supportsGlobalQuestionFetch } returns true
         coEvery { repository.getPendingQuestions(any()) } returns Result.success(
             listOf(
                 QuestionRequest(id = "q-live", sessionId = "live", questions = emptyList()),
@@ -1758,6 +1764,7 @@ class SessionSyncCoordinatorTest {
         every { settingsManager.currentWorkdir } returns "/p"
         every { settingsManager.getRecentWorkdirs("test-fp") } returns emptyList()
         val repository = mockk<cn.vectory.ocdroid.data.repository.OpenCodeRepository>(relaxed = true)
+        io.mockk.every { repository.supportsGlobalQuestionFetch } returns true
         coEvery { repository.getPendingQuestions(any()) } returns Result.success(
             listOf(
                 QuestionRequest(id = "q-child", sessionId = "child", questions = emptyList()))

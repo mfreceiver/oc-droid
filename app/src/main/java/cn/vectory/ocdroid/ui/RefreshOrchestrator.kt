@@ -125,8 +125,14 @@ internal class RefreshOrchestrator @Inject constructor(
             onColdSnapshot = { sid -> sessionSyncCoordinator.markSessionColdSnapshotted(sid) },
             expectedRouteInstance = store.slices.routeInstanceFor(sessionId),
         )
+        // §rev-ds ISSUE 2: compute workdirs for legacy per-dir fan-out;
+        // slim path ignores this argument.
+        val questionWorkdirs = (settingsManager.getRecentWorkdirs(currentProfileId()) + listOfNotNull(settingsManager.currentWorkdir))
+            .filter { it.isNotBlank() }
+            .distinct()
         foregroundCatchUpController.catchUpPendingQuestionsAllWorkdirs(
             repository = repository,
+            workdirs = questionWorkdirs,
         )
     }
 

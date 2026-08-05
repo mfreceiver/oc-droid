@@ -114,6 +114,10 @@ abstract class MainViewModelTestBase {
         // relaxed mock auto-answers it, and explicit every blocks cause MockK
         // tracking issues with verify(exactly = N) in downstream tests.
         every { repository.isSlimCommitTokenCurrent(any()) } returns true
+        // §rev-ds ISSUE 2: base test setup defaults to slim global question path.
+        // Tests that exercise the legacy per-dir path must explicitly override
+        // this to `false`.
+        every { repository.supportsGlobalQuestionFetch } returns true
         coEvery { repository.getSessions(any()) } returns Result.success(emptyList())
         coEvery { repository.getSessionsForDirectory(any(), any()) } returns Result.success(emptyList())
         coEvery { repository.getSessionStatus() } returns Result.success(emptyMap())

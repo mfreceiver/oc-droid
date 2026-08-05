@@ -106,7 +106,7 @@ class SessionSyncCoordinator(
     )
     private val flushScheduler = DeltaFlushScheduler(scope, slices, repository)
     private val questionWorker = QuestionReconcileWorker(
-        scope, slices,
+        scope, slices, settingsManager, currentProfileId,
     )
     private val statusApplier = StatusFanOutApplier(
         scope, slices, effects, currentProfileId, clock, skeletonReloadCoordinator,
@@ -344,7 +344,9 @@ class SessionSyncCoordinator(
     }
 
     /**
-     * §P1-9: refreshes pending questions across EVERY known workdir.
+     * §rev-ds: refreshes pending questions — branches on the connection's
+     * capability flag: slim = single global fetch (all workdirs aggregated
+     * server-side), legacy = per-dir fan-out identical to pre-P3 behavior.
      */
     fun loadPendingQuestionsAllWorkdirs(repository: OpenCodeRepository) {
         questionWorker.loadPendingQuestionsAllWorkdirs(repository)
