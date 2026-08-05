@@ -1,0 +1,39 @@
+{
+  "reviewer": "rev-gpt",
+  "bundle_id": "wave2-split-2026-08-04",
+  "scope": "wave2-1-l4-chat",
+  "scope_desc": "Wave2.1 Lane 4 — ChatMessageList behavior-preserving split (pipeline single-sourcing + mechanical extraction). ChatMessageContent 1044→491 LOC (-553); RenderPipeline + ScrollEffects + Watermark extracted. Pipeline single-sourcing: RenderPipeline produces renderBlocks + lazyColumnKeys in one pass, eliminating the type-level possibility of a consumer holding keys inconsistent with itemsIndexed. ScrollController kept created in ChatMessageList body (rememberSaveable slot unchanged). remember key kept value-semantics (no ID-ization — oracle argued ID-ization re-introduces stale-UI risk). M3/M4 key asymmetry (Set vs full Map) preserved as-is.",
+  "branch": "wave2/split",
+  "diff_base": "36b9da78",
+  "diff_head": "79914fd8",
+  "baseline_test_commit": "0f3c2032",
+  "fixup_commit": "c0bfed02",
+  "merge_commit": "73fa5bce",
+  "date": "2026-08-04",
+  "review_stage": "process (per-lane, during wave2-1; rev-5 retry after rev-4 session error)",
+  "review_session": "ses_032286fe5 (retry; first attempt ses_032286fe5-rev4 errored)",
+  "verdict": "CONCERNS",
+  "must_fix": [],
+  "should_fix": [
+    {
+      "id": "S1",
+      "severity": "orange",
+      "desc": "The artifact code (split ChatMessageList / RenderPipeline) is fully PASS under static review, BUT the baseline test suite was effectively pure-JVM — no createComposeRule, Compose test dependencies unused — so it could not actually exercise @Composable rememberRenderPipeline behavior. The baseline therefore did not pin the Compose-side contract it claimed to.",
+      "location": "app/src/test/java/cn/vectory/ocdroid/ui/chat/ChatMessageListBaselineTest.kt (commit 0f3c2032, ~191L pure-function suite)",
+      "disposition": "RESOLVED via follow-up commit c0bfed02 'test(wave2-1-l4): add Compose-level baseline (createComposeRule mirror invariant, 5 scenarios)' — new ChatRenderPipelineComposeTest runs real @Composable rememberRenderPipeline via createComposeRule.",
+      "status": "resolved (then superseded by rev-kimi gate finding — see rev-kimi_wave2-1-gate.json)"
+    }
+  ],
+  "nits": [],
+  "dimensions_verified": {
+    "pipeline_single_sourcing": "RenderPipeline emits renderBlocks + lazyColumnKeys in one pass — removes M4→L2 key drift window at the type level.",
+    "scroll_state_invariants": "rememberSaveable(sessionId, LazyListState.Saver) slot + 4 pure-effect key tuples preserved verbatim.",
+    "key_semantics": "remember key kept value-semantics (no ID-ization); M3/M4 Set-vs-fullMap asymmetry preserved as-is."
+  },
+  "gate_evidence": {
+    "single_lane_check_sh": "exit 0 (wave2-split-l4 worktree)",
+    "baseline_suite": "29 tests total at lane close: 21 pure-function + 8 Compose (5 single-composition + 3 recomposition key-dimension)."
+  },
+  "provenance": "Reconstructed from orchestrator execution report ses_0325a2f10ffeA2QU0OdRpo8oZM.md (wave2-split bundle §2 review-results table + per-lane decisions) cross-checked against git history (c0bfed02 test add). The original rev-gpt per-session finding output (ses_032286fe5) was not persisted to disk. The CONCERNS verdict, the JVM-only-baseline severity, and the c0bfed02 closure are git-grounded. Per-finding prose reflects the orchestrator's structured summary of that review session.",
+  "timestamp": "2026-08-04"
+}

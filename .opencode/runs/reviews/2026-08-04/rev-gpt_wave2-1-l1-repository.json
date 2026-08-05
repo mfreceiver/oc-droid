@@ -1,0 +1,37 @@
+{
+  "reviewer": "rev-gpt",
+  "bundle_id": "wave2-split-2026-08-04",
+  "scope": "wave2-1-l1-repository",
+  "scope_desc": "Wave2.1 Lane 1 — Repository Gateway split (Stage A facade + internal delegation). OpenCodeRepository 2240→1339 LOC (-901); OCR retained as thin facade delegating ~65 method bodies to 6 internal Gateways (CatalogGateway/ConnectionGateway/FileVcsGateway/InteractionGateway/...). Gateway zero-state invariant (bundleProvider: () -> ClientBundle reads volatile per-call; no @Volatile/lock/mutable field). 81 call-sites unchanged; 4 binary-freeze pins (SlimCommitToken/StaleSlimCommitException/DEFAULT_SERVER/3-arg ctor) preserved.",
+  "branch": "wave2/split",
+  "diff_base": "36b9da78",
+  "diff_head": "8ba9f17f",
+  "merge_commit": "b98b17d1",
+  "date": "2026-08-04",
+  "review_stage": "process (per-lane, during wave2-1)",
+  "review_session": "ses_03239a421",
+  "verdict": "CONCERNS",
+  "must_fix": [],
+  "should_fix": [
+    {
+      "id": "S1",
+      "severity": "orange",
+      "desc": "Route skew between serverCompatProfile.slimConnection and bundleProvider() inside configure(): publish@634 / setSlimConnection@656 timing window — the operative-mode signal read at configure time can diverge from the per-call bundle provider read.",
+      "location": "app/src/main/java/cn/vectory/ocdroid/data/repository/OpenCodeRepository.kt:634,656 (base 610-619)",
+      "disposition": "PRE-EXISTING — confirmed by both rev-gpt and rev-kimi. The base OCR:610-619 carries an explicit comment stating the semantics are intentional: slimConnection = operative mode before new-stack confirmation. The wave2-1 refactor keeps configure() byte-identical to base; ServerCompatProfile write-points remain 3→3 with unchanged semantics. Accepted; deferred to Wave2.2 audit (now trivially scoped: 3 write-points across 2 files).",
+      "status": "accepted-pre-existing / Wave2.2-tracking"
+    }
+  ],
+  "nits": [],
+  "dimensions_verified": {
+    "behavior_preservation": "configure() byte-identical to base; 81 call-sites unchanged; delegation bodies equivalent to former inline OCR methods.",
+    "zero_state_invariant": "6 Gateways carry no @Volatile / no lock / no mutable field; bundleProvider reads volatile per-call.",
+    "binary_freeze": "T3RepositoryExtractFreezeTest untouched and passing — 4 freeze pins (SlimCommitToken/StaleSlimCommitException/DEFAULT_SERVER/3-arg ctor) intact."
+  },
+  "gate_evidence": {
+    "single_lane_check_sh": "exit 0 (wave2-split-l1 worktree)",
+    "freeze_test": "T3RepositoryExtractFreezeTest passed unmodified"
+  },
+  "provenance": "Reconstructed from orchestrator execution report ses_0325a2f10ffeA2QU0OdRpo8oZM.md (wave2-split bundle §2 review-results table + §2 per-lane decisions) cross-checked against git history. The original rev-gpt per-session finding output (ses_03239a421) was not persisted to disk. Verdict, severity, and the pre-existing disposition are git-grounded (configure() unchanged vs base; freeze test unmodified). Per-finding prose reflects the orchestrator's structured summary of that review session.",
+  "timestamp": "2026-08-04"
+}

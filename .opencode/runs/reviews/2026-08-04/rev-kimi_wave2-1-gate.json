@@ -1,0 +1,69 @@
+{
+  "reviewer": "rev-kimi",
+  "bundle_id": "wave2-split-2026-08-04",
+  "scope": "wave2-1-gate",
+  "scope_desc": "Wave2.1 terminal gate review — full cross-lane integration + behavior-preservation verdict on god-object core split (Repository Gateway facade + AppCore orchestrators + SSC modularization + Chat pipeline). Covers 4 lanes merged into wave2/split: L1 OpenCodeRepository / L2 AppCoreOrchestration / L3 SessionSyncCoordinator / L4 ChatMessageContent. 27 files, +4247/-4408, net -161, 4 god-object hubs split.",
+  "branch": "wave2/split",
+  "diff_base": "36b9da78",
+  "diff_head_for_gate": "73fa5bce",
+  "final_head_with_fastfollow": "61b3db1b",
+  "merge_commit": "20d9b41a",
+  "version_target": "0.20.2",
+  "date": "2026-08-04",
+  "review_stage": "terminal gate (before release v0.20.2)",
+  "review_session": "ses_0320275d2",
+  "verdict": "CONCERNS",
+  "must_fix_before_release": "NONE",
+  "must_fix": [],
+  "should_fix": [
+    {
+      "id": "S1",
+      "severity": "orange",
+      "desc": "Lane 4 lacked a recomposition (key-dimension) regression dimension: pure-helper tests + single-composition baseline cannot catch the silent-staleness bug where a remember key tuple drops one dimension (remember cache returns the cached value instead of recomputing — no error, just stale UI).",
+      "location": "app/src/test/java/cn/vectory/ocdroid/ui/chat/ChatRenderPipelineComposeTest.kt (pre-52f8716a)",
+      "key_invariants_pinned": [
+        "streamingPartTexts must enter the key tuple as the FULL Map (not .keys Set equality) — otherwise token delta does not trigger recomputation.",
+        "reversedMessages / messages must be in the key tuple — otherwise new messages are not reflected.",
+        "sessionDiff must be in the key tuple — otherwise the session-diff key never appears in lazyColumnKeys."
+      ],
+      "disposition": "RESOLVED via fast-follow commits: c0bfed02 (Compose-level single-composition baseline, 5 scenarios) → 52f8716a (3 recomposition key-dimension tests: streamingPartTexts full-Map change / messages append / sessionDiff append) → 61b3db1b (integrate Lane 4 fast-follow). 8 Compose tests total (5 single-composition + 3 recomposition) all PASS. The 🟠 recomposition coverage gap is closed.",
+      "status": "resolved"
+    },
+    {
+      "id": "S2",
+      "severity": "orange",
+      "desc": "Cross-referenced Lane 1 route-skew CONCERN (see rev-gpt_wave2-1-l1-repository.json S1): serverCompatProfile.slimConnection vs bundleProvider() timing window in configure(). rev-kimi independently confirmed PRE-EXISTING + intentional-semantics.",
+      "disposition": "Ship as-is — pre-existing (base OCR:610-619 comment states slimConnection = operative mode before new-stack confirmation); §2.1 classifies as 🟡 non-Stage-A blocker; already shipped in v0.20.0/v0.20.1. Deferred to Wave2.2 audit.",
+      "status": "accepted-pre-existing / Wave2.2-tracking"
+    }
+  ],
+  "nits": [
+    {
+      "id": "N1",
+      "severity": "yellow",
+      "desc": "mutableStateOf import unused in the Compose baseline test (dead import) — surfaced while reviewing the recomposition-dimension gap.",
+      "location": "ChatRenderPipelineComposeTest.kt",
+      "status": "cleanup (subsumed by 52f8716a rework)"
+    }
+  ],
+  "integration_findings": {
+    "cross_lane_integration": "CLEAN — L2→L1 facade invisible (Gateways internal); L2→L3 SSC interface preserved; no symbol conflicts; DI graph consistent; identity frame-scope preserved across boundaries.",
+    "integration_specific_defects": "NONE — no defect unique to the integrated state (all findings are per-lane carry-ins, already addressed or accepted)."
+  },
+  "release_decision": "ship v0.20.2 with noted caveats. Behavior-preserving split; integrated check.sh green; no regression. All actionable CONCERNS closed in-branch (L2 visibility+Hilt via bf80eb4a; L4 Compose baseline + recomposition via c0bfed02/52f8716a/61b3db1b).",
+  "score": null,
+  "blocking_issues": [],
+  "dimensions_verified": {
+    "l1_facade_zero_state": "6 Gateway zero-state invariant held (no @Volatile/lock/mutable field); OCR 2240→1339 thin facade; frozen symbols (SlimCommitToken/StaleSlimCommitException/DEFAULT_SERVER/3-arg ctor) intact.",
+    "l2_pattern_b": "AppCore orchestrators Pattern B constructor injection; rev-gpt CONCERNS (visibility + Hilt kdoc) closed via bf80eb4a.",
+    "l3_ssc_modularization": "SessionSyncCoordinator state-machine modularized; sse/ sub-cluster (DeltaFlushScheduler/QuestionReconcileWorker/SseDiagLogger/SseGapReconcileController/StatusFanOutApplier) extracted.",
+    "l4_pipeline_single_sourcing": "RenderPipeline produces renderBlocks + lazyColumnKeys in one pass; eliminates M4→L2 key drift; rev-kimi 🟠 recomposition-dimension coverage closed."
+  },
+  "gate_evidence": {
+    "check_sh": "exit 0 (compileDebugKotlin + detekt sole-writer gate + testDebugUnitTest, post-merge on main @ 20d9b41a)",
+    "kover_verify": "exit 0 (post-merge on main @ 20d9b41a)",
+    "sandbox_caveat": "rev-kimi review sandbox is read-only — could not independently re-run check.sh; relied on orchestrator report + static cross-verification."
+  },
+  "provenance": "Reconstructed from orchestrator execution report ses_0325a2f10ffeA2QU0OdRpo8oZM.md (wave2-split bundle §2 rev-kimi terminal-gate section) + the existing release-time summary archive .opencode/runs/reviews/2026-08-04/rev-kimi_wave2-1.json (which explicitly lists this gate's primary finding + key invariants + fast-follow commits). The original rev-kimi per-session finding output (ses_0320275d2) was not persisted to disk. Verdict (CONCERNS), must-fix=NONE, the recomposition 🟠, the pinned key-tuple invariants, and the closure commits (c0bfed02/52f8716a/61b3db1b) are all git-grounded and cross-confirmed by the release report (.omni-orch/reports/release-v0.20.2-report.md). Per-finding prose reflects the orchestrator's structured summary of that gate review.",
+  "timestamp": "2026-08-04"
+}
