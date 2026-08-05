@@ -4,10 +4,9 @@ import cn.vectory.ocdroid.data.model.MessageWithParts
 
 /** Phase B narrow seam: message load / expand / probe / skeleton. Implemented by [OpenCodeRepository].
  *
- *  §B3-retirement: the slim-token shim has been retired. The `token` parameter has been removed
- *  from all methods. The `SlimCommitToken` type and the 4 shim methods
- *  (`captureSlimCommitToken`/`isSlimCommitTokenCurrent`/`commitIfSlimTokenCurrent`/`requireSlimTokenCurrent`)
- *  remain on [OpenCodeRepository] for callers that still reference them (to be removed in Stage 2). */
+ *  §B3-retirement: the slim-token shim and the 4 shim methods have been fully removed (Phase 4b).
+ *  ConnectionCapture (captureConnection / isConnectionCaptureCurrent / commitIfConnectionCaptureCurrent)
+ *  is the replacement for stale-response protection. */
 interface MessageRepository {
     suspend fun getMessages(sessionId: String, limit: Int? = null): Result<List<MessageWithParts>>
     suspend fun getMessagesPaged(

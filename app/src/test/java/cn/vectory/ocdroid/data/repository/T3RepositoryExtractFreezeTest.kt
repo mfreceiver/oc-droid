@@ -89,23 +89,12 @@ class T3RepositoryExtractFreezeTest {
         assertTrue("checkHealthFor must exist", hasMethod(cls, "checkHealthFor"))
         assertTrue("parseSlimapiHealth must exist", hasMethod(cls, "parseSlimapiHealth"))
 
-        // ── slim incarnation token / ticket APIs (consumed by SSC) ────────
-        // These are the slim state machine surface; they MUST remain
-        // accessible from outside the repo so SessionSyncCoordinator /
-        // AppCoreOrchestration keep compiling.
-        assertTrue("captureSlimCommitToken must exist", hasMethod(cls, "captureSlimCommitToken"))
-        assertTrue(
-            "isSlimCommitTokenCurrent must exist",
-            hasMethod(cls, "isSlimCommitTokenCurrent"),
-        )
-        assertTrue(
-            "commitIfSlimTokenCurrent must exist",
-            hasMethod(cls, "commitIfSlimTokenCurrent"),
-        )
-        assertTrue(
-            "requireSlimTokenCurrent must exist",
-            hasMethod(cls, "requireSlimTokenCurrent"),
-        )
+        // ── slim incarnation token / ticket APIs — REMOVED in B3 Phase 4b ─
+        // The 4 slim-token shim methods (captureSlimCommitToken,
+        // isSlimCommitTokenCurrent, commitIfSlimTokenCurrent,
+        // requireSlimTokenCurrent) and their nested types have been deleted.
+        // ConnectionCapture (captureConnection / isConnectionCaptureCurrent /
+        // commitIfConnectionCaptureCurrent) is the replacement.
 
         // ── slim per-session bookmark state (V2: slim state machine retired) ─
         // applySlimDigest, getSlimSessionState, markSlimSessionDeleted,
@@ -396,63 +385,11 @@ class T3RepositoryExtractFreezeTest {
     // §4 — Slim SSE state types binary-compat pin
     // ────────────────────────────────────────────────────────────────────────
 
-    /**
- * §4: the slim incarnation token / ticket / exception types are
- * consumed by `SessionSyncCoordinator` and `AppCoreOrchestration` via
- * their NESTED FQN inside OpenCodeRepository. They are `public` nested
- * classes today. T3's extraction (moving the state to a separate
- * collaborator) MUST keep these FQNs resolvable from existing
- * call sites — either by keeping them nested OR by adding a
- * `typealias` re-export on OpenCodeRepository.
-     *
-     * GREEN today. RED iff T3 moves them out without re-export.
-     */
-    @Test
-    fun `slim SSE commit + reconfigure types remain nested-public on OpenCodeRepository`() {
-        // Each FQN MUST be resolvable as a nested class. This is the
-        // binary-compat surface used by external callers — a move breaks
-        // every caller's import + every existing `SlimCommitToken::class`
-        // reference.
-        assertEquals(
-            "SlimCommitToken nested FQN must remain OpenCodeRepository.SlimCommitToken",
-            "cn.vectory.ocdroid.data.repository.OpenCodeRepository\$SlimCommitToken",
-            OpenCodeRepository.SlimCommitToken::class.java.name,
-        )
-        assertEquals(
-            "StaleSlimCommitException nested FQN must remain OpenCodeRepository.StaleSlimCommitException",
-            "cn.vectory.ocdroid.data.repository.OpenCodeRepository\$StaleSlimCommitException",
-            OpenCodeRepository.StaleSlimCommitException::class.java.name,
-        )
-
-        // Binary-compat on the EXCEPTION hierarchy: the slim exception
-        // MUST remain a java.io.IOException subclass (the
-        // runSuspendCatching plumbing + the coordinator's failure
-        // branching depends on this; changing to RuntimeException would
-        // invert the surface).
-        assertTrue(
-            "StaleSlimCommitException must remain a java.io.IOException",
-            java.io.IOException::class.java.isAssignableFrom(
-                OpenCodeRepository.StaleSlimCommitException::class.java,
-            ),
-        )
-
-        // SlimCommitToken is constructed by the repo (constructor is
-        // `internal`); callers only CAPTURE + RETURN it. Pin that the
-        // capture API exists on the public surface (cross-check with §1
-        // but at the type level too).
-        val tokenMethod = OpenCodeRepository::class.java.getDeclaredMethod(
-            "captureSlimCommitToken",
-        )
-        assertEquals(
-            "captureSlimCommitToken() return type must be SlimCommitToken",
-            OpenCodeRepository.SlimCommitToken::class.java,
-            tokenMethod.returnType,
-        )
-    }
-
-    // §4c removed in slimapi V2: slimStateLock field was deleted from
-    // OpenCodeRepository (the atomic-mutation boundary was restructured).
-    // The coverage delta is auditable via git log.
+    // §4 — REMOVED in B3 Phase 4b.
+    // The slim-token types (SlimCommitToken, StaleSlimCommitException) and
+    // the 4 shim methods were fully deleted. ConnectionCapture is the
+    // replacement. The freeze test now covers the retained types only.
+    // §4c removed in slimapi V2: slimStateLock field was deleted.
 
     // ────────────────────────────────────────────────────────────────────────
     // §5 — Wire-shape smoke (slimapi prefix; does NOT duplicate SlimapiEndpointsTest)

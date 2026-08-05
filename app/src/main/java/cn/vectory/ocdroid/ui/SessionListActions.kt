@@ -375,7 +375,7 @@ internal fun launchLoadPendingQuestions(
  *
  * C-D3 v2 §2.3: in slim mode, delegates to [launchLoadPendingPermissionsSlim]
  * which captures ONE token before the network suspend + guards the slice /
- * signal / UiEvent commits inside a single `commitIfSlimTokenCurrent` block.
+ * signal / UiEvent commits inside a single `commitIfConnectionCaptureCurrent` block.
  * The legacy non-slim path is unchanged.
  */
 internal fun launchLoadPendingPermissions(

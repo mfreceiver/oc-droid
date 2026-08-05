@@ -113,9 +113,6 @@ abstract class MainViewModelTestBase {
         // the relaxed mock auto-answers it, and explicit every blocks cause
         // MockK tracking issues with verify(exactly = N) in downstream tests.
         every { repository.isConnectionCaptureCurrent(any()) } returns true
-        // C-D3 token guard (legacy, kept for callers still referencing it):
-        // relaxed mock's isSlimCommitTokenCurrent defaults to false.
-        every { repository.isSlimCommitTokenCurrent(any()) } returns true
         // §rev-ds ISSUE 2: base test setup defaults to slim global question path.
         // Tests that exercise the legacy per-dir path must explicitly override
         // this to `false`.

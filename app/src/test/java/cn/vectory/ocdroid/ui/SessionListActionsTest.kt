@@ -79,12 +79,6 @@ class SessionListActionsTest {
             secondArg<() -> Unit>().invoke()
             true
         }
-        // C-D3 token guards (legacy, kept for callers still referencing them).
-        every { repository.isSlimCommitTokenCurrent(any()) } returns true
-        every { repository.commitIfSlimTokenCurrent(any(), any()) } answers {
-            secondArg<() -> Unit>().invoke()
-            true
-        }
     }
 
     /** §P0-A test helper: seed a prior session status through the authority
@@ -1852,7 +1846,7 @@ class SessionListActionsTest {
      * after the host switch — exercising the intended ready A → stale
      * after reconfigure path.
      *
-     * Does NOT hand-force isSlimCommitTokenCurrent / commitIf false.
+     * Does NOT hand-force isConnectionCaptureCurrent / commitIfConnectionCaptureCurrent false.
      */
     @Test
     fun `CD3-v2 standalone p-load host switch drops stale commit`() = kotlinx.coroutines.runBlocking {

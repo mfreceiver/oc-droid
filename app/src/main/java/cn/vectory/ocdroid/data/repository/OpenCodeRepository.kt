@@ -270,33 +270,7 @@ class OpenCodeRepository @Inject constructor(
         bundleProvider = { requireClientBundle() },
     )
 
-    /**
-     * Opaque capability for one configured slim-state incarnation (C-D3).
-     *
-     * Equality is referential through [marker]. [issuedReady] is captured
-     * permanently at [captureSlimCommitToken] time: a token captured while
-     * the incarnation was NOT ready (mid-reconfigure) remains invalid even
-     * after [completeSlimReconfigure] later activates a new incarnation.
-     *
-     * Callers may capture and return the token to repository APIs, but
-     * cannot manufacture a current token.
-     */
-    class SlimCommitToken internal constructor(
-        internal val marker: Any,
-        internal val issuedReady: Boolean,
-        /** ConnectionIdentity captured at slim-operation entry. */
-        internal val capturedConnectionIdentity: ConnectionIdentity? = null,
-        /** IdentityStore epoch captured independently of the slim marker. */
-        internal val capturedIdentityEpoch: Long? = null,
-        /** Published ClientBundle generation captured independently of the slim marker. */
-        internal val capturedClientBundleGeneration: Long? = null,
-        /** Endpoint fingerprint belonging to the captured ClientBundle. */
-        internal val capturedEndpointFp: String? = null,
-        /** Immutable transport/API bundle used by this operation, when available. */
-        internal val capturedClientBundle: ClientBundle? = null,
-    )
-
-    // ── §B3-retirement: clean connection-stamp capture (Phase 3, Step 3.1) ────
+    // ── §B3-retirement: clean connection-stamp capture (Phase 3, Step 3.1 / Phase 4b: shim deleted) ────
     //
     // ConnectionCapture captures identityStore identity + epoch + ClientBundle
     // generation + endpoint fingerprint so a stale async response is detected.
@@ -317,7 +291,7 @@ class OpenCodeRepository @Inject constructor(
      * slim-token shim. Captures identityStore identity + epoch + ClientBundle
      * generation + endpoint fingerprint so a stale async response (whose
      * capture predates a host reconfigure or client-bundle rotation) is
-     * detected 1:1 matching the retired [SlimCommitToken] semantics.
+     * detected 1:1 matching the retired slim-token shim semantics.
      *
      * @property identity The [ConnectionIdentity] at capture time (null = unready).
      * @property epoch The identityStore epoch at capture time.
@@ -350,7 +324,7 @@ class OpenCodeRepository @Inject constructor(
      * the ClientBundle generation or endpoint since [capture].
      *
      * Checks readiness (identity != null) + 4 fields (epoch, identity, generation,
-     * endpointFp) — mirrors the retired [isSlimCommitTokenCurrent] semantics 1:1.
+     * endpointFp) — mirrors the retired isSlimCommitTokenCurrent semantics 1:1.
      */
     internal fun isConnectionCaptureCurrent(capture: ConnectionCapture): Boolean {
         val live = identityStoreOrFallback().capture()
@@ -369,7 +343,7 @@ class OpenCodeRepository @Inject constructor(
      * Atomic commit gate: runs [commit] iff the connection is still at [capture]'s
      * identity/epoch/generation/endpointFp. The generation + endpointFp checks run
      * under the repository monitor (synchronized(this)) — the SAME monitor the
-     * retired [commitIfSlimTokenCurrent] used — then delegates to
+     * retired commitIfSlimTokenCurrent used — then delegates to
      * [ConnectionIdentityStore.commitIfCurrent] for the epoch + identity + commit
      * under the identityStore lock, so a host reconfigure cannot slip between the
      * generation check and the commit (TOCTOU closed).
@@ -390,109 +364,12 @@ class OpenCodeRepository @Inject constructor(
         )
     }
 
-    // ── lite-v2-dev (plan §4.4): slim state-machine + incarnation 协议退役 ────
-    //
-    // 2B 删除了 slim state machine + reconfigure 方法群 + 嵌套异常类。
-    // connection-barrier 系统（HostProfileController / ConnectionReconfigure
-    // Barrier / ProfileMutationEngine / ConnectionBootstrapEngine）+ 多个 catch
-    // 站点（MessageSource / PermissionRefreshOrchestrator / SessionSyncCoordinator
-    // / ChatViewModel / AppLifecycleMonitor）仍引用 SlimCommitToken / token guard。
-    // 在 lite-v2 范围内完整重写 barrier 系统超出本轮范围（C2: host 切换 = 重启 app，
-    // incarnation 保护语义本身已弱化），故以 **no-op stub** 形式保留符号，使全部引用
-    // 解析、barrier 系统以 best-effort 继续运行。
-
-    // lite-v2: slim incarnation stubs removed (incarnation protocol fully retired).
-    // The remaining StaleSlimCommitException is kept for PermissionRefreshOrchestrator
-    // catch site — it will be removed in a follow-up cleanup.
-    @Deprecated("lite-v2 compatibility shim", level = DeprecationLevel.WARNING)
-    class StaleSlimCommitException internal constructor() :
-        java.io.IOException("stale or not-ready slim repository incarnation")
-
-    // lite-v2: 在 C2 约束下（host 切换 = 进程重启），跨连接 stale write 不可能发生。
-    // ReloadIdentity（serverGroupFp + routeInstance）在 SkeletonReloadCoordinator 中
-    // 提供了新的 stale response 防护。这些 token 方法保留为 no-op 兼容层，
-    // 仅供非 skeleton 路径（permission/question/status 异步刷新）使用。
-    // 后续应删除所有调用者，改用 route/serverGroup CAS。
     /**
-     * lite-v2: token 使用 ConnectionIdentityStore 的 epoch + identity 做真实验证。
-     * 在 C2 约束下（host 切换 = 进程重启），跨连接 stale write 不可能发生。
-     * ReloadIdentity（serverGroupFp + routeInstance）在 SkeletonReloadCoordinator 中
-     * 提供了新的 stale response 防护。这些 token 方法保留为兼容层。
-     */
-    /**
-     * lite-v2: same-host local-wipe marker rotation seam. The slim incarnation
-     * system is retired (identityStore.beginReconfigure() handles epoch/marker
-     * rotation); this no-op shim is kept as the call-site contract for
-     * resetLocalDataAndResync + testability, consistent with the kept
-     * captureSlimCommitToken compatibility shim.
+     * §B3-retirement (Phase 4b): retained no-op for the resetLocalDataAndResync
+     * call-site contract. The slim incarnation system was fully retired in B3;
+     * identityStore.beginReconfigure() handles epoch/marker rotation.
      */
     fun resetSlimForLocalWipe(): Unit = Unit
-
-    @Deprecated("lite-v2 compatibility shim", level = DeprecationLevel.WARNING)
-    fun captureSlimCommitToken(): SlimCommitToken {
-        val identityStore = identityStoreOrFallback()
-        val capture = identityStore.capture()
-        val bundle = currentClientBundle()
-        return SlimCommitToken(
-            marker = Any(),
-            issuedReady = capture.identity != null && bundle != null,
-            capturedConnectionIdentity = capture.identity,
-            capturedIdentityEpoch = capture.epoch,
-            capturedClientBundleGeneration = bundle?.generation,
-            capturedEndpointFp = bundle?.endpointFp,
-            capturedClientBundle = bundle,
-        )
-    }
-
-    /**
-     * lite-v2-dev: validates [token] against the live repository state.
-     *
-     * NOT a constant-true stub — the slim state machine is retired, but this
-     * method still performs real freshness checks comparing the values
-     * captured at [captureSlimCommitToken] time against the current
-     * [ConnectionIdentityStore] epoch/identity and the published
-     * [ClientBundle] generation/endpoint fingerprint:
-     *  1. [SlimCommitToken.issuedReady] held at capture time (both identity
-     *     and bundle were present);
-     *  2. the captured identity epoch still equals the live store's epoch;
-     *  3. the captured [ConnectionIdentity] still equals the live identity;
-     *  4. the captured [ClientBundle] generation still equals the live gen;
-     *  5. the captured endpoint fingerprint still equals the live endpoint.
-     *
-     * Returns `false` when any check fails — e.g. [beginReconfigure] bumped
-     * the epoch, [configure] published a new bundle generation, or the
-     * endpoint rotated. This guards stale writes for the bundle-generation
-     * rotation window that epoch/route coverage alone does not catch (a
-     * generation bump without a synchronized epoch bump).
-     */
-    @Deprecated("lite-v2 compatibility shim", level = DeprecationLevel.WARNING)
-    fun isSlimCommitTokenCurrent(token: SlimCommitToken): Boolean {
-        val capture = identityStoreOrFallback().capture()
-        val bundle = currentClientBundle()
-        return token.issuedReady &&
-            token.capturedIdentityEpoch == capture.epoch &&
-            token.capturedConnectionIdentity == capture.identity &&
-            token.capturedClientBundleGeneration == bundle?.generation &&
-            token.capturedEndpointFp == bundle?.endpointFp
-    }
-
-    @Deprecated("lite-v2 compatibility shim", level = DeprecationLevel.WARNING)
-    fun commitIfSlimTokenCurrent(token: SlimCommitToken, commit: () -> Unit): Boolean = synchronized(this) {
-        val bundle = currentClientBundle() ?: return false
-        if (!token.issuedReady) return false
-        if (token.capturedClientBundleGeneration != bundle.generation) return false
-        if (token.capturedEndpointFp != bundle.endpointFp) return false
-        identityStoreOrFallback().commitIfCurrent(
-            identity = token.capturedConnectionIdentity,
-            epoch = token.capturedIdentityEpoch ?: return false,
-            commit = commit,
-        )
-    }
-
-    @Deprecated("lite-v2 compatibility shim", level = DeprecationLevel.WARNING)
-    fun requireSlimTokenCurrent(token: SlimCommitToken) {
-        if (!isSlimCommitTokenCurrent(token)) throw StaleSlimCommitException()
-    }
 
     // ── B-P0-2 slim watermark forwarders: RETIRED (lite-v2-dev plan §4.1) ─────
     // SlimSseStateMachine + SlimFullReconciler + MessageEventSeqWatermark deleted;
@@ -1294,7 +1171,7 @@ class OpenCodeRepository @Inject constructor(
     /**
      * §4.3.7 (lite-v2-dev): 无 token 版 skeleton 单页拉取。复用现有 [MessagesPage]
      * 类型。供新的 [cn.vectory.ocdroid.ui.SkeletonReloadCoordinator] 使用——
-     * 该路径不经过 SlimCommitToken / watermark / reconfigure 协议，直接读 sidecar
+     * 该路径不经过 slim-token / watermark / reconfigure 协议，直接读 sidecar
      * skeleton 端点（每次 re-GET upstream opencode，不读 sidecar 内存）。
      *
      * 排序契约（§4.3.7）：sidecar 必须按 `time.created` 升序返回（tie 按 id）。

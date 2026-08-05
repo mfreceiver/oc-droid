@@ -820,7 +820,7 @@ class MessageActionsTest {
     // (ConnectionPhase.Disconnected past the 90s
     // SSE_DISCONNECT_UNANCHORED_THRESHOLD_MS). "terminal-degraded" = the slim
     // repository is stuck mid-reconfigure (every GET returns
-    // StaleSlimCommitException because the SSE-driven reconfigure never
+    // a stale-connection IOException because the SSE-driven reconfigure never
     // settles). The contract: a foreground chat open under these conditions
     // must NOT silently leave the window blank.
     //
@@ -832,7 +832,7 @@ class MessageActionsTest {
     //     fetch UNANCHORED (getMessagesPagedUnanchored → since=0L), bypassing
     //     a stale slim watermark. (MessageActions.kt:124-128)
     //
-    //  ② §stale-retry-fix: a StaleSlimCommitException from the slim GET
+    //  ② §stale-retry-fix: a stale-connection IOException from the slim GET
     //     (mid-reconfigure on SSE reconnect / resume / host switch — the
     //     exact terminal-degraded transition window) is retried up to 2
     //     times with 500ms delay, covering the typical ~1s reconfigure
@@ -855,17 +855,17 @@ class MessageActionsTest {
     // the P0-2 freeze contract.
 
     @Test
-    fun `P0-2 forceInitialWindow=true retries StaleSlimCommitException and recovers foreground messages (SSE-off cold-load)`(): Unit = runTest {
+    fun `P0-2 forceInitialWindow=true retries stale-connection IOException and recovers foreground messages (SSE-off cold-load)`(): Unit = runTest {
         // §11.1 fix-9 P0-7 (sse-sync-degradation-remediation.md P0-2): the
         // SSE-off cold-load path (forceInitialWindow=true + resetLimit=true)
         // retries ONCE (not 2×) via getMessagesPagedUnanchored when the first
-        // fetch fails with a StaleSlimCommitException (a java.io.IOException
-        // subclass). The stale-retry-fix (unconditional 2-retry) was removed
-        // in V2 — the only retry is the P0-7 SSE-off first-fetch retry.
+        // fetch fails with a stale-connection IOException. The stale-retry-fix
+        // (unconditional 2-retry) was removed in V2 — the only retry is the
+        // P0-7 SSE-off first-fetch retry.
         // Mock: first attempt fails stale → retry succeeds.
         val msgs = listOf(MessageWithParts(info = Message(id = "m1", role = "user")))
         coEvery { repository.getMessagesPagedUnanchored("s1", any(), any()) } returnsMany listOf(
-            Result.failure(OpenCodeRepository.StaleSlimCommitException()),
+            Result.failure(java.io.IOException("stale connection")),
             Result.success(MessagesPage(msgs, nextCursor = null)),
         )
         coEvery { repository.getSessionTodos("s1") } returns Result.success(emptyList())
@@ -900,11 +900,11 @@ class MessageActionsTest {
     @Test
     fun `P0-2 forceInitialWindow=true emits UiEvent Error after stale retry exhaustion (terminal-degraded is observable, not silent blank)`(): Unit = runTest {
         // §11.1 fix-9 P0-7: V2 retries only ONCE under SSE-off (not 2×).
-        // Terminal-degraded: every slim GET returns StaleSlimCommitException.
+        // Terminal-degraded: every slim GET returns a stale-connection IOException.
         // After 1 initial + 1 retry (2 attempts total) the load MUST surface
         // a user-visible error instead of leaving the foreground chat blank.
         coEvery { repository.getMessagesPagedUnanchored("s1", any(), any()) } returns
-            Result.failure(OpenCodeRepository.StaleSlimCommitException())
+            Result.failure(java.io.IOException("stale connection"))
         coEvery { repository.getSessionTodos("s1") } returns Result.success(emptyList())
         store.mutateChat { it.copy(currentSessionId = "s1") }
 
@@ -935,7 +935,7 @@ class MessageActionsTest {
     }
 
     @Test
-    fun `P0-2 anchored cold-load (forceInitialWindow=false) retries StaleSlimCommitException once via unanchored`(): Unit = runTest {
+    fun `P0-2 anchored cold-load (forceInitialWindow=false) retries stale-connection IOException once via unanchored`(): Unit = runTest {
         // §11.1 fix-9 P0-7: V2 retries only on resetLimit=true + SSE-off,
         // and always via getMessagesPagedUnanchored (not getMessagesPaged).
         // The old "periodic reload (resetLimit=false) also retries stale"
@@ -945,7 +945,7 @@ class MessageActionsTest {
         // getMessagesPagedUnanchored and recovers.
         val msgs = listOf(MessageWithParts(info = Message(id = "m1", role = "user")))
         coEvery { repository.getMessagesPaged("s1", any(), any()) } returns
-            Result.failure(OpenCodeRepository.StaleSlimCommitException())
+            Result.failure(java.io.IOException("stale connection"))
         coEvery { repository.getMessagesPagedUnanchored("s1", any(), any()) } returns
             Result.success(MessagesPage(msgs, nextCursor = null))
         coEvery { repository.getSessionTodos("s1") } returns Result.success(emptyList())
@@ -1036,12 +1036,8 @@ class MessageActionsTest {
 
         // Exactly 1 first-fetch (getMessagesPaged) + at-least 1 P0-7 retry
         // (getMessagesPagedUnanchored). We use atLeast for both to avoid
-        // mockk's default-arg matcher-recording interaction: each fetch's
-        // default `token = captureSlimCommitToken()` is recorded as a
-        // separate call, so `exactly = 1` on getMessagesPaged would also
-        // pin captureSlimCommitToken to exactly 1 (and we have 2 — one per
-        // fetch). The semantic check (1 first-fetch + retry happened) is
-        // preserved by `atLeast = 1` on each.
+        // mockk's default-arg matcher-recording interaction (the old token
+        // param was removed in B3, so no extra recorded calls).
         coVerify(atLeast = 1) { repository.getMessagesPaged("s1", any(), any()) }
         coVerify(atLeast = 1) { repository.getMessagesPagedUnanchored("s1", any(), any()) }
         // No error — the retry succeeded (empty success is the "no history"
@@ -1204,15 +1200,8 @@ class MessageActionsTest {
         // fetch calls). Pins "retry exactly once" — a regression to 2+ retries
         // (e.g. a loop bug) would fail this assertion.
         //
-        // §mockk-default-arg: provide ALL 4 matchers (including `token` — the
-        // 4th `any()`) so Kotlin does NOT evaluate the default arg
-        // `token = captureSlimCommitToken()` inside the verify lambda. With only
-        // 3 matchers the default-arg evaluation is recorded as an extra mockk
-        // call, making `exactly = 1` fail (2 captureSlimCommitToken calls —
-        // one per fetch). This is the same root cause the existing P0-7 tests
-        // paper over with `atLeast = 1`; providing 4 matchers is the precise
-        // fix. (Mirrors the P0-7 SSE-on test which already uses 4 matchers for
-        // its `exactly = 0` assertion on getMessagesPagedUnanchored.)
+        // §B3-retirement: the old token param was removed, so no default-arg
+        // matcher-recording interaction. 3 matchers suffice for exact verify.
         coVerify(exactly = 1) { repository.getMessagesPaged("s1", any(), any()) }
         coVerify(exactly = 1) { repository.getMessagesPagedUnanchored("s1", any(), any()) }
         // Retry succeeded → no error surfaced.

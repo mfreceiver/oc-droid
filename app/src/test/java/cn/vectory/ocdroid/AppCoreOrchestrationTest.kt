@@ -892,10 +892,7 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
         // + repository-level tests, not observable through this mock.
         val stale = Message(id = "stale", role = "user")
         val fresh = MessageWithParts(info = Message(id = "m_fresh", role = "assistant"))
-        // 4-arg signature (incl. the default SlimCommitToken param) matches the
-        // stub style in MainViewModelTestBase.setUp — a 3-arg stub on a function
-        // with a default param clashes with mockk's captureSlimCommitToken
-        // tracking (see setUp "C-D3 token guard" note).
+        // 3-arg signature (the old SlimCommitToken param was removed in B3 Phase 4b).
         coEvery { repository.getMessagesPagedUnanchored(any(), any(), any()) } returns
             Result.success(MessagesPage(listOf(fresh), null))
         coEvery { repository.getSessionTodos(any()) } returns Result.success(emptyList())

@@ -430,7 +430,7 @@ object ControllerModule {
      * # 取代旧的全量 reconcile 路径
       *
       * 旧的 /full reconcile 单条路径已全量退役（plan §4.1）。
-      * 该协调器不再依赖 SlimCommitToken / watermark / reconfigure 协议——skeleton
+       * 该协调器不再依赖 slim-token / watermark / reconfigure 协议——skeleton
       * 端点每次 re-GET upstream opencode，不读 sidecar 内存（read-after-event 见
       * plan §4.3.2）。
       *
