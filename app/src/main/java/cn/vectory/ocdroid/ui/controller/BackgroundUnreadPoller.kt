@@ -5,6 +5,7 @@ import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.data.repository.ConnectionRepository
 import cn.vectory.ocdroid.data.repository.SessionRepository
 import cn.vectory.ocdroid.service.status.SlimStatusFetchCache
+import cn.vectory.ocdroid.service.status.StatusFetchService
 import cn.vectory.ocdroid.ui.MainViewModelTimings
 import cn.vectory.ocdroid.ui.SharedStateStore
 import cn.vectory.ocdroid.util.SettingsManager
@@ -178,7 +179,7 @@ class BackgroundUnreadPoller internal constructor(
         // digest-relay-owned in slim mode (skip the legacy getActiveSessionIds,
         // preserve store snapshot → null fallback).
         val statuses = if (connectionRepository.usesSlimStatusFanOut) {
-            loadSlimSessionStatus(sessions, hydration.childrenByParent, startHostId ?: "default")
+            loadSlimSessionStatus(sessions, hydration.childrenByParent, startHostId ?: StatusFetchService.DEFAULT_CACHE_KEY)
                 .getOrElse { return UnreadPollResult.Aborted }
         } else {
             sessionRepository.getSessionStatus().getOrElse { return UnreadPollResult.Aborted }

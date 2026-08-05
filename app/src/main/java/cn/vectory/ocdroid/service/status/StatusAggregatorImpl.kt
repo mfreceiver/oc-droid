@@ -371,7 +371,7 @@ class StatusAggregatorImpl internal constructor(
         val localBefore = authorityAtStart.bySid
             .filterValues { it.updatedAtMs <= requestStartMs }
             .mapValues { it.value.status }
-        val result = statusFetchService.fetch(snapshot)
+        val result = statusFetchService.fetch(snapshot, hostAtStart ?: StatusFetchService.DEFAULT_CACHE_KEY)
         // CP4 §2 epoch guard: drop the response if a reconfigure invalidated
         // this request mid-flight (checked AFTER the suspend, BEFORE dispatch).
         if (identityStore.currentEpoch() != epochAtRequestStart) return

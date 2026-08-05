@@ -73,8 +73,17 @@ class StatusFetchService @Inject internal constructor(
      * @param snapshot carries `registeredWorkdirs` (the slim fan-out target set
      *  + the coverage predicate source) and `sessionsById` (unused here — the
      *  reducer bins `sessionId → workdir`; the fetch only needs the workdir set).
+     * @param cacheKey the host/identity scope key shared across both background
+     *  callers so they hit the same [SlimStatusFetchCache] slot. The caller
+     *  supplies the active [hostProfileId]; a host switch produces a different
+     *  key → automatic cache miss. Defaults to [DEFAULT_CACHE_KEY] when the
+     *  host profile is null (e.g. cold-start before connect) — the same fallback
+     *  used by [cn.vectory.ocdroid.ui.controller.BackgroundUnreadPoller] for alignment.
      */
-    suspend fun fetch(snapshot: StatusSnapshot): Result<StatusFetch> =
+    suspend fun fetch(
+        snapshot: StatusSnapshot,
+        cacheKey: String = DEFAULT_CACHE_KEY,
+    ): Result<StatusFetch> =
         if (connectionRepository.usesSlimStatusFanOut) {
             withContext(Dispatchers.IO) {
                 // Slim P2: the upstream `directory` is a no-op — every call
@@ -85,12 +94,7 @@ class StatusFetchService @Inject internal constructor(
                     // (the coverage marker's cold-start guard handles projection).
                     Result.success(StatusFetch(emptyMap(), emptySet()))
                 } else {
-                    // cacheKey: use first workdir as a stable host-scoped key.
-                    // Workdirs change on host switch (different server/identity
-                    // has different workdirs), so the key naturally produces a
-                    // miss across host switches.
                     val dir = snapshot.registeredWorkdirs.first()
-                    val cacheKey = dir
                     // .map transforms success → StatusFetch; failure propagates
                     // naturally as Result.failure, matching the legacy
                     // all-workdirs-failed contract.
@@ -105,4 +109,14 @@ class StatusFetchService @Inject internal constructor(
                 sessionRepository.getSessionStatus().map { StatusFetch(it, emptySet()) }
             }
         }
+
+    companion object {
+        /**
+         * Shared fallback cacheKey when hostProfileId is null (cold-start before
+         * connect). Both background callers ([StatusAggregatorImpl.refresh] via
+         * [StatusFetchService] and [cn.vectory.ocdroid.ui.controller.BackgroundUnreadPoller]) use this same value
+         * so they share a cache slot even when no host is connected yet.
+         */
+        const val DEFAULT_CACHE_KEY = "global"
+    }
 }
