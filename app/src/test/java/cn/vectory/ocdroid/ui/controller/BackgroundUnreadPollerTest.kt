@@ -6,6 +6,7 @@ import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.data.state.AuthorityOp
 import cn.vectory.ocdroid.data.state.EntryOrigin
 import cn.vectory.ocdroid.di.NotificationDedup
+import cn.vectory.ocdroid.service.status.SlimStatusFetchCache
 import cn.vectory.ocdroid.ui.AppAction
 import cn.vectory.ocdroid.ui.SharedStateStore
 import cn.vectory.ocdroid.util.SettingsManager
@@ -26,6 +27,7 @@ class BackgroundUnreadPollerTest {
     private val settings = mockk<SettingsManager>()
     private val store = SharedStateStore()
     private var now = 1_000L
+    private val slimCache = SlimStatusFetchCache(repository, clock = { System.currentTimeMillis() })
 
     // §unread-semantics (F3): `updated` mirrors Session.time.updated — the
     // "new content" signal. Defaults to null (no content); mark-asserting
@@ -44,6 +46,7 @@ class BackgroundUnreadPollerTest {
         connectionRepository = repository,
         settingsManager = settings,
         store = store,
+        slimStatusFetchCache = slimCache,
         clock = { now },
         isBackground = isBackground,
         lifecycleGeneration = lifecycleGeneration,
@@ -227,6 +230,7 @@ class BackgroundUnreadPollerTest {
             connectionRepository = repository,
             settingsManager = settings,
             store = store,
+            slimStatusFetchCache = slimCache,
             clock = { now },
             isBackground = { true },
             lifecycleGeneration = { 0L },

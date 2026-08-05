@@ -25,24 +25,22 @@ import javax.inject.Singleton
  * `store.state.authority`; the fetch stays here so the aggregator no longer
  * depends on [OpenCodeRepository] at all.
  *
- * # Contract (verbatim from the legacy [StatusAggregatorImpl.refresh] fold)
+ * # Contract (slim P2 — single global call)
  *
  * Returns a [Result] of [StatusFetch]:
- *  - **slim mode** (`connectionRepository.usesSlimStatusFanOut`): one
- *    `getSlimapiSessionsStatus(dir)` per registered workdir (the sidecar
- *    requires a single directory per call). Merged map + the set of workdirs
- *    whose per-directory call FAILED. Empty-registered-workdirs (cold-start) →
- *    success-empty (the coverage marker's cold-start guard handles projection).
- *    All-workdirs-failed → `Result.failure` so the caller surfaces Unknown.
- *    Partial/full success → `Result.success(StatusFetch(merged, failed))`.
+ *  - **slim mode** (`connectionRepository.usesSlimStatusFanOut`): ONE
+ *    `getSlimapiSessionsStatus(dir)` call via [SlimStatusFetchCache] (the
+ *    upstream `directory` is a no-op — every call returns the host-wide
+ *    global map). If empty registered workdirs (cold-start) → success-empty.
+ *    Failure → `Result.failure` (all-workdirs-failed semantics).
+ *    `failedWorkdirs` is always `emptySet()` because a single global call
+ *    either succeeds for ALL registered workdirs or fails for ALL — there
+ *    is no per-directory partial failure.
  *  - **legacy mode**: a single host-global `getSessionStatus()` call;
  *    `failedWorkdirs` is always empty (byte-for-byte the pre-T-R1 fold).
  *
- * The carrier's `failedWorkdirs` lets the caller (the aggregator's `refresh`
- * adapter) mark sessions in failed workdirs so the authority reducer's
- * `applySnapshot` (via `partialFailureWorkdirs`) + the coverage predicate
- * (`coveredWorkdirs = registeredWorkdirs - failedWorkdirs`) independently
- * refuse `AllIdleFresh` on a partial slim failure.
+ * The carrier's `failedWorkdirs` field is kept for structural compatibility
+ * with the downstream caller; on the slim path it is always empty.
  *
  * Pure-ish: performs network I/O (the ONLY impurity — no state mutation, no
  * clock read, no injected mutable holder). Deterministic given the repository
@@ -52,12 +50,14 @@ import javax.inject.Singleton
 class StatusFetchService @Inject internal constructor(
     private val sessionRepository: SessionRepository,
     private val connectionRepository: ConnectionRepository,
+    private val slimStatusFetchCache: SlimStatusFetchCache,
 ) {
     /**
      * T-R1 (slimapi R1) 方案A Issue2: carrier for a status-fetch result shared
      * by the slim + legacy branches. Carries the merged status map PLUS the set
      * of workdirs whose per-directory slim fetch FAILED (always empty for
-     * legacy, which issues a single host-global call).
+     * legacy, which issues a single host-global call; always empty for slim P2
+     * which also issues a single global call — no per-directory partial failure).
      *
      * Moved here (was private inside [StatusAggregatorImpl]) so the fetch
      * service and the aggregator's `refresh` adapter share the same shape.
@@ -73,32 +73,33 @@ class StatusFetchService @Inject internal constructor(
      * @param snapshot carries `registeredWorkdirs` (the slim fan-out target set
      *  + the coverage predicate source) and `sessionsById` (unused here — the
      *  reducer bins `sessionId → workdir`; the fetch only needs the workdir set).
+     * @param cacheKey the host/identity scope key shared across both background
+     *  callers so they hit the same [SlimStatusFetchCache] slot. The caller
+     *  supplies the active [hostProfileId]; a host switch produces a different
+     *  key → automatic cache miss. Defaults to [DEFAULT_CACHE_KEY] when the
+     *  host profile is null (e.g. cold-start before connect) — the same fallback
+     *  used by [cn.vectory.ocdroid.ui.controller.BackgroundUnreadPoller] for alignment.
      */
-    suspend fun fetch(snapshot: StatusSnapshot): Result<StatusFetch> =
+    suspend fun fetch(
+        snapshot: StatusSnapshot,
+        cacheKey: String = DEFAULT_CACHE_KEY,
+    ): Result<StatusFetch> =
         if (connectionRepository.usesSlimStatusFanOut) {
             withContext(Dispatchers.IO) {
-                val merged = mutableMapOf<String, SessionStatus>()
-                val succeeded = mutableSetOf<String>()
-                val failed = mutableSetOf<String>()
-                for (dir in snapshot.registeredWorkdirs) {
-                    sessionRepository.getSlimapiSessionsStatus(dir)
-                        .onSuccess { merged.putAll(it); succeeded.add(dir) }
-                        .onFailure { failed.add(dir) }
-                }
-                when {
+                // Slim P2: the upstream `directory` is a no-op — every call
+                // returns the SAME host-wide global map. ONE call via the
+                // shared background cache covers ALL registered workdirs.
+                if (snapshot.registeredWorkdirs.isEmpty()) {
                     // No registered workdirs (cold-start): treat as success-empty
                     // (the coverage marker's cold-start guard handles projection).
-                    snapshot.registeredWorkdirs.isEmpty() ->
-                        Result.success(StatusFetch(merged, failed))
-                    // All per-directory calls failed → surface as failure so the
-                    // projection marks every known session Unknown (NOT Idle),
-                    // matching the legacy failure semantics.
-                    succeeded.isEmpty() -> Result.failure(
-                        java.io.IOException("slim bulk status failed for all registered workdirs")
-                    )
-                    // Partial/full success → fold the merged map + carry the
-                    // failed-workdir set so the fold marks their sessions Unknown.
-                    else -> Result.success(StatusFetch(merged, failed))
+                    Result.success(StatusFetch(emptyMap(), emptySet()))
+                } else {
+                    val dir = snapshot.registeredWorkdirs.first()
+                    // .map transforms success → StatusFetch; failure propagates
+                    // naturally as Result.failure, matching the legacy
+                    // all-workdirs-failed contract.
+                    slimStatusFetchCache.fetchGlobal(dir, cacheKey)
+                        .map { StatusFetch(it, emptySet()) }
                 }
             }
         } else {
@@ -108,4 +109,14 @@ class StatusFetchService @Inject internal constructor(
                 sessionRepository.getSessionStatus().map { StatusFetch(it, emptySet()) }
             }
         }
+
+    companion object {
+        /**
+         * Shared fallback cacheKey when hostProfileId is null (cold-start before
+         * connect). Both background callers ([StatusAggregatorImpl.refresh] via
+         * [StatusFetchService] and [cn.vectory.ocdroid.ui.controller.BackgroundUnreadPoller]) use this same value
+         * so they share a cache slot even when no host is connected yet.
+         */
+        const val DEFAULT_CACHE_KEY = "global"
+    }
 }

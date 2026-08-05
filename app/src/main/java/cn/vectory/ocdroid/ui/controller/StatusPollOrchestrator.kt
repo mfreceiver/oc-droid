@@ -9,9 +9,6 @@ import cn.vectory.ocdroid.ui.isSseDown
 import cn.vectory.ocdroid.ui.reportNonFatalIssue
 import cn.vectory.ocdroid.util.DebugLog
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 
 /**
@@ -301,19 +298,18 @@ internal object StatusPollOrchestrator {
     }
 
     /**
-     * T-R1 (slimapi R1) — slim-mode foreground status cold-start. Replaces the
-     * legacy `/session/status` + `/api/session/active` fan-out that
-     * [launchLoadSessionStatus] performs in legacy mode.
+     * T-R1 (slimapi R1) / Slim P2 — slim-mode foreground status cold-start.
+     * Replaces the legacy `/session/status` + `/api/session/active` fan-out
+     * that [launchLoadSessionStatus] performs in legacy mode.
      *
      * In slim mode the steady-state status source is the slim digest `status`
      * relay ([SessionSyncCoordinator.handleSessionDigest] → [applySessionStatus]);
      * this helper provides the COLD-START snapshot (and a periodic correction on
-     * each foreground sweep) by issuing one bulk
-     * `GET /slimapi/sessions/status?directory=X` per known workdir (the sidecar
-     * requires a single directory per call — see [OpenCodeApi.getSlimapiSessionsStatus])
-     * and folding the merged map into [SessionListState.sessionStatuses] via the
-     * same [normalizeAuthoritativeStatusSnapshot] + [mergeStatusSnapshot] discipline
-     * the legacy path uses.
+     * each foreground sweep) by issuing a SINGLE
+     * `GET /slimapi/sessions/status?directory=X` call (the upstream `directory`
+     * is a no-op — every call returns the host-wide global map). This is the
+     * FOREGROUND path so it calls the repository DIRECTLY (bypassing the shared
+     * background cache), serving as the fresh-fallback.
      *
      * Active-session ids are NOT polled here — slim activity is owned by the
      * digest relay + slim reconcile. The prior [SessionListState.activeSessionIds]
@@ -349,8 +345,9 @@ internal object StatusPollOrchestrator {
                 val requestStartMs = System.currentTimeMillis()
                 val sl = slices.sessionList.value
                 val authoritative = allSessionsById(sl.sessions, sl.directorySessions, sl.childSessions)
-                // Derive the distinct workdirs to query (sidecar requires one
-                // directory per call). Empty before the session list loads.
+                // Derive the distinct workdirs. The directory set is preserved
+                // for per-directory ownership consumers (allSessionsById).
+                // Empty before the session list loads.
                 val directories = authoritative.values
                     .mapNotNull { it.directory.takeIf { d -> d.isNotBlank() } }
                     .toSet()
@@ -366,51 +363,25 @@ internal object StatusPollOrchestrator {
                     complete(true)
                     return@launch
                 }
-                // Concurrent per-directory bulk fetch (bounded by the directory
-                // count, which is small — typically 1–3). Each failure is tolerated
-                // (the digest relay is the steady-state source); we fold whatever
-                // succeeded into one merged map.
+                // Slim P2: single global call (foreground path — direct to
+                // repository, bypasses the background cache). The upstream
+                // `directory` is a no-op; any single directory returns the
+                // host-wide global map covering ALL workdirs.
                 //
-                // §11.1 fix-10 P0-2: track anySuccess — if ALL directory
-                // requests failed, we MUST NOT mutate the session statuses
-                // (an empty merged map would be treated as "all idle",
-                // masking the transport failure). Instead, preserve the
-                // prior snapshot and complete(false).
-                //
-                // §11.1 fix-11a P0-1 (rev-ogpt): track SUCCESS / FAILURE per
-                // directory — "partial failure" (some dirs succeeded, some
-                // failed) MUST NOT let the failed-directory sessions be
-                // normalized to idle. Only sessions whose directory fetch
-                // SUCCEEDED are authoritative-normalized downstream;
-                // failed-directory sessions preserve their prior
-                // sessionStatuses (matches OpenCodeRepository
-                // .getSlimapiSessionsStatus failure semantics: "keep prior
-                // snapshot"). fix-10 closed the all-failed gap; this closes
-                // the partial-failure gap.
-                val successfulDirs = mutableSetOf<String>()
-                // §toctou-identity: capture identityEpoch BEFORE the fan-out
+                // All-or-nothing: a single failure preserves the prior snapshot
+                // and signals complete(false) (matches the prior all-failed
+                // semantics). No partial-failure handling — the global map
+                // either covers everything or nothing.
+                // §toctou-identity: capture identityEpoch BEFORE the fetch
                 // suspend so a mid-flight identity switch invalidates the response.
                 val identityEpochAtStart = slices.store.stateFlow.value.identityEpoch
-                val merged: Map<String, SessionStatus> = coroutineScope {
-                    val dirList = directories.toList()
-                    val results = dirList.map { dir ->
-                        async { repository.getSlimapiSessionsStatus(dir) }
-                    }.awaitAll()
-                    val acc = mutableMapOf<String, SessionStatus>()
-                    dirList.zip(results).forEach { (dir, result) ->
-                        result.getOrNull()?.let {
-                            acc.putAll(it)
-                            successfulDirs += dir
-                        }
-                    }
-                    acc
-                }
-                // §11.1 fix-10 P0-2: if every directory request failed,
-                // do NOT apply the empty merged as authoritative —
-                // preserve the prior snapshot and signal failure so the
-                // caller can retry / fall back.
-                if (successfulDirs.isEmpty()) {
-                    DebugLog.w("Sync", "launchLoadSessionStatusSlim: all directory requests failed — preserving prior snapshot")
+                val result = repository.getSlimapiSessionsStatus(directories.first())
+                // §11.1 fix-10 P0-2: if the single call failed, do NOT apply
+                // the empty map as authoritative — preserve the prior snapshot
+                // and signal failure so the caller can retry / fall back.
+                val merged = result.getOrNull()
+                if (merged == null) {
+                    DebugLog.w("Sync", "launchLoadSessionStatusSlim: single global call failed — preserving prior snapshot")
                     complete(false)
                     return@launch
                 }
@@ -433,29 +404,16 @@ internal object StatusPollOrchestrator {
                         current.childSessions,
                     )
                     val authoritativeIds = authoritative.keys
-                    // §11.1 fix-11a P0-1 (rev-ogpt): sessions whose directory
-                    // fetch FAILED must NOT be authoritative-normalized to
-                    // idle. The authority reducer reproduces this exactly via
-                    //   authoritativeNodeIds = coveredAuthoritativeIds (failed-dir
-                    //   sessions excluded from idle-normalize) +
-                    //   partialFailureWorkdirs = failed dirs (their entries keep
-                    //   the prior bySid entry, status updated to the merged value).
-                    // Sessions with a blank directory were never queried and retain
-                    // their original normalize-to-idle behavior (they are in
-                    // coveredAuthoritativeIds, unchanged).
-                    val failedDirs = directories - successfulDirs
-                    val failedDirSessionIds = authoritative.values
-                        .asSequence()
-                        .filter { s -> s.directory.isNotBlank() && s.directory !in successfulDirs }
-                        .map { it.id }
-                        .toSet()
-                    val coveredAuthoritativeIds = authoritativeIds - failedDirSessionIds
+                    // Slim P2: the single global call covers ALL workdirs.
+                    // All sessions are authoritative-normalized; there are no
+                    // failed directories or partial-failure carve-outs.
+                    val coveredAuthoritativeIds = authoritativeIds
                     val op = cn.vectory.ocdroid.ui.buildAuthorityApplySnapshot(
                         snapshot = merged,
                         authoritativeSessions = authoritative,
                         authoritativeNodeIds = coveredAuthoritativeIds,
-                        coveredWorkdirs = successfulDirs,
-                        partialFailureWorkdirs = failedDirs,
+                        coveredWorkdirs = directories,
+                        partialFailureWorkdirs = emptySet(),
                         unmappedActiveIds = emptySet(),
                         lastSuccessTimeMs = requestStartMs,
                         scopeKey = slices.store.authorityScope(),

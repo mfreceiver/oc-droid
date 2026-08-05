@@ -86,7 +86,8 @@ class StatusAggregatorImplTest {
         // AuthorityOps into the store; the READ side (globalState / globalBusy /
         // statusByKey / stateAtNow) derives from authority.
         val store = SharedStateStore()
-        val fetchService = StatusFetchService(repository, repository)
+        val cache = SlimStatusFetchCache(repository, clock = { System.currentTimeMillis() })
+        val fetchService = StatusFetchService(repository, repository, cache)
         return StatusAggregatorImpl(identityStore, store, fetchService, scope, clock)
     }
 
@@ -494,7 +495,7 @@ class StatusAggregatorImplTest {
         val aggregator = StatusAggregatorImpl(
             ConnectionIdentityStore().also { it.bind(fp, "/work", "endpoint-A") },
             SharedStateStore(),
-            StatusFetchService(repo, repo),
+            StatusFetchService(repo, repo, SlimStatusFetchCache(repo, clock = { System.currentTimeMillis() })),
             backgroundScope,
             clock = { now },
         )
@@ -526,7 +527,7 @@ class StatusAggregatorImplTest {
         val aggregator = StatusAggregatorImpl(
             ConnectionIdentityStore().also { it.bind(fp, "/work", "endpoint-A") },
             SharedStateStore(),
-            StatusFetchService(repo, repo),
+            StatusFetchService(repo, repo, SlimStatusFetchCache(repo, clock = { System.currentTimeMillis() })),
             backgroundScope,
             clock = { now },
         )
@@ -608,7 +609,7 @@ class StatusAggregatorImplTest {
         val aggregator = StatusAggregatorImpl(
             store,
             SharedStateStore(),
-            StatusFetchService(repo, repo),
+            StatusFetchService(repo, repo, SlimStatusFetchCache(repo, clock = { System.currentTimeMillis() })),
             kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.Unconfined),
             clock = { 100L },
         )
@@ -897,26 +898,20 @@ class StatusAggregatorImplTest {
     }
 
     @Test
-    fun `T-R1 slim refresh partial failure marks failed-workdir sessions Unknown not Idle`() =
+    fun `T-R1 slim refresh partial failure - single global call success covers all registered workdirs`() =
         runTest {
-            // 方案A point 5 (Issue2): when some workdirs succeed and some fail,
-            // sessions in FAILED workdirs MUST be Unknown (NOT Idle). Sessions
-            // in successful workdirs fold normally. The prior round-2 freeze
-            // locked the WRONG B behavior (failed-workdir sessions = Idle).
-            //
-            // RED against current impl: on partial success the slim branch
-            // returns Result.success(merged) with only successful workdirs'
-            // sessions → the success fold marks all known-but-absent sessions
-            // Idle, including failed-workdir sessions. The A-impl rework must
-            // track per-workdir success/failure and mark failed-workdir
-            // sessions Unknown.
+            // Slim P2: the upstream `directory` is a no-op — one call returns
+            // the host-wide global map covering ALL workdirs. No per-directory
+            // partial-failure exists. A single successful call covers every
+            // registered workdir: s1 (in /work-a, present in response) folds as
+            // busy; s2 (in /work-b, absent from global response) is
+            // authoritative-normalized to idle (which is correct — the global
+            // snapshot covered the entire host, so absent = genuinely idle).
             val repo = mockk<OpenCodeRepository>(relaxed = true)
             every { repo.usesSlimStatusFanOut } returns true
+            // Only /work-a is called (first dir) — the single global call.
             coEvery { repo.getSlimapiSessionsStatus("/work-a") } returns Result.success(
                 mapOf("s1" to SessionStatus(type = "busy"))
-            )
-            coEvery { repo.getSlimapiSessionsStatus("/work-b") } returns Result.failure(
-                java.io.IOException("upstream unavailable")
             )
             val aggregator = newAggregator(repo, clock = { 100L })
 
@@ -931,19 +926,16 @@ class StatusAggregatorImplTest {
                 ),
             )
 
-            // s1 (successful workdir) folded as Busy.
+            // s1 (present in global response) folded as Busy.
             assertEquals(
-                "successful workdir session folds normally",
+                "workdir-a session folds normally from global response",
                 SessionBusyStatus.Busy,
                 aggregator.statusByKey.value[key("s1", "/work-a")],
             )
-            // §P0-A rev-gpt #6 (fail-closed for failed-dir sessions): s2 (in a
-            // FAILED workdir) is now EXCLUDED from authoritativeNodeIds → the
-            // reducer does NOT idle-fill it → it stays ABSENT (fail-closed
-            // unknown). The idle-grace GUARD is preserved via the coverage gate:
-            // coveredWorkdirs EXCLUDES /work-b → allWorkdirsCovered = false.
-            assertNull(
-                "failed-workdir session is fail-closed absent (not idle-filled)",
+            // s2 (absent from global response → idle-filled for covered dirs).
+            assertEquals(
+                "workdir-b session absent from global response is normalized to Idle",
+                SessionBusyStatus.Idle,
                 aggregator.statusByKey.value[key("s2", "/work-b")],
             )
             // Busy s1 keeps the host out of idle grace.
@@ -951,27 +943,17 @@ class StatusAggregatorImplTest {
         }
 
     @Test
-    fun `T-R1 slim refresh partial failure - successful Idle plus failed Busy does NOT enter AllIdleFresh`() =
+    fun `T-R1 slim refresh partial failure - single global call empty success enters AllIdleFresh`() =
         runTest {
-            // 方案A point 5 CRITICAL counterexample (Issue2):
-            //   /work-a succeeds, returns EMPTY → s1 normalizes to Idle.
-            //   /work-b FAILS → s2 MUST be Unknown (NOT Idle).
-            //
-            // If s2 were incorrectly Idle (the current B-semantics bug), BOTH
-            // sessions would be Idle and globalState could flip to AllIdleFresh
-            // — wrongly entering the idle grace window on a FAILED workdir. 方案A
-            // prevents this: s2=Unknown → globalState=Unknown (refuses idle grace).
-            //
-            // RED against current impl: partial success folds only s1 (Idle from
-            // empty response); s2 is absent from merged → filled Idle → both
-            // Idle → globalState=AllIdleFresh (the bug). The A-impl rework must
-            // mark s2=Unknown so globalState=Unknown.
+            // Slim P2 counterexample: a single global call that succeeds with
+            // an empty map means the entire host has no active sessions. ALL
+            // sessions are authoritative-normalized to idle (no partial failure,
+            // no failed workdirs). AllIdleFresh is the correct verdict — the
+            // host is genuinely idle everywhere.
             val repo = mockk<OpenCodeRepository>(relaxed = true)
             every { repo.usesSlimStatusFanOut } returns true
+            // Only /work-a is called (first dir) — returns empty global map.
             coEvery { repo.getSlimapiSessionsStatus("/work-a") } returns Result.success(emptyMap())
-            coEvery { repo.getSlimapiSessionsStatus("/work-b") } returns Result.failure(
-                java.io.IOException("upstream unavailable")
-            )
             val aggregator = newAggregator(repo, clock = { 100L })
 
             aggregator.refresh(
@@ -985,25 +967,21 @@ class StatusAggregatorImplTest {
                 ),
             )
 
-            // s1 (successful workdir, empty response) → Idle (normal fold).
+            // Both sessions normalize to idle (absent from empty global response).
             assertEquals(
-                "successful workdir with empty response → Idle",
+                "s1 normalized to idle from empty global snapshot",
                 SessionBusyStatus.Idle,
                 aggregator.statusByKey.value[key("s1", "/work-a")],
             )
-            // §P0-A rev-gpt #6 (fail-closed): s2 (failed workdir) is now
-            // EXCLUDED from authoritativeNodeIds → absent (fail-closed unknown).
-            assertNull(
-                "failed-workdir session is fail-closed absent (not idle-filled)",
+            assertEquals(
+                "s2 normalized to idle from empty global snapshot",
+                SessionBusyStatus.Idle,
                 aggregator.statusByKey.value[key("s2", "/work-b")],
             )
-            // CRITICAL: globalState must be Unknown (NOT AllIdleFresh) because
-            // the failed workdir is NOT in coveredWorkdirs (coverage gate
-            // refuses AllIdleFresh). This prevents wrongly entering the idle
-            // grace window on a partially-failed snapshot.
+            // CORRECT: single global call success with all idle → AllIdleFresh.
             assertEquals(
-                "partial failure must NOT enter idle grace (coverage gate: failed workdir uncovered)",
-                GlobalBusyState.Unknown,
+                "single global call success with all idle enters AllIdleFresh",
+                GlobalBusyState.AllIdleFresh,
                 aggregator.globalState.value,
             )
         }
@@ -1094,7 +1072,7 @@ class StatusAggregatorImplTest {
         coEvery { repo.getSessionStatus() } returns Result.success(emptyMap())
         val identityStore = ConnectionIdentityStore().also { it.bind(fp, "/work", "endpoint-A") }
         val store = SharedStateStore()
-        val fetchService = StatusFetchService(repo, repo)
+        val fetchService = StatusFetchService(repo, repo, SlimStatusFetchCache(repo, clock = { System.currentTimeMillis() }))
         var clock = 0L
         val aggregator = StatusAggregatorImpl(
             identityStore, store, fetchService,
@@ -1131,7 +1109,7 @@ class StatusAggregatorImplTest {
         coEvery { repo.getSessionStatus() } returns Result.success(emptyMap())
         val identityStore = ConnectionIdentityStore().also { it.bind(fp, "/work", "endpoint-A") }
         val store = SharedStateStore()
-        val fetchService = StatusFetchService(repo, repo)
+        val fetchService = StatusFetchService(repo, repo, SlimStatusFetchCache(repo, clock = { System.currentTimeMillis() }))
         var clock = 0L
         val aggregator = StatusAggregatorImpl(
             identityStore, store, fetchService,
