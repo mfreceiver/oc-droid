@@ -57,19 +57,15 @@ sealed interface ExpandOutcome {
     )
 
     /**
-     * At least one batch attempt returned a usable result (200 envelope
-     * OR the per-id fallback path). [items] carries every resolved
+     * At least one requested id resolved. [items] carries every resolved
      * [MessageWithParts] in the request's (deduped) order; [failures]
-     * carries the message failures that did NOT resolve (either per-message
-     * errors from the 200 envelope's `errors[]`, or per-id transport
-     * failures from the fallback path, or budget-exhausted mids).
+     * carries the per-message failures that did NOT resolve, each with its
+     * parsed sidecar envelope `{"code":…}` (or `null` for transport-level
+     * IOException).
      *
-     * [usedBatch] distinguishes the batched-success path (`true`, used
-     * `GET /slimapi/messages/{sid}/full?ids=…`) from the per-id fallback
-     * path (`false`, used N × `GET /slimapi/messages/{sid}/full/{mid}`).
-     * T15/T16 use this as a telemetry hook to track how often the
-     * transitional fallback fires (drives prioritising server-side
-     * batch endpoint deployment).
+     * [usedBatch] is always `false` in lite-v2 (the per-id N×/full loop is
+     * the only path; the retired batch endpoint `/full?ids=` no longer
+     * exists). The flag is retained as a telemetry hook only.
      */
     data class Ok(
         val items: List<MessageWithParts>,
@@ -87,19 +83,19 @@ sealed interface ExpandOutcome {
     data class SessionMissing(val sessionId: String) : ExpandOutcome
 
     /**
-     * Every other failure (other 4xx, 413 after exhaustive halving,
-     * 503 after exhaustive backoff, network/IO failure, malformed
-     * body). [code] carries the sidecar's machine-readable error code
-     * from `{"code": "…"}` when available; null on transport failure
-     * or unparseable body (UI surfaces a generic "expand failed"
+     * Every requested id failed to resolve (and none failed with
+     * `session_not_found`, which yields [SessionMissing] instead).
+     * Covers other 4xx/5xx, network/IO failure, and malformed body.
+     * [code] carries the sidecar's machine-readable error code from
+     * `{"code": "…"}` when available — chosen as the first non-null code
+     * among the per-id failures; `null` when every failure was
+     * transport-level IOException (UI surfaces a generic "expand failed"
      * affordance with retry).
      *
-     * [exhausted] = true when the operation exhausted its budget
-     * (wall-clock, node budget, or partition count) before being able
-     * to resolve all ids. The unresolved mids are NOT in [Failed] —
-     * they are carried via the [exhausted] marker and the caller
-     * should keep skeleton + show retry affordance, NOT a terminal
-     * failure.
+     * [exhausted] is a vestigial flag retained for API stability: in
+     * lite-v2 there is no budget/partition machinery to set it `true`
+     * (the V1 ExpandBatchEngine that produced it was RETIRED), so it is
+     * always `false`. The consumer still tolerates `true` defensively.
      */
     data class Failed(
         val sessionId: String,

@@ -290,13 +290,14 @@ class OpenCodeRepositorySlimapiEndpointsTest {
         assertEquals("/slimapi/messages/sess-1/full/m1", request.path)
     }
 
-    // ── Task 3 (L1 G6): expandMessagesFullBatch — lite-v2-dev shim ──────
+    // ── Task 3 (L1 G6): expandMessagesFullBatch — lite-v2 N×/full loop ──────
     //
-    // lite-v2-dev (plan §4.4): ExpandBatchEngine retired. expandMessagesFullBatch
-    // is now a shim that loops over individual getSlimapiMessageFull calls
-    // (one HTTP request per message ID), no batch endpoint, no halving, no
-    // retry, no SessionMissing/Failed outcomes — always returns
-    // ExpandOutcome.Ok with per-message results.
+    // lite-v2 (plan §4.4): ExpandBatchEngine retired. expandMessagesFullBatch
+    // loops over individual getSlimapiMessageFull calls (one HTTP request per
+    // message ID), no batch endpoint, no halving, no retry. Outcome collapses
+    // to Ok (≥1 id resolved) / SessionMissing (any session_not_found) /
+    // Failed (total failure). Per-message failures carry their parsed
+    // {"code":...} envelope code.
 
     @Test
     fun `expand calls per-message full endpoint for each id and returns Ok with usedBatch=false`() = runBlocking {
@@ -353,6 +354,41 @@ class OpenCodeRepositorySlimapiEndpointsTest {
         assertEquals("sess-1", failed.sessionId)
         assertEquals("not_found", failed.code)
         assertEquals("1 HTTP request", 1, server.requestCount)
+    }
+
+    @Test
+    fun `expand session_not_found returns SessionMissing`() = runBlocking {
+        // A missing session 404s every per-id /full/{mid} call with
+        // session_not_found; a single occurrence collapses the whole batch
+        // to SessionMissing so the UI clears local cache (mirrors G2).
+        server.enqueue(jsonResponse("""{"code":"session_not_found"}""", 404))
+
+        val outcome = repository.expandMessagesFullBatch("sess-1", setOf("m1"))
+
+        assertTrue("SessionMissing on session_not_found: $outcome", outcome is ExpandOutcome.SessionMissing)
+        assertEquals("sess-1", (outcome as ExpandOutcome.SessionMissing).sessionId)
+        assertEquals("1 HTTP request", 1, server.requestCount)
+    }
+
+    @Test
+    fun `expand mixed success and failure returns Ok with parsed failure code`() = runBlocking {
+        // Partial success: m1 resolves (200), m2 fails (404/413 with envelope
+        // code) → Ok with 1 item + 1 failure carrying the parsed code. Order
+        // is deterministic: setOf("m1","m2") is a LinkedHashSet and the loop
+        // is sequential, so enqueues map 1:1.
+        val m1 = MessageWithParts(info = Message(id = "m1", role = "user"))
+        server.enqueue(jsonResponse(json.encodeToString(m1)))
+        server.enqueue(jsonResponse("""{"code":"message_too_large"}""", 413))
+
+        val outcome = repository.expandMessagesFullBatch("sess-1", setOf("m1", "m2"))
+
+        assertTrue("Ok on partial success: $outcome", outcome is ExpandOutcome.Ok)
+        val ok = outcome as ExpandOutcome.Ok
+        assertEquals("m1 resolved", listOf("m1"), ok.items.map { it.info.id })
+        assertEquals("m2 in failures", listOf("m2"), ok.failures.map { it.messageId })
+        assertEquals("parsed code carried", "message_too_large", ok.failures.single().code)
+        assertFalse("usedBatch=false", ok.usedBatch)
+        assertEquals("2 HTTP requests", 2, server.requestCount)
     }
 
     @Test
