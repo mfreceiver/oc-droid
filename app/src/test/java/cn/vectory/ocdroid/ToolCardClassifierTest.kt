@@ -215,31 +215,31 @@ class ToolCardClassifierTest {
     }
 
     @Test
-    fun `Basic webfetch contributes one web`() {
+    fun `Basic webfetch contributes one read`() {
         assertEquals(
-            mapOf(ToolCategory.WEB to 1),
+            mapOf(ToolCategory.READS to 1),
             ToolRenderItem.Basic(toolPart(tool = "webfetch")).categoryCounts()
         )
     }
 
     @Test
-    fun `Basic read falls through to other`() {
+    fun `Basic read falls through to control`() {
         // A `read` rendered as a Basic (the un-grouped fallback, i.e. not
-        // absorbed into a ContextGroup) tallies as OTHER, not READS — only
+        // absorbed into a ContextGroup) tallies as CONTROL, not READS — only
         // ContextGroup contributes READS.
         assertEquals(
-            mapOf(ToolCategory.OTHER to 1),
+            mapOf(ToolCategory.CONTROL to 1),
             ToolRenderItem.Basic(toolPart(tool = "read")).categoryCounts()
         )
     }
 
-    // MARK: - Namespace tool category (web-retrieval families → WEB)
+    // MARK: - Namespace tool category (web-retrieval families → READS)
 
     @Test
-    fun `Basic namespace web-retrieval tools contribute one web`() {
+    fun `Basic namespace web-retrieval tools contribute one read`() {
         // The web namespace families share an icon (Search) with webfetch, so
-        // they must also share the WEB summary category — otherwise the fold
-        // bar would show them as OTHER (HelpOutline) while their cards show
+        // they must also share the READS summary category — otherwise the fold
+        // bar would show them as CONTROL (AccountTree) while their cards show
         // Search, a visible mismatch. Pinned to lock this parity.
         val webNamespaceTools = listOf(
             "websearch",
@@ -249,25 +249,26 @@ class ToolCardClassifierTest {
             "web-search-prime_web_search_prime",
             "web-reader_webReader",
             "web_reader_x",
-            "gh_grep_searchGitHub"
+            "gh_grep_searchGitHub",
+            "ast_grep_search"
         )
         webNamespaceTools.forEach { tool ->
             assertEquals(
-                "tool '$tool' should classify as WEB to match its Search icon",
-                mapOf(ToolCategory.WEB to 1),
+                "tool '$tool' should classify as READS to match its Search icon",
+                mapOf(ToolCategory.READS to 1),
                 ToolRenderItem.Basic(toolPart(tool = tool)).categoryCounts()
             )
         }
     }
 
     @Test
-    fun `Basic namespace non-web tools stay in OTHER`() {
+    fun `Basic namespace non-web tools fall to CONTROL`() {
         // Explicit decision: session_* / ctx_* / recall_* keep the coarse
-        // OTHER summary category (introducing a new enum just for them is not
+        // CONTROL summary category (introducing a new enum just for them is not
         // worth the ToolCallFoldBar / summary / order churn). Their per-card
         // icons (Forum / Psychology) are richer than the fold summary, which
         // is acceptable. Pinned to lock this decision against future drift.
-        val otherNamespaceTools = listOf(
+        val controlNamespaceTools = listOf(
             "session_send",
             "session_create",
             "session_status",
@@ -277,13 +278,63 @@ class ToolCardClassifierTest {
             "recall_get",
             "recall_sessions"
         )
-        otherNamespaceTools.forEach { tool ->
+        controlNamespaceTools.forEach { tool ->
             assertEquals(
-                "tool '$tool' should stay in OTHER (coarse summary by design)",
-                mapOf(ToolCategory.OTHER to 1),
+                "tool '$tool' should fall to CONTROL (coarse summary by design)",
+                mapOf(ToolCategory.CONTROL to 1),
                 ToolRenderItem.Basic(toolPart(tool = tool)).categoryCounts()
             )
         }
+    }
+
+    // MARK: - Route regression: write_ocmar_review / invalid / ast_grep_replace
+
+    @Test
+    fun `write_ocmar_review is excluded from write file operation`() {
+        // Regression lock: write_ocmar_review has no path/files/patch payload,
+        // so despite the `write` prefix it must NOT be treated as a file edit
+        // (otherwise it renders as an empty PatchCard). It falls to Basic →
+        // CONTROL and renders as its own RateReview single card.
+        assertFalse(
+            ToolCardClassifier.isWriteFileOperation(toolPart(tool = "write_ocmar_review"))
+        )
+        assertEquals(
+            mapOf(ToolCategory.CONTROL to 1),
+            ToolRenderItem.Basic(toolPart(tool = "write_ocmar_review")).categoryCounts()
+        )
+    }
+
+    @Test
+    fun `invalid tool routes to CONTROL`() {
+        // `invalid` (failed tool) has no SHELL/EDITS/READS prefix → CONTROL.
+        assertEquals(
+            mapOf(ToolCategory.CONTROL to 1),
+            ToolRenderItem.Basic(toolPart(tool = "invalid")).categoryCounts()
+        )
+    }
+
+    @Test
+    fun `ast_grep_replace routes to EDITS`() {
+        // ast_grep_replace is a mutation → EDITS, distinct from
+        // ast_grep_search which is READS (covered above).
+        assertEquals(
+            mapOf(ToolCategory.EDITS to 1),
+            ToolRenderItem.Basic(toolPart(tool = "ast_grep_replace")).categoryCounts()
+        )
+    }
+
+    @Test
+    fun `mcp resource tools route via context group not basic`() {
+        // list_mcp / read_mcp carry `list`/`read` prefixes, so they are
+        // ContextTools (isContextTool==true) and route through ContextGroup →
+        // READS, never through the Basic branch. This locks the routing fact:
+        // they do NOT appear in Basic→CONTROL.
+        assertTrue(
+            ToolCardClassifier.isContextTool(toolPart(tool = "list_mcp_resources"))
+        )
+        assertTrue(
+            ToolCardClassifier.isContextTool(toolPart(tool = "read_mcp_resource"))
+        )
     }
 
     // MARK: - Directory read detection + entries parsing

@@ -28,7 +28,7 @@ import cn.vectory.ocdroid.R
  * of hidden/sub-agent items). Each count animates via [animateIntAsState] so a
  * streaming message's tally updates smoothly.
  *
- * Categories appear in the stable order READS · EDITS · SHELL · WEB · THINKING · OTHER
+ * Categories appear in the stable order READS · EDITS · SHELL · THINKING · CONTROL
  * (matching [TOOL_CATEGORY_DISPLAY_ORDER] and [ToolCallFoldBar]), joined by " · "; absent categories are omitted. Styled as a faint
  * [labelSmall] line so it reads as a quiet tally rather than a loud card.
  *
@@ -70,17 +70,13 @@ private fun ToolCountSummaryText(
         targetValue = counts[ToolCategory.SHELL] ?: 0,
         label = "tool_count_shell"
     )
-    val web by animateIntAsState(
-        targetValue = counts[ToolCategory.WEB] ?: 0,
-        label = "tool_count_web"
-    )
     val thinking by animateIntAsState(
         targetValue = counts[ToolCategory.THINKING] ?: 0,
         label = "tool_count_thinking"
     )
-    val other by animateIntAsState(
-        targetValue = counts[ToolCategory.OTHER] ?: 0,
-        label = "tool_count_other"
+    val control by animateIntAsState(
+        targetValue = counts[ToolCategory.CONTROL] ?: 0,
+        label = "tool_count_control"
     )
 
     // Each plural string already embeds its count (e.g. "3 edits"), so the
@@ -88,24 +84,22 @@ private fun ToolCountSummaryText(
     val sReads = pluralStringResource(R.plurals.tool_count_reads, reads, reads)
     val sEdits = pluralStringResource(R.plurals.tool_count_edits, edits, edits)
     val sShell = pluralStringResource(R.plurals.tool_count_shell, shell, shell)
-    val sWeb = pluralStringResource(R.plurals.tool_count_web, web, web)
     val sThinking = pluralStringResource(R.plurals.tool_count_thinking, thinking, thinking)
-    val sOther = pluralStringResource(R.plurals.tool_count_other, other, other)
+    val sControl = pluralStringResource(R.plurals.tool_count_control, control, control)
 
     // §tool-fold F4: order follows TOOL_CATEGORY_DISPLAY_ORDER
-    // (READS·EDITS·SHELL·WEB·THINKING·OTHER), matching ToolCallFoldBar so
+    // (READS·EDITS·SHELL·THINKING·CONTROL), matching ToolCallFoldBar so
     // collapsing↔expanding never reorders categories.
     val text = remember(
-        reads, edits, shell, web, thinking, other,
-        sReads, sEdits, sShell, sWeb, sThinking, sOther
+        reads, edits, shell, thinking, control,
+        sReads, sEdits, sShell, sThinking, sControl
     ) {
         listOf(
             reads to sReads,
             edits to sEdits,
             shell to sShell,
-            web to sWeb,
             thinking to sThinking,
-            other to sOther,
+            control to sControl,
         ).filter { it.first > 0 }
             .joinToString(" · ") { it.second }
     }

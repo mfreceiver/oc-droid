@@ -50,6 +50,8 @@ object ToolCardClassifier {
         if (part.isPatch) return true
         if (!part.isTool) return false
         val tool = part.tool?.lowercase() ?: return false
+        // write_ocmar_review 不是文件编辑（无 path/files/patch），排除避免空 PatchCard。
+        if (tool == "write_ocmar_review") return false
         return writeFilePrefixes.any { tool.startsWith(it) }
     }
 
@@ -163,7 +165,7 @@ object ToolCardClassifier {
 /**
  * User-facing category for a classified tool run, used by [ToolCountSummary]
  * and [ToolCallFoldBar] to render a per-message tally / fold bar. The
- * declaration order IS the display order (READS·EDITS·SHELL·WEB·THINKING·OTHER);
+ * declaration order IS the display order (READS·EDITS·SHELL·THINKING·CONTROL);
  * use [TOOL_CATEGORY_DISPLAY_ORDER] for an explicit ordered list that does not
  * depend on [Enum.values] (so the FoldBar and ToolCountSummary share one
  * canonical sequence even if the enum is reordered).
@@ -172,12 +174,12 @@ object ToolCardClassifier {
  * sub-agent tasks, which render as their own bordered card and would
  * double-count the run).
  */
-internal enum class ToolCategory { READS, EDITS, SHELL, WEB, THINKING, OTHER }
+internal enum class ToolCategory { READS, EDITS, SHELL, THINKING, CONTROL }
 
 /**
  * Explicit, ordered display sequence for [ToolCategory], shared by
  * [ToolCallFoldBar] and [ToolCountSummaryText] so both render categories in the
- * same stable order (READS·EDITS·SHELL·WEB·THINKING·OTHER). Decoupled from
+ * same stable order (READS·EDITS·SHELL·THINKING·CONTROL). Decoupled from
  * [ToolCategory.values] to keep the order robust against accidental enum
  * reordering.
  */
@@ -185,9 +187,8 @@ internal val TOOL_CATEGORY_DISPLAY_ORDER: List<ToolCategory> = listOf(
     ToolCategory.READS,
     ToolCategory.EDITS,
     ToolCategory.SHELL,
-    ToolCategory.WEB,
     ToolCategory.THINKING,
-    ToolCategory.OTHER
+    ToolCategory.CONTROL
 )
 
 /**
@@ -208,13 +209,17 @@ internal fun ToolRenderItem.categoryCounts(): Map<ToolCategory, Int> = when (thi
         val t = part.tool?.lowercase() ?: ""
         val cat = when {
             t.startsWith("bash") || t.startsWith("terminal") ||
-                t.startsWith("cmd") || t.startsWith("shell") -> ToolCategory.SHELL
+                t.startsWith("cmd") || t.startsWith("shell") ||
+                t.startsWith("local_shell") -> ToolCategory.SHELL
+            t.startsWith("ast_grep_replace") -> ToolCategory.EDITS
             t.startsWith("webfetch") || t.startsWith("web_fetch") ||
                 t.startsWith("websearch") || t.startsWith("web_search") ||
                 t.startsWith("one-search") || t.startsWith("web-search-prime") ||
                 t.startsWith("web-reader") || t.startsWith("web_reader") ||
-                t.startsWith("gh_grep") -> ToolCategory.WEB
-            else -> ToolCategory.OTHER
+                t.startsWith("gh_grep") || t.startsWith("ast_grep_search") ||
+                t.startsWith("see_image") || t.startsWith("context7") ||
+                t.startsWith("file_search") -> ToolCategory.READS
+            else -> ToolCategory.CONTROL
         }
         mapOf(cat to 1)
     }
