@@ -4,14 +4,12 @@ import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.data.repository.ConnectionRepository
 import cn.vectory.ocdroid.data.repository.SessionRepository
+import cn.vectory.ocdroid.service.status.SlimStatusFetchCache
 import cn.vectory.ocdroid.ui.MainViewModelTimings
 import cn.vectory.ocdroid.ui.SharedStateStore
 import cn.vectory.ocdroid.util.SettingsManager
 import cn.vectory.ocdroid.di.AppLifecycleMonitor
 import cn.vectory.ocdroid.util.runSuspendCatching
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -92,6 +90,7 @@ class BackgroundUnreadPoller internal constructor(
     private val connectionRepository: ConnectionRepository,
     private val settingsManager: SettingsManager,
     private val store: SharedStateStore,
+    private val slimStatusFetchCache: SlimStatusFetchCache,
     private val clock: () -> Long,
     private val isBackground: () -> Boolean = { true },
     private val lifecycleGeneration: () -> Long = { 0L },
@@ -103,11 +102,13 @@ class BackgroundUnreadPoller internal constructor(
         settingsManager: SettingsManager,
         store: SharedStateStore,
         appLifecycleMonitor: AppLifecycleMonitor,
+        slimStatusFetchCache: SlimStatusFetchCache,
     ) : this(
         sessionRepository,
         connectionRepository,
         settingsManager,
         store,
+        slimStatusFetchCache,
         { System.currentTimeMillis() },
         { !appLifecycleMonitor.isInForeground.value },
         appLifecycleMonitor::currentLifecycleGeneration,
@@ -171,12 +172,13 @@ class BackgroundUnreadPoller internal constructor(
         val roots = sessions.filter { it.parentId == null }
         val hydration = loadCompleteSessionTrees(sessionRepository, roots, shouldContinue = ::identityValid)
         if (!identityValid()) return UnreadPollResult.Aborted
-        // T-R1 (slimapi R1): slim mode routes status through per-workdir slim
-        // endpoint (getSlimapiSessionsStatus) instead of legacy getSessionStatus;
-        // active-session ids are digest-relay-owned in slim mode (skip the
-        // legacy getActiveSessionIds, preserve store snapshot → null fallback).
+        // T-R1 (slimapi R1) / Slim P2: slim mode routes status through a single
+        // global call to getSlimapiSessionsStatus (via SlimStatusFetchCache)
+        // instead of legacy getSessionStatus; active-session ids are
+        // digest-relay-owned in slim mode (skip the legacy getActiveSessionIds,
+        // preserve store snapshot → null fallback).
         val statuses = if (connectionRepository.usesSlimStatusFanOut) {
-            loadSlimSessionStatus(sessions, hydration.childrenByParent)
+            loadSlimSessionStatus(sessions, hydration.childrenByParent, startHostId ?: "default")
                 .getOrElse { return UnreadPollResult.Aborted }
         } else {
             sessionRepository.getSessionStatus().getOrElse { return UnreadPollResult.Aborted }
@@ -309,26 +311,32 @@ class BackgroundUnreadPoller internal constructor(
     }
 
     /**
-     * T-R1 (slimapi R1): slim-mode per-workdir status fetch. Replaces the
-     * legacy [SessionRepository.getSessionStatus] bulk call — derives the
-     * distinct workdirs from the already-loaded sessions+children tree and
-     * issues one concurrent [SessionRepository.getSlimapiSessionsStatus]
-     * per directory. Fail-closed: any per-directory failure propagates as
-     * [Result.failure], matching the legacy fail-closed semantics.
+     * Slim P2: slim-mode global status fetch. The upstream `directory`
+     * parameter is a no-op — every [SessionRepository.getSlimapiSessionsStatus]
+     * call returns the SAME host-wide global map. Replaces the per-workdir
+     * fan-out with a SINGLE call through the shared background cache
+     * ([SlimStatusFetchCache]), deduplicating the concurrent 30s background
+     * poll from [StatusFetchService].
+     *
+     * Derives the directory set from the sessions+children tree (preserving
+     * per-directory ownership for downstream consumers). Empty set → empty
+     * result (no known workdirs yet — the digest relay + later polls cover
+     * status once sessions arrive). Fail-closed: any failure propagates as
+     * [Result.failure], matching the prior fail-closed semantics.
      */
     private suspend fun loadSlimSessionStatus(
         sessions: List<Session>,
         childrenByParent: Map<String, List<Session>>,
+        cacheKey: String,
     ): Result<Map<String, SessionStatus>> = runSuspendCatching {
         val directories = (sessions.asSequence() + childrenByParent.values.asSequence().flatten())
             .mapNotNull { it.directory.takeIf { d -> d.isNotBlank() } }
             .toSet()
         if (directories.isEmpty()) return@runSuspendCatching emptyMap()
-        coroutineScope {
-            val results = directories.map { dir ->
-                async { sessionRepository.getSlimapiSessionsStatus(dir) }
-            }.awaitAll()
-            buildMap { results.forEach { putAll(it.getOrThrow()) } }
-        }
+        // Single global call via shared background cache. Any single directory
+        // returns the host-wide map; the first is used as both the request
+        // directory and the cache scoping key.
+        slimStatusFetchCache.fetchGlobal(directories.first(), cacheKey)
+            .getOrThrow()
     }
 }
