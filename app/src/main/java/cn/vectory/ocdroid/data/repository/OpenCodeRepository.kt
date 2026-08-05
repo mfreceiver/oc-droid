@@ -296,6 +296,100 @@ class OpenCodeRepository @Inject constructor(
         internal val capturedClientBundle: ClientBundle? = null,
     )
 
+    // ── §B3-retirement: clean connection-stamp capture (Phase 3, Step 3.1) ────
+    //
+    // ConnectionCapture captures identityStore identity + epoch + ClientBundle
+    // generation + endpoint fingerprint so a stale async response is detected.
+    // This is the faithful 1:1 replacement of the retired slim-token shim
+    // (SlimCommitToken), which checked issuedReady + identityEpoch + identity +
+    // bundleGeneration + endpointFp.
+    //
+    // The generation + endpointFp checks are ESSENTIAL: call sites such as
+    // ConnectionBootstrapEngine.performAttempt and applySavedSettings call
+    // repository.configure(...) WITHOUT calling identityStore.beginReconfigure()
+    // first. configure() bumps ClientBundle.generation but does NOT bump the
+    // identityStore epoch. So a re-bootstrap can rotate the generation/endpoint
+    // while epoch+identity stay the same — and a guard that only checks
+    // epoch+identity would WRONGLY pass a stale response.
+
+    /**
+     * §B3-retirement: clean connection-stamp capture replacing the retired
+     * slim-token shim. Captures identityStore identity + epoch + ClientBundle
+     * generation + endpoint fingerprint so a stale async response (whose
+     * capture predates a host reconfigure or client-bundle rotation) is
+     * detected 1:1 matching the retired [SlimCommitToken] semantics.
+     *
+     * @property identity The [ConnectionIdentity] at capture time (null = unready).
+     * @property epoch The identityStore epoch at capture time.
+     * @property generation [ClientBundle.generation] at capture time (null if no bundle).
+     * @property endpointFp [ClientBundle.endpointFp] at capture time (null if no bundle).
+     */
+    internal data class ConnectionCapture(
+        val identity: ConnectionIdentity?,
+        val epoch: Long,
+        /** ClientBundle generation captured at the same instant (B3 retirement: faithful equivalent of the slim-token generation check). */
+        val generation: Long?,
+        /** Endpoint fingerprint captured from the same ClientBundle. */
+        val endpointFp: String?,
+    )
+
+    /** Capture the current connection identity + epoch + bundle generation + endpointFp (call BEFORE any suspend). */
+    internal fun captureConnection(): ConnectionCapture {
+        val cap = identityStoreOrFallback().capture()
+        val bundle = currentClientBundle()
+        return ConnectionCapture(
+            identity = cap.identity,
+            epoch = cap.epoch,
+            generation = bundle?.generation,
+            endpointFp = bundle?.endpointFp,
+        )
+    }
+
+    /**
+     * True iff no reconfigure has bumped the epoch/rotated the identity / rotated
+     * the ClientBundle generation or endpoint since [capture].
+     *
+     * Checks readiness (identity != null) + 4 fields (epoch, identity, generation,
+     * endpointFp) — mirrors the retired [isSlimCommitTokenCurrent] semantics 1:1.
+     */
+    internal fun isConnectionCaptureCurrent(capture: ConnectionCapture): Boolean {
+        val live = identityStoreOrFallback().capture()
+        val bundle = currentClientBundle()
+        // Readiness: a capture taken before any identity was bound (cold start /
+        // post-beginReconfigure null window) is NEVER current — mirrors the old
+        // issuedReady invariant.
+        if (capture.identity == null) return false
+        return live.epoch == capture.epoch &&
+            live.identity == capture.identity &&
+            bundle?.generation == capture.generation &&
+            bundle?.endpointFp == capture.endpointFp
+    }
+
+    /**
+     * Atomic commit gate: runs [commit] iff the connection is still at [capture]'s
+     * identity/epoch/generation/endpointFp. The generation + endpointFp checks run
+     * under the repository monitor (synchronized(this)) — the SAME monitor the
+     * retired [commitIfSlimTokenCurrent] used — then delegates to
+     * [ConnectionIdentityStore.commitIfCurrent] for the epoch + identity + commit
+     * under the identityStore lock, so a host reconfigure cannot slip between the
+     * generation check and the commit (TOCTOU closed).
+     */
+    internal fun commitIfConnectionCaptureCurrent(capture: ConnectionCapture, commit: () -> Unit): Boolean = synchronized(this) {
+        val bundle = currentClientBundle() ?: return false
+        // Readiness gate.
+        if (capture.identity == null) return false
+        // Generation + endpoint gate (under repo monitor, same as the retired shim).
+        if (capture.generation != bundle.generation) return false
+        if (capture.endpointFp != bundle.endpointFp) return false
+        // Epoch + identity gate + commit (under identityStore lock — TOCTOU-closed
+        // against beginReconfigure).
+        identityStoreOrFallback().commitIfCurrent(
+            identity = capture.identity,
+            epoch = capture.epoch,
+            commit = commit,
+        )
+    }
+
     // ── lite-v2-dev (plan §4.4): slim state-machine + incarnation 协议退役 ────
     //
     // 2B 删除了 slim state machine + reconfigure 方法群 + 嵌套异常类。
@@ -952,15 +1046,13 @@ class OpenCodeRepository @Inject constructor(
         sessionId: String,
         limit: Int?,
         before: String?,
-        token: SlimCommitToken,
-    ): Result<MessagesPage> = messageGateway.getMessagesPaged(sessionId, limit, before, token)
+    ): Result<MessagesPage> = messageGateway.getMessagesPaged(sessionId, limit, before)
 
     override suspend fun getMessagesPagedUnanchored(
         sessionId: String,
         limit: Int?,
         before: String?,
-        token: SlimCommitToken,
-    ): Result<MessagesPage> = messageGateway.getMessagesPagedUnanchored(sessionId, limit, before, token)
+    ): Result<MessagesPage> = messageGateway.getMessagesPagedUnanchored(sessionId, limit, before)
 
     override suspend fun probeLatestMessageId(sessionId: String): Result<String?> =
         messageGateway.probeLatestMessageId(sessionId)
@@ -1222,8 +1314,7 @@ class OpenCodeRepository @Inject constructor(
     override suspend fun expandMessagesFullBatch(
         sessionId: String,
         messageIds: Set<String>,
-        @Suppress("UNUSED_PARAMETER") token: SlimCommitToken?,
-    ): ExpandOutcome = messageGateway.expandMessagesFullBatch(sessionId, messageIds, token)
+    ): ExpandOutcome = messageGateway.expandMessagesFullBatch(sessionId, messageIds)
 
     /** §B1: extract Retry-After header value as capped ms (pure, no IO). */
     internal fun retryAfterHeaderToMs(header: String?): Long {
@@ -1286,15 +1377,13 @@ class OpenCodeRepository @Inject constructor(
 
     override suspend fun getSlimapiQuestions(
         directories: List<String>?,
-        token: SlimCommitToken,
     ): Result<SlimAggregationOutcome<SlimapiQuestionEntry>> =
-        interactionGateway.getSlimapiQuestions(directories, token)
+        interactionGateway.getSlimapiQuestions(directories)
 
     override suspend fun getSlimapiPermissions(
         directories: List<String>?,
-        token: SlimCommitToken,
     ): Result<SlimAggregationOutcome<SlimapiPermissionEntry>> =
-        interactionGateway.getSlimapiPermissions(directories, token)
+        interactionGateway.getSlimapiPermissions(directories)
 
     override suspend fun replySlimapiQuestion(
         questionId: String,
@@ -1363,8 +1452,7 @@ class OpenCodeRepository @Inject constructor(
         limit: Int,
         before: String?,
         @Suppress("UNUSED_PARAMETER") mode: String,
-        @Suppress("UNUSED_PARAMETER") token: SlimCommitToken,
-    ): Result<MessagesPage> = getMessagesPaged(sessionId, limit, before, token)
+    ): Result<MessagesPage> = getMessagesPaged(sessionId, limit, before)
 }
 
 // SlimAggregationOutcome, SlimColdStartSnapshot moved to their own files

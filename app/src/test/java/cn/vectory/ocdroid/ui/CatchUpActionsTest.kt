@@ -97,7 +97,7 @@ class CatchUpActionsTest {
         advanceUntilIdle()
 
         // No tail reload issued.
-        coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any(), any()) }
+        coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any()) }
         // Loading flag restored to false; no other state changes.
         assertFalse(slices.chat.value.isLoadingMessages)
         assertTrue(cachedWindows.isEmpty())
@@ -128,7 +128,7 @@ class CatchUpActionsTest {
             MessageWithParts(info = Message(id = "anchor", role = "assistant", time = Message.TimeInfo(created = 50L))),
             MessageWithParts(info = Message(id = "new1", role = "user", time = Message.TimeInfo(created = 100L))),
         )
-        coEvery { repository.getMessagesPaged("s1", any(), any(), any()) } returns Result.success(MessagesPage(fetched, nextCursor = null))
+        coEvery { repository.getMessagesPaged("s1", any(), any()) } returns Result.success(MessagesPage(fetched, nextCursor = null))
 
         launchCatchUp(scope, repository, slices, "s1", onCacheWindow = { sid, w -> cachedWindows += sid to w })
         advanceUntilIdle()
@@ -155,7 +155,7 @@ class CatchUpActionsTest {
         val fetched = (1..5).map { i ->
             MessageWithParts(info = Message(id = "new$i", role = "user", time = Message.TimeInfo(created = 100L + i)))
         }
-        coEvery { repository.getMessagesPaged("s1", any(), any(), any()) } returns Result.success(MessagesPage(fetched, nextCursor = "tailCursor"))
+        coEvery { repository.getMessagesPaged("s1", any(), any()) } returns Result.success(MessagesPage(fetched, nextCursor = "tailCursor"))
 
         launchCatchUp(
             scope = scope,
@@ -184,7 +184,7 @@ class CatchUpActionsTest {
             updatedAt = 200L,
         )
         val fetched = listOf(MessageWithParts(info = Message(id = "x", role = "user")))
-        coEvery { repository.getMessagesPaged("other", any(), any(), any()) } returns Result.success(MessagesPage(fetched, null))
+        coEvery { repository.getMessagesPaged("other", any(), any()) } returns Result.success(MessagesPage(fetched, null))
 
         launchCatchUp(scope, repository, slices, "other")
         advanceUntilIdle()
@@ -206,7 +206,7 @@ class CatchUpActionsTest {
             ok = false,
             httpStatus = 500,
         )
-        coEvery { repository.getMessagesPaged(any(), any(), any(), any()) } returns Result.failure(IllegalStateException("tail fail"))
+        coEvery { repository.getMessagesPaged(any(), any(), any()) } returns Result.failure(IllegalStateException("tail fail"))
 
         launchCatchUp(scope, repository, slices, "s1")
         advanceUntilIdle()
@@ -229,7 +229,7 @@ class CatchUpActionsTest {
             updatedAt = 200L,
         )
         val fetched = listOf(MessageWithParts(info = Message(id = "new1", role = "user")))
-        coEvery { repository.getMessagesPaged("s1", any(), any(), any()) } returns Result.success(MessagesPage(fetched, null))
+        coEvery { repository.getMessagesPaged("s1", any(), any()) } returns Result.success(MessagesPage(fetched, null))
 
         launchCatchUp(scope, repository, slices, "s1", onCacheWindow = { sid, w -> cachedWindows += sid to w })
         advanceUntilIdle()
@@ -258,7 +258,7 @@ class CatchUpActionsTest {
         advanceUntilIdle()
 
         coVerify(exactly = 0) { repository.probeLatestMessageIdForCurrent(any()) }
-        coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any(), any()) }
+        coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any()) }
     }
 
     // ── remove-message-persistence final-review M6: merge order/parts + onColdSnapshot ──
@@ -291,7 +291,7 @@ class CatchUpActionsTest {
             MessageWithParts(info = Message(id = "m_mid", role = "assistant", time = Message.TimeInfo(created = 50L)), parts = listOf(partNew)),
             MessageWithParts(info = Message(id = "m_new", role = "user", time = Message.TimeInfo(created = 100L)), parts = listOf(partNew2)),
         )
-        coEvery { repository.getMessagesPaged("s1", any(), any(), any()) } returns Result.success(MessagesPage(fetched, nextCursor = null))
+        coEvery { repository.getMessagesPaged("s1", any(), any()) } returns Result.success(MessagesPage(fetched, nextCursor = null))
 
         launchCatchUp(scope, repository, slices, "s1", onCacheWindow = { sid, w -> cachedWindows += sid to w })
         advanceUntilIdle()
@@ -329,7 +329,7 @@ class CatchUpActionsTest {
         advanceUntilIdle()
 
         assertEquals(listOf("s1"), snapshotted)
-        coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any(), any()) }
+        coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any()) }
     }
 
     @Test
@@ -342,7 +342,7 @@ class CatchUpActionsTest {
             updatedAt = 200L,
         )
         val fetched = listOf(MessageWithParts(info = Message(id = "new1", role = "user", time = Message.TimeInfo(created = 100L))))
-        coEvery { repository.getMessagesPaged("s1", any(), any(), any()) } returns Result.success(MessagesPage(fetched, nextCursor = null))
+        coEvery { repository.getMessagesPaged("s1", any(), any()) } returns Result.success(MessagesPage(fetched, nextCursor = null))
         val snapshotted = mutableListOf<String>()
 
         launchCatchUp(scope, repository, slices, "s1", onColdSnapshot = { snapshotted += it })
@@ -359,7 +359,7 @@ class CatchUpActionsTest {
             messageID = "server-new",
             updatedAt = 200L,
         )
-        coEvery { repository.getMessagesPaged("other", any(), any(), any()) } returns Result.success(
+        coEvery { repository.getMessagesPaged("other", any(), any()) } returns Result.success(
             MessagesPage(listOf(MessageWithParts(info = Message(id = "x", role = "user"))), nextCursor = null),
         )
         val snapshotted = mutableListOf<String>()
@@ -377,7 +377,7 @@ class CatchUpActionsTest {
             ok = false,
             httpStatus = 500,
         )
-        coEvery { repository.getMessagesPaged(any(), any(), any(), any()) } returns Result.failure(IllegalStateException("tail fail"))
+        coEvery { repository.getMessagesPaged(any(), any(), any()) } returns Result.failure(IllegalStateException("tail fail"))
         val snapshotted = mutableListOf<String>()
 
         launchCatchUp(scope, repository, slices, "s1", onColdSnapshot = { snapshotted += it })
@@ -581,8 +581,7 @@ class CatchUpActionsTest {
                     .setHeader("Content-Type", "application/json"),
             )
 
-            val token = realRepo.captureSlimCommitToken()
-            val expandResult = realRepo.expandMessagesFullBatch(sessionId = "s1", messageIds = setOf("m_full"), token = token)
+            val expandResult = realRepo.expandMessagesFullBatch(sessionId = "s1", messageIds = setOf("m_full"))
             assertTrue(
                 "expand must succeed. Actual: ${expandResult::class.simpleName} $expandResult",
                 expandResult is cn.vectory.ocdroid.data.repository.ExpandOutcome.Ok,

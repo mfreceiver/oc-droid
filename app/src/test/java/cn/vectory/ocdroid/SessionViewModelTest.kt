@@ -452,7 +452,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
         )
         // Messages for the (temporarily-absent) current session are reloaded
         // so the user keeps their context.
-        coVerify(atLeast = 1) { repository.getMessagesPaged("session-not-in-list", any(), any(), any()) }
+        coVerify(atLeast = 1) { repository.getMessagesPaged("session-not-in-list", any(), any()) }
     }
 
     @Test

@@ -230,10 +230,6 @@ class SlimLiveSidecarIntegrationTest {
             limit = 50,
             before = null,
             mode = "skeleton",
-            // §11.1 fix-8 P1-3: bumpBookmark parameter removed — the
-            // single-page fetch never bumps the slim SSE watermark
-            // (completeness proof belongs to the caller).
-            token = repository.captureSlimCommitToken(),
         )
         assertTrue("getSlimapiMessagesPage failed: ${result.exceptionOrNull()}", result.isSuccess)
         val page = result.getOrThrow()
@@ -269,7 +265,6 @@ class SlimLiveSidecarIntegrationTest {
         // This pins the reconciled behavior.
         val nullDirResult = repository.getSlimapiQuestions(
             directories = null,
-            token = repository.captureSlimCommitToken(),
         )
         assertTrue(
             "null directory must succeed (F1 aggregate) — got ${nullDirResult.exceptionOrNull()}",
@@ -309,7 +304,6 @@ class SlimLiveSidecarIntegrationTest {
         // for the full F1 rationale; parity with the questions path.
         val nullDirResult = repository.getSlimapiPermissions(
             directories = null,
-            token = repository.captureSlimCommitToken(),
         )
         assertTrue(
             "null directory must succeed (F1 aggregate) — got ${nullDirResult.exceptionOrNull()}",

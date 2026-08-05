@@ -36,11 +36,9 @@ interface InteractionRepository {
     ): Result<Unit>
     suspend fun getSlimapiQuestions(
         directories: List<String>? = null,
-        token: OpenCodeRepository.SlimCommitToken,
     ): Result<SlimAggregationOutcome<SlimapiQuestionEntry>>
     suspend fun getSlimapiPermissions(
         directories: List<String>? = null,
-        token: OpenCodeRepository.SlimCommitToken,
     ): Result<SlimAggregationOutcome<SlimapiPermissionEntry>>
     suspend fun replySlimapiQuestion(questionId: String, answers: List<List<String>>, routeToken: String?): Result<Unit>
     suspend fun rejectSlimapiQuestion(questionId: String, routeToken: String?): Result<Unit>

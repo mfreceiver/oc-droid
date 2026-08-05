@@ -98,7 +98,7 @@ class MessageLoaderBaselineTest {
             MessageWithParts(info = msg("mid1", created = 200L)),
             MessageWithParts(info = msg("mid2", role = "assistant", created = 300L)),
         )
-        coEvery { repository.getMessagesPaged("s1", any(), any(), any()) } returns Result.success(MessagesPage(fetched, null))
+        coEvery { repository.getMessagesPaged("s1", any(), any()) } returns Result.success(MessagesPage(fetched, null))
         stubTodos("s1")
         store.mutateChat {
             it.copy(currentSessionId = "s1", messages = listOf(olderLocal, newerLocal))
@@ -128,7 +128,7 @@ class MessageLoaderBaselineTest {
         // unanchored 抓取返回一条介于两者之间的消息，使得 oldest/newestFetchedCreated
         // 均有定义——从而 olderKept(清空) 与 newerKept(保留) 的分类都走实值分支。
         val fetched = listOf(MessageWithParts(info = msg("mid", created = 250L)))
-        coEvery { repository.getMessagesPagedUnanchored("s1", any(), any(), any()) } returns
+        coEvery { repository.getMessagesPagedUnanchored("s1", any(), any()) } returns
             Result.success(MessagesPage(fetched, null))
         stubTodos("s1")
         store.mutateChat {
@@ -165,7 +165,7 @@ class MessageLoaderBaselineTest {
         // 误判为 older 而塞到历史前端。
         val optimistic = msg("optimistic") // created = null
         val fetched = listOf(MessageWithParts(info = msg("server-msg", created = 200L)))
-        coEvery { repository.getMessagesPaged("s1", any(), any(), any()) } returns Result.success(MessagesPage(fetched, null))
+        coEvery { repository.getMessagesPaged("s1", any(), any()) } returns Result.success(MessagesPage(fetched, null))
         stubTodos("s1")
         store.mutateChat {
             it.copy(currentSessionId = "s1", messages = listOf(optimistic))

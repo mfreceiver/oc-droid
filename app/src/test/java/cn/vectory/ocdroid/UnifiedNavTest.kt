@@ -264,9 +264,9 @@ class UnifiedNavTest : MainViewModelTestBase() {
 
     /** Stub repository calls that navigateToChat's openForRoute path needs. */
     private fun coEverySafely() {
-        io.mockk.coEvery { repository.getMessagesPaged(any(), any(), any(), any()) } returns
+        io.mockk.coEvery { repository.getMessagesPaged(any(), any(), any()) } returns
             Result.success(cn.vectory.ocdroid.data.repository.MessagesPage(emptyList(), null))
-        io.mockk.coEvery { repository.getMessagesPagedUnanchored(any(), any(), any(), any()) } returns
+        io.mockk.coEvery { repository.getMessagesPagedUnanchored(any(), any(), any()) } returns
             Result.success(cn.vectory.ocdroid.data.repository.MessagesPage(emptyList(), null))
         io.mockk.coEvery { repository.getSessionTodos(any()) } returns Result.success(emptyList())
         io.mockk.coEvery { repository.getPendingQuestions(any()) } returns Result.success(emptyList())

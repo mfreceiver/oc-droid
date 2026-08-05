@@ -151,7 +151,7 @@ class RevertConversationTest : MainViewModelTestBase() {
         val reverted = Session(id = "s1", directory = "/reverted", revert = Session.RevertInfo("m1"))
         coEvery { repository.revertSession("s1", "m1", null) } returns Result.success(reverted)
         coEvery { repository.getSessions(any()) } returns Result.success(listOf(reverted))
-        coEvery { repository.getMessagesPaged(any(), any(), any(), any()) } returns Result.success(MessagesPage(emptyList(), null))
+        coEvery { repository.getMessagesPaged(any(), any(), any()) } returns Result.success(MessagesPage(emptyList(), null))
         val core = createCore()
         seedRevertableMessage(core, session = original, createdAt = 42L)
         core.writeComposer {

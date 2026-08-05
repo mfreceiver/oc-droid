@@ -261,7 +261,7 @@ class OrchestratorViewModelTest : MainViewModelTestBase() {
 
         assertEquals("Hello, world", chatVM.chatFlow.value.streamingPartTexts["part-1"])
         // No reload issued.
-        coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any(), any()) }
+        coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any()) }
     }
 
     @Test
@@ -412,7 +412,7 @@ class OrchestratorViewModelTest : MainViewModelTestBase() {
     @Test
     fun `handleSSEEvent part-created preserves streaming overlay and refreshes messages`() = runTest {
         val messages = listOf(MessageWithParts(info = Message(id = "a2", role = "assistant")))
-        coEvery { repository.getMessagesPaged("session-1", any(), any(), any()) } returns Result.success(MessagesPage(messages, null))
+        coEvery { repository.getMessagesPaged("session-1", any(), any()) } returns Result.success(MessagesPage(messages, null))
         val core = createCore()
         val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
@@ -491,7 +491,7 @@ class OrchestratorViewModelTest : MainViewModelTestBase() {
         // reload that reconciles against the now-persisted authoritative window
         // and clears the overlay (status is now idle, so the gated clear runs).
         val messages = listOf(MessageWithParts(info = Message(id = "a1", role = "assistant")))
-        coEvery { repository.getMessagesPaged("session-1", any(), any(), any()) } returns Result.success(MessagesPage(messages, null))
+        coEvery { repository.getMessagesPaged("session-1", any(), any()) } returns Result.success(MessagesPage(messages, null))
         val core = createCore()
         val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
@@ -537,7 +537,7 @@ class OrchestratorViewModelTest : MainViewModelTestBase() {
         assertTrue(chatVM.chatFlow.value.streamingPartTexts.isEmpty())
         assertNull(chatVM.chatFlow.value.streamingReasoningPart)
         // ...and a resetLimit reload was issued.
-        coVerify(atLeast = 1) { repository.getMessagesPaged("session-1", any(), any(), any()) }
+        coVerify(atLeast = 1) { repository.getMessagesPaged("session-1", any(), any()) }
     }
 
     @Test
@@ -583,7 +583,7 @@ class OrchestratorViewModelTest : MainViewModelTestBase() {
         val status = sessionVM.sessionListFlow.value.sessionStatuses["session-1"]
         assertNotNull(status)
         assertFalse(status!!.isBusy)
-        coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any(), any()) }
+        coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any()) }
     }
 
     @Test
@@ -848,7 +848,7 @@ class OrchestratorViewModelTest : MainViewModelTestBase() {
     @Test
     fun `handleSSEEvent message created refreshes messages for current session`() = runTest {
         val messages = listOf(MessageWithParts(info = Message(id = "m1", role = "assistant")))
-        coEvery { repository.getMessagesPaged("session-1", any(), any(), any()) } returns Result.success(MessagesPage(messages, null))
+        coEvery { repository.getMessagesPaged("session-1", any(), any()) } returns Result.success(MessagesPage(messages, null))
         coEvery { repository.getSessions(100) } returns Result.success(
             listOf(cn.vectory.ocdroid.data.model.Session(id = "session-1", directory = "/tmp/project"))
         )

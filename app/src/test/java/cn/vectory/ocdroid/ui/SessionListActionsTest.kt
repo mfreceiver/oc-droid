@@ -73,7 +73,13 @@ class SessionListActionsTest {
         emitted = mutableListOf()
         emit = EventEmitter { event -> emitted.add(event) }
         effects = SharedEffectBus()
-        // C-D3 token guards for slim standalone permission load.
+        // §B3-retirement: ConnectionCapture stubs for slim standalone permission load.
+        every { repository.isConnectionCaptureCurrent(any()) } returns true
+        every { repository.commitIfConnectionCaptureCurrent(any(), any()) } answers {
+            secondArg<() -> Unit>().invoke()
+            true
+        }
+        // C-D3 token guards (legacy, kept for callers still referencing them).
         every { repository.isSlimCommitTokenCurrent(any()) } returns true
         every { repository.commitIfSlimTokenCurrent(any(), any()) } answers {
             secondArg<() -> Unit>().invoke()
@@ -1819,7 +1825,7 @@ class SessionListActionsTest {
             sessionId = "s1",
             permission = "edit",
             routeToken = null)
-        coEvery { repository.getSlimapiPermissions(any(), any()) } returns Result.success(
+        coEvery { repository.getSlimapiPermissions(any()) } returns Result.success(
             cn.vectory.ocdroid.data.repository.SlimAggregationOutcome.Success(
                 items = listOf(entry),
                 authoritativeDirectories = null))
@@ -1841,6 +1847,11 @@ class SessionListActionsTest {
      * /slimapi/permissions starts → B's pendingPermissions + signal
      * must not be polluted by A's delayed response.
      *
+     * Binds identity A before the launch (so the capture is READY, not
+     * trivially rejected by the readiness gate), then binds identity B
+     * after the host switch — exercising the intended ready A → stale
+     * after reconfigure path.
+     *
      * Does NOT hand-force isSlimCommitTokenCurrent / commitIf false.
      */
     @Test
@@ -1854,6 +1865,15 @@ class SessionListActionsTest {
             realRepo.identityStore = cn.vectory.ocdroid.service.identity.ConnectionIdentityStore()
             val baseUrl = server.url("/").toString().trimEnd('/')
             realRepo.configure(baseUrl = baseUrl, slim = true)
+            // Bind identity A so the subsequent capture is READY (identity != null).
+            // Without this, the capture would be unready (identity=null) and the
+            // readiness gate would trivially reject it — this test specifically
+            // exercises the ready A → stale-after-reconfigure path.
+            realRepo.identityStore.bind(
+                profileId = "profile-a",
+                normalizedWorkdir = "/a",
+                endpointFp = baseUrl,
+            )
 
             val bSeed = PermissionRequest(
                 id = "p-b-seed",
@@ -1907,8 +1927,19 @@ class SessionListActionsTest {
                 "path must be standard permission endpoint: ${started!!.path}",
                 started.path!!.startsWith("/permission"))
 
-            // C-D3 rev-3: configure rotates the slim marker (purge window).
+            // §B3-retirement: beginReconfigure bumps the epoch (simulating a
+            // host profile reconfigure as production does) before configure
+            // publishes a fresh ClientBundle — the ConnectionCapture guard
+            // detects the stale epoch and drops the delayed response.
+            realRepo.identityStore.beginReconfigure()
             realRepo.configure(baseUrl = baseUrl, slim = true)
+            // Bind identity B for the new epoch — mirrors production: after
+            // configure settles, the new bootstrap binds a fresh identity.
+            realRepo.identityStore.bind(
+                profileId = "profile-b",
+                normalizedWorkdir = "/b",
+                endpointFp = baseUrl,
+            )
 
             kotlinx.coroutines.delay(800)
             collector.cancel()

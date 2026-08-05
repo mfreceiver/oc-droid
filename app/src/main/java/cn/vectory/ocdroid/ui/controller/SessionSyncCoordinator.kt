@@ -371,7 +371,6 @@ class SessionSyncCoordinator(
 
     internal fun requestDigestFullSweep(
         sessionId: String,
-        @Suppress("UNUSED_PARAMETER") token: OpenCodeRepository.SlimCommitToken,
         @Suppress("UNUSED_PARAMETER") expectedRouteInstance: Long,
     ) {
         skeletonReloadCoordinator?.submit(

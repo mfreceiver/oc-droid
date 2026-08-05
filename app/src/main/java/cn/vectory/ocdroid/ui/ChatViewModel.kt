@@ -622,11 +622,12 @@ class ChatViewModel @Inject constructor(
     fun expandParts(sessionId: String, parts: List<cn.vectory.ocdroid.data.model.Part>) {
         // P4: capture host identity ONCE (no TOCTOU).
         val capturedFp = core.currentProfileId()
-        // Capture both freshness tokens at invocation time. Completion must
-        // validate these captured values; re-reading either one would let an
+        // Capture route instance + connection epoch at invocation time. Completion
+        // must validate these captured values; re-reading either one would let an
         // old response be accepted under a newer host/client generation.
         val capturedRouteInstance = core.store.slices.routeInstanceFor(sessionId)
-        val capturedSlimToken = core.repository.captureSlimCommitToken()
+        // §B3-retirement: ConnectionCapture replaces the retired slim-token shim.
+        val capturedConnection = core.repository.captureConnection()
 
         viewModelScope.launch {
             // Step 2: single-read dispatch state (Main dispatcher — no suspension).
@@ -697,7 +698,7 @@ class ChatViewModel @Inject constructor(
             // P4: abort if identity changed during dispatch (before network call).
             if (core.store.chatFlow.value.currentSessionId != sessionId) return@launch
             if (core.currentProfileId() != capturedFp) return@launch
-            if (!core.repository.isSlimCommitTokenCurrent(capturedSlimToken)) return@launch
+            if (!core.repository.isConnectionCaptureCurrent(capturedConnection)) return@launch
 
             // Step 8: invoke usecase (non-mutating, CE discipline).
             val useCase = cn.vectory.ocdroid.ui.chat.ExpandPartsUseCase(core.repository)
@@ -705,7 +706,6 @@ class ChatViewModel @Inject constructor(
                 sessionId = sessionId,
                 local = local,
                 parts = partsToLoad,
-                token = capturedSlimToken,
             ).getOrElse {
                 // Diagnostic: usecase threw (NOT a normal Failed outcome —
                 // runSuspendCatching collapsed something unexpected, e.g.
@@ -724,7 +724,7 @@ class ChatViewModel @Inject constructor(
                 core.writeChat { current ->
                     if (current.currentSessionId != sessionId) return@writeChat current
                     if (core.currentProfileId() != capturedFp) return@writeChat current
-                    if (!core.repository.isSlimCommitTokenCurrent(capturedSlimToken)) return@writeChat current
+                    if (!core.repository.isConnectionCaptureCurrent(capturedConnection)) return@writeChat current
 
                     val updatedStates = current.partExpandStates.toMutableMap()
                     keysToLoad.forEach { key ->
@@ -748,7 +748,7 @@ class ChatViewModel @Inject constructor(
             // (state.update CAS loop), so concurrent SSE updates to other
             // owners are preserved — restores pre-Strategy-1 writeChat CAS.
             if (core.currentProfileId() != capturedFp) return@launch
-            if (!core.repository.isSlimCommitTokenCurrent(capturedSlimToken)) return@launch
+            if (!core.repository.isConnectionCaptureCurrent(capturedConnection)) return@launch
             core.store.dispatch(
                 AppAction.ExpandedPartsContentCommitted(
                     outcome = outcome,

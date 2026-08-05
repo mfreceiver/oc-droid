@@ -108,11 +108,13 @@ abstract class MainViewModelTestBase {
         // setModelForSession was removed here (those APIs were deleted).
 
         every { repository.connectSSE(any()) } returns emptyFlow()
-        // C-D3 token guard: relaxed mock's isSlimCommitTokenCurrent defaults
-        // to false (MockK Boolean default). Stub it so the coordinator's token
-        // path works. Do NOT stub captureSlimCommitToken explicitly — the
-        // relaxed mock auto-answers it, and explicit every blocks cause MockK
-        // tracking issues with verify(exactly = N) in downstream tests.
+        // §B3-retirement: ConnectionCapture guard stubs (replace the retired
+        // slim-token shim stubs). Do NOT stub captureConnection explicitly —
+        // the relaxed mock auto-answers it, and explicit every blocks cause
+        // MockK tracking issues with verify(exactly = N) in downstream tests.
+        every { repository.isConnectionCaptureCurrent(any()) } returns true
+        // C-D3 token guard (legacy, kept for callers still referencing it):
+        // relaxed mock's isSlimCommitTokenCurrent defaults to false.
         every { repository.isSlimCommitTokenCurrent(any()) } returns true
         // §rev-ds ISSUE 2: base test setup defaults to slim global question path.
         // Tests that exercise the legacy per-dir path must explicitly override
@@ -122,12 +124,12 @@ abstract class MainViewModelTestBase {
         coEvery { repository.getSessionsForDirectory(any(), any()) } returns Result.success(emptyList())
         coEvery { repository.getSessionStatus() } returns Result.success(emptyMap())
         coEvery { repository.getMessages(any(), any()) } returns Result.success(emptyList())
-        coEvery { repository.getMessagesPaged(any(), any(), any(), any()) } returns Result.success(MessagesPage(emptyList(), null))
+        coEvery { repository.getMessagesPaged(any(), any(), any()) } returns Result.success(MessagesPage(emptyList(), null))
         // §empty-window-fix: default stub for the unanchored cold-load path
         // (VerifyAndHydrate cold-load branch). Same empty-page default as the
         // anchored stub above so tests that don't care about the slim
         // watermark bypass still drive their coVerify targets.
-        coEvery { repository.getMessagesPagedUnanchored(any(), any(), any(), any()) } returns Result.success(MessagesPage(emptyList(), null))
+        coEvery { repository.getMessagesPagedUnanchored(any(), any(), any()) } returns Result.success(MessagesPage(emptyList(), null))
         coEvery { repository.getPendingPermissions() } returns Result.success(emptyList())
         coEvery { repository.getAgents() } returns Result.success(emptyList())
         coEvery { repository.getProviders() } returns Result.success(ProvidersResponse())

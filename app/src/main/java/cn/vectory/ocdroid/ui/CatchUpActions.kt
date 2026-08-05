@@ -118,7 +118,7 @@ internal fun launchCatchUp(
             return@launch
         }
 
-        repository.getMessagesPaged(sessionId, MainViewModelTimings.catchUpProbePageSize, before = null, token = repository.captureSlimCommitToken())
+        repository.getMessagesPaged(sessionId, MainViewModelTimings.catchUpProbePageSize, before = null)
             .onSuccess { page ->
                 // §history-load-fix: serialize the slice mutation per-session so a
                 // concurrent launchLoadMessages full-window replace or a

@@ -427,7 +427,7 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
     fun `editFromMessage happy path reverts and seeds draft`() = runTest {
         val reverted = Session(id = "s1", directory = "/x")
         coEvery { repository.revertSession(any(), any(), any()) } returns Result.success(reverted)
-        coEvery { repository.getMessagesPaged(any(), any(), any(), any()) } returns Result.success(MessagesPage(emptyList(), null))
+        coEvery { repository.getMessagesPaged(any(), any(), any()) } returns Result.success(MessagesPage(emptyList(), null))
         coEvery { repository.getSessionTodos(any()) } returns Result.success(emptyList())
         coEvery { repository.getSessions(any()) } returns Result.success(emptyList())
         coEvery { repository.getSessionStatus() } returns Result.success(emptyMap())
@@ -458,7 +458,7 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
     fun `editFromMessage reads session id from route param not lagging currentSessionId (B5)`() = runTest {
         val reverted = Session(id = "ses_route_current", directory = "/x")
         coEvery { repository.revertSession(any(), any(), any()) } returns Result.success(reverted)
-        coEvery { repository.getMessagesPaged(any(), any(), any(), any()) } returns Result.success(MessagesPage(emptyList(), null))
+        coEvery { repository.getMessagesPaged(any(), any(), any()) } returns Result.success(MessagesPage(emptyList(), null))
         coEvery { repository.getSessionTodos(any()) } returns Result.success(emptyList())
         coEvery { repository.getSessions(any()) } returns Result.success(emptyList())
         coEvery { repository.getSessionStatus() } returns Result.success(emptyMap())
@@ -578,7 +578,7 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
             cn.vectory.ocdroid.data.model.HealthResponse(healthy = true, version = "1.0"))
         // §sse-rest-fallback (TODO 2): refreshCurrentSession now re-fetches
         // UNANCHORED (forceInitialWindow=true → getMessagesPagedUnanchored).
-        coEvery { repository.getMessagesPagedUnanchored(any(), any(), any(), any()) } returns Result.success(
+        coEvery { repository.getMessagesPagedUnanchored(any(), any(), any()) } returns Result.success(
             MessagesPage(emptyList(), null))
         coEvery { repository.getSessionTodos(any()) } returns Result.success(emptyList())
         every { repository.connectSSE(any()) } returns kotlinx.coroutines.flow.emptyFlow()
@@ -630,13 +630,13 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
         vm.loadMoreMessages()
         advanceUntilIdle()
 
-        coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any(), any()) }
+        coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any()) }
     }
 
     @Test
     fun `loadMoreMessages happy path pages older messages`() = runTest {
         val msgs = listOf(MessageWithParts(info = Message(id = "old1", role = "user")))
-        coEvery { repository.getMessagesPaged(any(), any(), any(), any()) } returns Result.success(MessagesPage(msgs, "next"))
+        coEvery { repository.getMessagesPaged(any(), any(), any()) } returns Result.success(MessagesPage(msgs, "next"))
         val core = createCore()
         val vm = ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         core.writeChat { it.copy(currentSessionId = "s1", olderMessagesCursor = "current", hasMoreMessages = true) }
@@ -644,7 +644,7 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
         vm.loadMoreMessages()
         advanceUntilIdle()
 
-        coVerify { repository.getMessagesPaged("s1", any(), any(), any()) }
+        coVerify { repository.getMessagesPaged("s1", any(), any()) }
     }
 
     // ── sendMessage / loadMessages / accessors ──────────────────────────────
@@ -668,7 +668,7 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
 
     @Test
     fun `loadMessages single-arg overload defaults resetLimit to true`() = runTest {
-        coEvery { repository.getMessagesPaged(any(), any(), any(), any()) } returns Result.success(
+        coEvery { repository.getMessagesPaged(any(), any(), any()) } returns Result.success(
             MessagesPage(emptyList(), null))
         coEvery { repository.getSessionTodos(any()) } returns Result.success(emptyList())
         val core = createCore()
@@ -678,7 +678,7 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
         vm.loadMessages("s1")
         advanceUntilIdle()
 
-        coVerify { repository.getMessagesPaged("s1", any(), null, any()) }
+        coVerify { repository.getMessagesPaged("s1", any(), null) }
     }
 
     @Test

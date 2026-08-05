@@ -144,7 +144,6 @@ internal class InteractionGateway(
 
     suspend fun getSlimapiQuestions(
         directories: List<String>? = null,
-        token: OpenCodeRepository.SlimCommitToken,
     ): Result<SlimAggregationOutcome<SlimapiQuestionEntry>> = runSuspendCatching {
         val dir = directories?.firstOrNull()
         val items = api.getPendingQuestions(dir).map { q ->
@@ -162,7 +161,6 @@ internal class InteractionGateway(
 
     suspend fun getSlimapiPermissions(
         directories: List<String>? = null,
-        token: OpenCodeRepository.SlimCommitToken,
     ): Result<SlimAggregationOutcome<SlimapiPermissionEntry>> = runSuspendCatching {
         val items = api.getPendingPermissions().map { p ->
             SlimapiPermissionEntry(

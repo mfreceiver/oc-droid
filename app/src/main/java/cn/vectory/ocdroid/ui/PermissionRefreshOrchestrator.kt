@@ -66,10 +66,11 @@ internal object PermissionRefreshOrchestrator {
      * (the slim respond path cannot route it correctly — surfaces the issue
      * instead of silently degrading to the legacy endpoint).
      *
-     * C-D3 v2 §2.3: in slim mode, delegates to [launchLoadPendingPermissionsSlim]
-     * which captures ONE token before the network suspend + guards the slice /
-     * signal / UiEvent commits inside a single `commitIfSlimTokenCurrent` block.
-     * The legacy non-slim path is unchanged.
+     * §B3-retirement: in slim mode, delegates to [launchLoadPendingPermissionsSlim]
+     * which captures ONE [cn.vectory.ocdroid.data.repository.OpenCodeRepository.ConnectionCapture]
+     * before the network suspend + guards the slice / signal / UiEvent commits
+     * inside a single `commitIfConnectionCaptureCurrent` block. The legacy
+     * non-slim path is unchanged.
      */
     fun launchLoadPendingPermissions(
         scope: CoroutineScope,
@@ -150,11 +151,10 @@ internal object PermissionRefreshOrchestrator {
     }
 
     /**
-     * C-D3 v2 §2.3 / I-2 v2 §3.3: slim standalone permissions load via
-     * [OpenCodeRepository.getSlimapiPermissions]. Captures ONE token before
-     * the network suspend; guards the slice + signal + UiEvent commits
-     * inside a single `commitIfSlimTokenCurrent` atomic region. A stale
-     * result is a clean no-op (no slice mutation, no signal update, no toast).
+     * §B3-retirement: slim standalone permissions load via
+     * [OpenCodeRepository.getSlimapiPermissions]. Uses [ConnectionCapture] guard
+     * to detect stale responses after a host reconfigure. A stale result is a
+     * clean no-op (no slice mutation, no signal update, no toast).
      */
     private fun launchLoadPendingPermissionsSlim(
         scope: CoroutineScope,
@@ -163,29 +163,25 @@ internal object PermissionRefreshOrchestrator {
         effects: SharedEffectBus,
     ) {
         scope.launch {
-            // Standalone workflow entry: ONE capture before first suspend.
-            val token = repository.captureSlimCommitToken()
+            // §B3-retirement: ONE capture before first suspend.
+            val capture = repository.captureConnection()
 
             val startIds = slices.sessionList.value.pendingPermissions
                 .mapTo(mutableSetOf()) { it.id }
 
             val outcome = repository.getSlimapiPermissions(
                 directories = null,
-                token = token,
             ).getOrElse { error ->
-                if (error is OpenCodeRepository.StaleSlimCommitException) {
-                    return@launch
-                }
                 SlimAggregationOutcome.Failure(error.message)
             }
 
-            if (!repository.isSlimCommitTokenCurrent(token)) return@launch
+            if (!repository.isConnectionCaptureCurrent(capture)) return@launch
 
-            // C-D3 v2 §2.3: ALL slice + effect commits land inside ONE atomic
+            // §B3-retirement: ALL slice + effect commits land inside ONE atomic
             // gate so a host rotation between the network return and the slice
             // commit cannot write a stale permission list / signal under a
             // new host.
-            repository.commitIfSlimTokenCurrent(token) {
+            repository.commitIfConnectionCaptureCurrent(capture) {
                 val signal = aggregationSignal(outcome)
 
                 slices.mutateSessionList { current ->

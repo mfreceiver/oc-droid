@@ -146,9 +146,9 @@ internal fun launchLoadMessages(
         // empty UI window. Both methods return the same MessagesPage shape, so
         // the merge / cursor-seeding logic below is shared verbatim.
         var pageResult = if (forceInitialWindow) {
-            repository.getMessagesPagedUnanchored(sessionId, MainViewModelTimings.initialMessagePageSize, before = null, token = repository.captureSlimCommitToken())
+            repository.getMessagesPagedUnanchored(sessionId, MainViewModelTimings.initialMessagePageSize, before = null)
         } else {
-            repository.getMessagesPaged(sessionId, MainViewModelTimings.initialMessagePageSize, before = null, token = repository.captureSlimCommitToken())
+            repository.getMessagesPaged(sessionId, MainViewModelTimings.initialMessagePageSize, before = null)
         }
         // §11.1 fix-9 P0-7 (sse-sync-degradation-remediation.md P0-2):
         // SSE-off first-fetch retry. When the SSE transport is NOT live
@@ -184,7 +184,6 @@ internal fun launchLoadMessages(
                 sessionId,
                 MainViewModelTimings.initialMessagePageSize,
                 before = null,
-                token = repository.captureSlimCommitToken(),
             )
             // §fix-refresh-storm P0-1: the retry result ALSO needs a
             // CancellationException guard. The first-request guard above
@@ -728,7 +727,7 @@ internal fun launchLoadMoreMessages(
         // exit via a session-guarded finally (gpter 🟠 — don't clobber a new
         // session's flag).
         try {
-        repository.getMessagesPaged(sessionId, limit = MainViewModelTimings.historyMessagePageSize, before = cursor, token = repository.captureSlimCommitToken())
+        repository.getMessagesPaged(sessionId, limit = MainViewModelTimings.historyMessagePageSize, before = cursor)
             .onSuccess { page ->
                 // §history-load-fix: serialize the list mutation per-session so a
                 // concurrent launchLoadMessages full-window replace cannot tear

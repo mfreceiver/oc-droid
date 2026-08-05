@@ -326,7 +326,7 @@ class B2RouteWiringSequenceTest {
 
         val repo = mockk<OpenCodeRepository>(relaxed = true)
         coEvery {
-            repo.getMessagesPaged(eq("A"), any(), eq("c1"), any())
+            repo.getMessagesPaged(eq("A"), any(), eq("c1"))
         } returns Result.success(
             MessagesPage(
                 items = listOf(MessageWithParts(Message(id = "m0", sessionId = "A", role = "user"))),

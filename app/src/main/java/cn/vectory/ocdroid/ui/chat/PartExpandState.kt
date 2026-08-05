@@ -211,30 +211,20 @@ class ExpandPartsUseCase(
      *   `hasFull == true && omitted != null && messageId != null` are
      *   actually expanded; the rest are filtered out (caller leaves
      *   their state untouched).
+     *
+     * §B3-retirement: the slim-token shim has been retired. The [ConnectionCapture]
+     * guard is the caller's responsibility; this method no longer takes a token param.
      */
     suspend fun expandParts(
         sessionId: String,
         local: List<MessageWithParts>,
         parts: List<Part>,
-    ): Result<ExpandPartsOutcome> = expandPartsInternal(sessionId, local, parts, token = null)
-
-    /**
-     * Route-aware entry used by [cn.vectory.ocdroid.ui.ChatViewModel]. The
-     * caller captures the token before launching the network operation so the
-     * repository can bind the request to one client-bundle generation.
-     */
-    internal suspend fun expandParts(
-        sessionId: String,
-        local: List<MessageWithParts>,
-        parts: List<Part>,
-        token: OpenCodeRepository.SlimCommitToken,
-    ): Result<ExpandPartsOutcome> = expandPartsInternal(sessionId, local, parts, token)
+    ): Result<ExpandPartsOutcome> = expandPartsInternal(sessionId, local, parts)
 
     private suspend fun expandPartsInternal(
         sessionId: String,
         local: List<MessageWithParts>,
         parts: List<Part>,
-        token: OpenCodeRepository.SlimCommitToken?,
     ): Result<ExpandPartsOutcome> = runSuspendCatching {
         // Step 1: filter to eligible parts.
         val targets = parts.filter { it.hasFull == true && it.omitted != null && it.messageId != null }
@@ -255,11 +245,7 @@ class ExpandPartsUseCase(
         val requestedMsgIds: Set<String> = targets.mapTo(LinkedHashSet()) { it.messageId!! }
 
         // Step 3: T3 consume-only call.
-        val outcome = if (token == null) {
-            repository.expandMessagesFullBatch(sessionId, requestedMsgIds)
-        } else {
-            repository.expandMessagesFullBatch(sessionId, requestedMsgIds, token)
-        }
+        val outcome = repository.expandMessagesFullBatch(sessionId, requestedMsgIds)
 
         // Step 4: branch on outcome.
         when (outcome) {

@@ -180,7 +180,7 @@ class ChatViewModelTest : MainViewModelTestBase() {
                 )
             )
         )
-        coEvery { repository.getMessagesPaged("session-1", any(), any(), any()) } returns
+        coEvery { repository.getMessagesPaged("session-1", any(), any()) } returns
             Result.success(MessagesPage(messages, null))
 
         val core = createCore()
@@ -247,7 +247,7 @@ class ChatViewModelTest : MainViewModelTestBase() {
         // no-op but still observable via coVerify.
         coEvery { repository.getSessions(any()) } returns Result.success(emptyList())
         // The targeted message reload calls getMessagesPaged.
-        coEvery { repository.getMessagesPaged(any(), any(), any(), any()) } returns Result.success(
+        coEvery { repository.getMessagesPaged(any(), any(), any()) } returns Result.success(
             MessagesPage(items = emptyList(), nextCursor = null)
         )
 
@@ -266,7 +266,7 @@ class ChatViewModelTest : MainViewModelTestBase() {
         // getMessagesPaged). We only care about calls AFTER sendMessage.
         io.mockk.clearMocks(repository, answers = false, recordedCalls = true)
         coEvery { repository.getSessions(any()) } returns Result.success(emptyList())
-        coEvery { repository.getMessagesPaged(any(), any(), any(), any()) } returns Result.success(
+        coEvery { repository.getMessagesPaged(any(), any(), any()) } returns Result.success(
             MessagesPage(items = emptyList(), nextCursor = null)
         )
         composerVM.setInputText("hello")
@@ -279,7 +279,7 @@ class ChatViewModelTest : MainViewModelTestBase() {
         coVerify(exactly = 0) { repository.getSessions(cn.vectory.ocdroid.ui.MainViewModelTimings.sessionFullLoadLimit) }
         // (b) send DOES trigger the targeted message reload (the sole post-send
         //     fallback that must survive).
-        coVerify(atLeast = 1) { repository.getMessagesPaged("session-1", any(), any(), any()) }
+        coVerify(atLeast = 1) { repository.getMessagesPaged("session-1", any(), any()) }
     }
 
     @Test
@@ -499,7 +499,7 @@ class ChatViewModelTest : MainViewModelTestBase() {
         advanceUntilIdle()
 
         coVerify(exactly = 0) { repository.getSessions(any()) }
-        coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any(), any()) }
+        coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any()) }
         // Order unchanged: no refresh-driven reordering
         assertEquals("session-1", sessionVM.sessionListFlow.value.sessions.first().id)
     }
@@ -537,7 +537,7 @@ class ChatViewModelTest : MainViewModelTestBase() {
         advanceUntilIdle()
 
         coVerify(exactly = 0) { repository.getSessions(any()) }
-        coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any(), any()) }
+        coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any()) }
     }
 
     @Test
@@ -593,7 +593,7 @@ class ChatViewModelTest : MainViewModelTestBase() {
         // ...parts preserved in partsByMessage...
         assertEquals(listOf(part), chatVM.chatFlow.value.partsByMessage["m1"])
         // ...and no reload issued.
-        coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any(), any()) }
+        coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any()) }
     }
 
     @Test
@@ -636,7 +636,7 @@ class ChatViewModelTest : MainViewModelTestBase() {
 
         assertEquals(1, chatVM.chatFlow.value.messages.size)
         assertEquals("other", chatVM.chatFlow.value.messages[0].id)
-        coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any(), any()) }
+        coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any()) }
     }
 
     @Test
@@ -701,7 +701,7 @@ class ChatViewModelTest : MainViewModelTestBase() {
             chatVM.chatFlow.value.currentSessionId
         )
         // The strongest no-op signal: no message fetch was dispatched at all.
-        coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any(), any()) }
+        coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any()) }
     }
 
     // §chat-ux-batch T8 (B3): the two former tests
@@ -820,7 +820,7 @@ class ChatViewModelTest : MainViewModelTestBase() {
         // 因此 reset=false reload 后 streamingReasoningPart 保持不变。
         val reasoningPart = Part(id = "part-1", messageId = "a2", sessionId = "session-1", type = "reasoning", text = "old-persisted")
         val messages = listOf(MessageWithParts(info = Message(id = "a2", role = "assistant"), parts = listOf(reasoningPart)))
-        coEvery { repository.getMessagesPaged("session-1", any(), any(), any()) } returns Result.success(MessagesPage(messages, null))
+        coEvery { repository.getMessagesPaged("session-1", any(), any()) } returns Result.success(MessagesPage(messages, null))
         val core = createCore()
         val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
@@ -854,7 +854,7 @@ class ChatViewModelTest : MainViewModelTestBase() {
         // 过滤解决。
         val reasoningPart = Part(id = "part-1", messageId = "a2", sessionId = "session-1", type = "reasoning", text = "old")
         val messages = listOf(MessageWithParts(info = Message(id = "a2", role = "assistant"), parts = listOf(reasoningPart)))
-        coEvery { repository.getMessagesPaged("session-1", any(), any(), any()) } returns Result.success(MessagesPage(messages, null))
+        coEvery { repository.getMessagesPaged("session-1", any(), any()) } returns Result.success(MessagesPage(messages, null))
         val core = createCore()
         val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
         val sessionVM = cn.vectory.ocdroid.ui.SessionViewModel(core)
@@ -1249,7 +1249,7 @@ class ChatViewModelTest : MainViewModelTestBase() {
         // else the partial overlay would mask the finalized part.text in the UI.
         val finalizedPart = Part(id = "p1", messageId = "m1", sessionId = "session-1", type = "text", text = "Hello world!")
         val messages = listOf(MessageWithParts(info = Message(id = "m1", role = "assistant"), parts = listOf(finalizedPart)))
-        coEvery { repository.getMessagesPaged("session-1", any(), any(), any()) } returns Result.success(MessagesPage(messages, null))
+        coEvery { repository.getMessagesPaged("session-1", any(), any()) } returns Result.success(MessagesPage(messages, null))
 
         val core = createCore()
         val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
@@ -1375,9 +1375,9 @@ class ChatViewModelTest : MainViewModelTestBase() {
         // cache this would silently lose m_a2.
         val aMessagesRefresh = listOf(MessageWithParts(info = Message(id = "m_a1", role = "user")))
 
-        coEvery { repository.getMessagesPaged("session-A", any(), any(), any()) } returns
+        coEvery { repository.getMessagesPaged("session-A", any(), any()) } returns
             Result.success(MessagesPage(aMessagesInitial, null))
-        coEvery { repository.getMessagesPaged("session-B", any(), any(), any()) } returns
+        coEvery { repository.getMessagesPaged("session-B", any(), any()) } returns
             Result.success(MessagesPage(bMessages, null))
         // §empty-window-fix: the INITIAL open of each session is now a
         // VerifyAndHydrate cold-load (nothing cached → peek MISS) which routes
@@ -1385,9 +1385,9 @@ class ChatViewModelTest : MainViewModelTestBase() {
         // switch-BACK to A is a cache HIT (non-empty resident window) → still
         // uses getMessagesPaged(resetLimit=false); that path's stubs (incl.
         // the re-mock at ~line 1103) are unchanged.
-        coEvery { repository.getMessagesPagedUnanchored("session-A", any(), any(), any()) } returns
+        coEvery { repository.getMessagesPagedUnanchored("session-A", any(), any()) } returns
             Result.success(MessagesPage(aMessagesInitial, null))
-        coEvery { repository.getMessagesPagedUnanchored("session-B", any(), any(), any()) } returns
+        coEvery { repository.getMessagesPagedUnanchored("session-B", any(), any()) } returns
             Result.success(MessagesPage(bMessages, null))
 
         val core = createCore()
@@ -1428,7 +1428,7 @@ class ChatViewModelTest : MainViewModelTestBase() {
 
         // Re-mock A: now the server "returns" only m_a1. Without the cache
         // this would silently lose m_a2.
-        coEvery { repository.getMessagesPaged("session-A", any(), any(), any()) } returns
+        coEvery { repository.getMessagesPaged("session-A", any(), any()) } returns
             Result.success(MessagesPage(aMessagesRefresh, null))
 
         // Switch back to A — cached [m_a1, m_a2] should be restored and the
@@ -1463,14 +1463,14 @@ class ChatViewModelTest : MainViewModelTestBase() {
         // mockk: when multiple stubs match a call, the LAST registered wins.
         // Register the generic fallback FIRST so the specific stubs below
         // override it (otherwise `any()` would shadow both specific matchers).
-        coEvery { repository.getMessagesPaged("session-A", any(), any(), any()) } returns
+        coEvery { repository.getMessagesPaged("session-A", any(), any()) } returns
             Result.success(MessagesPage(aLatest, "cursor-1"))
         // Initial open uses before=null.
-        coEvery { repository.getMessagesPaged("session-A", any(), null, any()) } returns
+        coEvery { repository.getMessagesPaged("session-A", any(), null) } returns
             Result.success(MessagesPage(aLatest, "cursor-1"))
-        coEvery { repository.getMessagesPaged("session-A", any(), "cursor-1", any()) } returns
+        coEvery { repository.getMessagesPaged("session-A", any(), "cursor-1") } returns
             Result.success(MessagesPage(aOlder, null))
-        coEvery { repository.getMessagesPaged("session-B", any(), any(), any()) } returns
+        coEvery { repository.getMessagesPaged("session-B", any(), any()) } returns
             Result.success(MessagesPage(emptyList(), null))
         // §empty-window-fix: the INITIAL open of A is a VerifyAndHydrate
         // cold-load (nothing cached → peek MISS) which routes through
@@ -1479,9 +1479,9 @@ class ChatViewModelTest : MainViewModelTestBase() {
         // stay on getMessagesPaged — those stubs above are unchanged. Mirror
         // the same registration order (generic fallback first, specific
         // before=null last) so the specific stub wins for A's initial open.
-        coEvery { repository.getMessagesPagedUnanchored(any(), any(), any(), any()) } returns
+        coEvery { repository.getMessagesPagedUnanchored(any(), any(), any()) } returns
             Result.success(MessagesPage(aLatest, "cursor-1"))
-        coEvery { repository.getMessagesPagedUnanchored("session-A", any(), null, any()) } returns
+        coEvery { repository.getMessagesPagedUnanchored("session-A", any(), null) } returns
             Result.success(MessagesPage(aLatest, "cursor-1"))
 
         val core = createCore()
@@ -1548,7 +1548,7 @@ class ChatViewModelTest : MainViewModelTestBase() {
         }
         // Each session returns one unique message so we can verify eviction.
         for (i in 1..13) {
-            coEvery { repository.getMessagesPaged("session-$i", any(), any(), any()) } returns
+            coEvery { repository.getMessagesPaged("session-$i", any(), any()) } returns
                 Result.success(
                     MessagesPage(
                         listOf(MessageWithParts(info = Message(id = "m-$i", role = "user"))),
@@ -1597,7 +1597,7 @@ class ChatViewModelTest : MainViewModelTestBase() {
             it.copy(sessions = (1..13).map { i -> Session(id = "session-$i", directory = "/tmp/$i") })
         }
         for (i in 1..13) {
-            coEvery { repository.getMessagesPaged("session-$i", any(), any(), any()) } returns
+            coEvery { repository.getMessagesPaged("session-$i", any(), any()) } returns
                 Result.success(MessagesPage(emptyList(), null))
         }
 
@@ -1646,12 +1646,12 @@ class ChatViewModelTest : MainViewModelTestBase() {
         chatVM.refreshCurrentSession()
         advanceUntilIdle()
 
-        coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any(), any()) }
+        coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any()) }
     }
 
     @Test
     fun `refreshCurrentSession is a no-op while a load is in flight`() = runTest {
-        coEvery { repository.getMessagesPaged("session-A", any(), any(), any()) } coAnswers {
+        coEvery { repository.getMessagesPaged("session-A", any(), any()) } coAnswers {
             delay(100)
             Result.success(MessagesPage(emptyList(), null))
         }
@@ -1671,7 +1671,7 @@ class ChatViewModelTest : MainViewModelTestBase() {
         chatVM.refreshCurrentSession()
         advanceUntilIdle()
 
-        coVerify(exactly = 1) { repository.getMessagesPaged("session-A", any(), any(), any()) }
+        coVerify(exactly = 1) { repository.getMessagesPaged("session-A", any(), any()) }
     }
 
     @Test
@@ -1687,7 +1687,7 @@ class ChatViewModelTest : MainViewModelTestBase() {
         val fresh = MessageWithParts(info = Message(id = "m_fresh", role = "assistant"))
         // §sse-rest-fallback (TODO 2): refreshCurrentSession now re-fetches
         // UNANCHORED (forceInitialWindow=true → getMessagesPagedUnanchored).
-        coEvery { repository.getMessagesPagedUnanchored("session-A", any(), any(), any()) } returns
+        coEvery { repository.getMessagesPagedUnanchored("session-A", any(), any()) } returns
             Result.success(MessagesPage(listOf(fresh), null))
         // §4-A: refreshCurrentSession now also forces a testConnection probe
         // (so a stale red badge recovers). Mock checkHealth as a FAILURE so the
@@ -1719,7 +1719,7 @@ class ChatViewModelTest : MainViewModelTestBase() {
 
         // §sse-rest-fallback (TODO 2): refreshCurrentSession re-fetches UNANCHORED
         // (staleNotice = SSE-disconnect recovery) — NOT the anchored /since path.
-        coVerify(atLeast = 1) { repository.getMessagesPagedUnanchored("session-A", any(), any(), any()) }
+        coVerify(atLeast = 1) { repository.getMessagesPagedUnanchored("session-A", any(), any()) }
         val ids = chatVM.chatFlow.value.messages.map { it.id }
         assertFalse("Older message is dropped on cold-start refresh (got $ids)", ids.contains("m_older"))
         assertTrue("Fresh latest window is loaded (got $ids)", ids.contains("m_fresh"))
@@ -1745,7 +1745,7 @@ class ChatViewModelTest : MainViewModelTestBase() {
         val fresh = MessageWithParts(info = Message(id = "m_fresh", role = "assistant"))
         // §sse-rest-fallback (TODO 2): refreshCurrentSession now re-fetches
         // UNANCHORED (forceInitialWindow=true → getMessagesPagedUnanchored).
-        coEvery { repository.getMessagesPagedUnanchored("session-A", any(), any(), any()) } returns
+        coEvery { repository.getMessagesPagedUnanchored("session-A", any(), any()) } returns
             Result.success(MessagesPage(listOf(fresh), null))
         // Healthy probe → onSettled(true). loadInitialData sub-callers are
         // stubbed in setUp (getAgents/getProviders/getCommands/etc.).
@@ -1783,7 +1783,7 @@ class ChatViewModelTest : MainViewModelTestBase() {
         // even if the corresponding message.updated event missed the local
         // view. The overlay-clear in launchLoadMessages is gated on !busy, so
         // this reload does NOT disrupt any in-flight streaming overlay.
-        coEvery { repository.getMessagesPaged("session-1", any(), any(), any()) } returns
+        coEvery { repository.getMessagesPaged("session-1", any(), any()) } returns
             Result.success(MessagesPage(emptyList(), null))
         val core = createCore()
         val chatVM = cn.vectory.ocdroid.ui.ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
@@ -1819,7 +1819,7 @@ class ChatViewModelTest : MainViewModelTestBase() {
         assertNotNull(status)
         assertTrue(status!!.isBusy)
         // ...and a reload was issued for the current session.
-        coVerify(atLeast = 1) { repository.getMessagesPaged("session-1", any(), any(), any()) }
+        coVerify(atLeast = 1) { repository.getMessagesPaged("session-1", any(), any()) }
 
         // (b) A busy transition on a NON-current session only updates the
         // status badge — it must NOT trigger a reload (the user is not viewing
@@ -1856,7 +1856,7 @@ class ChatViewModelTest : MainViewModelTestBase() {
         val statusOther = sessionVM2.sessionListFlow.value.sessionStatuses["session-other"]
         assertNotNull(statusOther)
         assertTrue(statusOther!!.isBusy)
-        coVerify(exactly = 0) { repository.getMessagesPaged("session-other", any(), any(), any()) }
+        coVerify(exactly = 0) { repository.getMessagesPaged("session-other", any(), any()) }
     }
 
     @Test
@@ -1941,7 +1941,7 @@ class ChatViewModelTest : MainViewModelTestBase() {
         assertEquals("msg_new", afterPatch[1].id)
 
         // Patch/insert are pure state updates — no reload issued for either case.
-        coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any(), any()) }
+        coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any()) }
     }
 
 }

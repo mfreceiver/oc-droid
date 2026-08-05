@@ -5,7 +5,6 @@ import cn.vectory.ocdroid.data.model.MessageWithParts
 import cn.vectory.ocdroid.data.repository.ClientBundle
 import cn.vectory.ocdroid.data.repository.ExpandOutcome
 import cn.vectory.ocdroid.data.repository.MessagesPage
-import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.data.repository.ProbeResult
 import cn.vectory.ocdroid.data.repository.SLIMAPI_LOCAL_HISTORY_BOUND
 import cn.vectory.ocdroid.data.repository.ServerCompatProfile
@@ -51,7 +50,6 @@ internal class MessageGateway(
         sessionId: String,
         limit: Int? = null,
         before: String? = null,
-        token: OpenCodeRepository.SlimCommitToken,
     ): Result<MessagesPage> {
         if (serverCompatProfile.slimConnection) {
             return runSuspendCatching {
@@ -70,7 +68,6 @@ internal class MessageGateway(
         sessionId: String,
         limit: Int? = null,
         before: String? = null,
-        token: OpenCodeRepository.SlimCommitToken,
     ): Result<MessagesPage> {
         if (serverCompatProfile.slimConnection) {
             return runSuspendCatching {
@@ -172,7 +169,6 @@ internal class MessageGateway(
     suspend fun expandMessagesFullBatch(
         sessionId: String,
         messageIds: Set<String>,
-        token: OpenCodeRepository.SlimCommitToken? = null,
     ): ExpandOutcome {
         val items = mutableListOf<MessageWithParts>()
         val failures = mutableListOf<ExpandOutcome.MessageFailure>()
@@ -225,8 +221,7 @@ internal class MessageGateway(
         limit: Int,
         before: String?,
         mode: String = "skeleton",
-        token: OpenCodeRepository.SlimCommitToken? = null,
-    ): Result<MessagesPage> = getMessagesPaged(sessionId, limit, before, token ?: OpenCodeRepository.SlimCommitToken(marker = Any(), issuedReady = false))
+    ): Result<MessagesPage> = getMessagesPaged(sessionId, limit, before)
 
     // ── Private helpers ─────────────────────────────────────────────────
 

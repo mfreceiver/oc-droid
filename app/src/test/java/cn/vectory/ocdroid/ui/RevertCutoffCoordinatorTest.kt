@@ -28,7 +28,7 @@ class RevertCutoffCoordinatorTest : MainViewModelTestBase() {
         val gate = CompletableDeferred<Result<MessagesPage>>()
         var profile = HostProfile.defaultDirect("http://a")
         every { hostProfileStore.currentProfile() } answers { profile }
-        coEvery { repository.getMessagesPaged("s1", any(), any(), any()) } coAnswers { gate.await() }
+        coEvery { repository.getMessagesPaged("s1", any(), any()) } coAnswers { gate.await() }
         val core = createCore()
         seedPending(core, "m1")
 
@@ -43,7 +43,7 @@ class RevertCutoffCoordinatorTest : MainViewModelTestBase() {
 
     @Test
     fun `pending fetch resolves instead of remaining pending`() = runTest {
-        coEvery { repository.getMessagesPaged("s1", any(), any(), any()) } returns Result.success(page("m1", 10L))
+        coEvery { repository.getMessagesPaged("s1", any(), any()) } returns Result.success(page("m1", 10L))
         val core = createCore()
         seedPending(core, "m1")
 
@@ -57,21 +57,21 @@ class RevertCutoffCoordinatorTest : MainViewModelTestBase() {
         val core = createCore()
         seedPending(core, "m1")
         core.writeChat { it.copy(revertCutoffs = mapOf("s1" to RevertCutoff("s1", "m1", RevertCutoffState.Failed))) }
-        coEvery { repository.getMessagesPaged("s1", any(), any(), any()) } returns Result.success(page("m1", 10L))
+        coEvery { repository.getMessagesPaged("s1", any(), any()) } returns Result.success(page("m1", 10L))
         val coordinator = RevertCutoffCoordinator(core)
 
         coordinator.ensure("s1", "m1")
-        coVerify(exactly = 0) { repository.getMessagesPaged("s1", any(), any(), any()) }
+        coVerify(exactly = 0) { repository.getMessagesPaged("s1", any(), any()) }
         coordinator.ensure("s1", "m1", retryFailed = true)
 
-        coVerify(exactly = 1) { repository.getMessagesPaged("s1", any(), any(), any()) }
+        coVerify(exactly = 1) { repository.getMessagesPaged("s1", any(), any()) }
         assertEquals(RevertCutoffState.Resolved(10L), core.chatFlow.value.revertCutoffs["s1"]?.state)
     }
 
     @Test
     fun `changed revert target drops stale fetch completion`() = runTest {
         val gate = CompletableDeferred<Result<MessagesPage>>()
-        coEvery { repository.getMessagesPaged("s1", any(), any(), any()) } coAnswers { gate.await() }
+        coEvery { repository.getMessagesPaged("s1", any(), any()) } coAnswers { gate.await() }
         val core = createCore()
         seedPending(core, "m1")
 

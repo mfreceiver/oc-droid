@@ -72,10 +72,6 @@ class OpenCodeRepositorySlimapiEndpointsTest {
         MockResponse().setResponseCode(code).setBody(body)
             .setHeader("Content-Type", "application/json")
 
-    /** C-D3: leaf APIs require an explicit entry token (no default recapture). */
-    private fun token(): OpenCodeRepository.SlimCommitToken =
-        repository.captureSlimCommitToken()
-
     @Before
     fun setup() = runBlocking {
         DebugLog.clear()
@@ -529,7 +525,7 @@ class OpenCodeRepositorySlimapiEndpointsTest {
         server.enqueue(jsonResponse(json.encodeToString(skeletons(1..2))))
 
         val repo0 = makeRepository(slim = true)
-        val result = repo0.getMessagesPaged("fresh-sess", limit = null, before = null, token = repo0.captureSlimCommitToken())
+        val result = repo0.getMessagesPaged("fresh-sess", limit = null, before = null)
 
         assertTrue(
             "P0-6: slim getMessagesPaged drains + commits successfully",
@@ -556,7 +552,7 @@ class OpenCodeRepositorySlimapiEndpointsTest {
         )
 
         val repo2 = makeRepository(slim = false)
-        val result = repo2.getMessagesPaged("sess-1", limit = 20, before = "prev", token = repo2.captureSlimCommitToken())
+        val result = repo2.getMessagesPaged("sess-1", limit = 20, before = "prev")
 
         assertTrue(result.isSuccess)
         val page = result.getOrThrow()
@@ -688,7 +684,7 @@ class OpenCodeRepositorySlimapiEndpointsTest {
         )
 
         val repo3 = makeRepository(slim = true)
-        val result = repo3.getMessagesPaged("sess-1", limit = null, before = null, token = repo3.captureSlimCommitToken())
+        val result = repo3.getMessagesPaged("sess-1", limit = null, before = null)
 
         assertTrue(
             "P0-6: empty body terminal page MUST succeed (got ${result.exceptionOrNull()})",
@@ -714,7 +710,7 @@ class OpenCodeRepositorySlimapiEndpointsTest {
         server.enqueue(jsonResponse(json.encodeToString(skeletons(1..3))))
 
         val repo1 = makeRepository(slim = true)
-        val result = repo1.getMessagesPaged("sess-1", limit = null, before = null, token = repo1.captureSlimCommitToken())
+        val result = repo1.getMessagesPaged("sess-1", limit = null, before = null)
 
         assertTrue(
             "P0-6: terminal drain MUST succeed (got ${result.exceptionOrNull()})",
@@ -973,7 +969,7 @@ class OpenCodeRepositorySlimapiEndpointsTest {
                 .setHeader("Content-Type", "application/json")
                 .setHeader("X-Next-Cursor", "cur")
         )
-        legacyRepo.getMessagesPaged("sess-1", limit = 20, before = null, token = legacyRepo.captureSlimCommitToken())
+        legacyRepo.getMessagesPaged("sess-1", limit = 20, before = null)
         val msgsReq = server.takeRequest()
         assertTrue(
             "legacy getMessagesPaged path MUST NOT start with /slimapi/: ${msgsReq.path}",
@@ -1041,7 +1037,7 @@ class OpenCodeRepositorySlimapiEndpointsTest {
                 .setHeader("X-Next-Cursor", "next-cursor-abc"),
         )
 
-        val result = repo.getMessagesPaged("sess-1", limit = 30, before = "cursor-prev", token = repo.captureSlimCommitToken())
+        val result = repo.getMessagesPaged("sess-1", limit = 30, before = "cursor-prev")
 
         assertTrue("load-more MUST succeed (got ${result.exceptionOrNull()})", result.isSuccess)
         val page = result.getOrThrow()
@@ -1066,7 +1062,7 @@ class OpenCodeRepositorySlimapiEndpointsTest {
         // The UI limit=5 IS forwarded as the query param.
         server.enqueue(jsonResponse(json.encodeToString(skeletons(1..5))))
 
-        val result = repo.getMessagesPaged("sess-1", limit = 5, before = null, token = repo.captureSlimCommitToken())
+        val result = repo.getMessagesPaged("sess-1", limit = 5, before = null)
 
         assertTrue("initial fetch MUST succeed (got ${result.exceptionOrNull()})", result.isSuccess)
         val request = server.takeRequest()
@@ -1084,13 +1080,13 @@ class OpenCodeRepositorySlimapiEndpointsTest {
             jsonResponse(json.encodeToString(listOf(skeleton("m1", 1000L), skeleton("m2", 2000L))))
                 .setHeader("X-Next-Cursor", "cursor-2"),
         )
-        val page1 = repo.getMessagesPaged("sess-1", limit = 30, before = "cursor-1", token = repo.captureSlimCommitToken()).getOrThrow()
+        val page1 = repo.getMessagesPaged("sess-1", limit = 30, before = "cursor-1").getOrThrow()
         assertEquals(listOf("m1", "m2"), page1.items.map { it.info.id })
         assertEquals("cursor-2", page1.nextCursor)
 
         // Page 2 (before=cursor-2): items m3, nextCursor=null (end).
         server.enqueue(jsonResponse(json.encodeToString(listOf(skeleton("m3", 3000L)))))
-        val page2 = repo.getMessagesPaged("sess-1", limit = 30, before = page1.nextCursor, token = repo.captureSlimCommitToken()).getOrThrow()
+        val page2 = repo.getMessagesPaged("sess-1", limit = 30, before = page1.nextCursor).getOrThrow()
         assertEquals(listOf("m3"), page2.items.map { it.info.id })
         assertEquals(null, page2.nextCursor)
     }

@@ -120,7 +120,7 @@ class AppCoreDispatcherTest : MainViewModelTestBase() {
 
     @Test
     fun `dispatchSessionEffect handles LoadMessages and fetches the page`() = runTest {
-        coEvery { repository.getMessagesPaged(any(), any(), any(), any()) } returns
+        coEvery { repository.getMessagesPaged(any(), any(), any()) } returns
             Result.success(MessagesPage(emptyList(), null))
         val core = newCore()
 
@@ -128,7 +128,7 @@ class AppCoreDispatcherTest : MainViewModelTestBase() {
         advanceUntilIdle()
 
         assertTrue(handled)
-        coVerify { repository.getMessagesPaged("sess-A", any(), any(), any()) }
+        coVerify { repository.getMessagesPaged("sess-A", any(), any()) }
     }
 
     @Test
@@ -699,7 +699,7 @@ class AppCoreDispatcherTest : MainViewModelTestBase() {
         )
         // C2 tail: loadMessages fired after the hydrate.
         io.mockk.coVerify(atLeast = 1) {
-            repository.getMessagesPaged(any(), any(), any(), any())
+            repository.getMessagesPaged(any(), any(), any())
         }
     }
 
@@ -731,7 +731,7 @@ class AppCoreDispatcherTest : MainViewModelTestBase() {
         // cold-load path now routes through getMessagesPagedUnanchored (the
         // UNANCHORED slim fetch that bypasses a stale watermark).
         io.mockk.coVerify(atLeast = 1) {
-            repository.getMessagesPagedUnanchored(any(), any(), any(), any())
+            repository.getMessagesPagedUnanchored(any(), any(), any())
         }
     }
 
@@ -765,7 +765,7 @@ class AppCoreDispatcherTest : MainViewModelTestBase() {
         // The anchored path (getMessagesPaged) returns empty — the bug
         // scenario. This is the default mock, restated for clarity.
         io.mockk.coEvery {
-            repository.getMessagesPaged(any(), any(), any(), any())
+            repository.getMessagesPaged(any(), any(), any())
         } returns Result.success(MessagesPage(emptyList(), null))
         // The UNANCHORED path returns real messages — the fix.
         val coldMsg = cn.vectory.ocdroid.data.model.Message(id = "server-m1", role = "user")
@@ -774,7 +774,7 @@ class AppCoreDispatcherTest : MainViewModelTestBase() {
             parts = emptyList(),
         )
         io.mockk.coEvery {
-            repository.getMessagesPagedUnanchored(any(), any(), any(), any())
+            repository.getMessagesPagedUnanchored(any(), any(), any())
         } returns Result.success(MessagesPage(listOf(coldMsgWithParts), null))
 
         c.dispatchSessionEffect(
@@ -794,12 +794,12 @@ class AppCoreDispatcherTest : MainViewModelTestBase() {
         // anchored getMessagesPaged — that path returns empty under a stale
         // watermark and is the root cause).
         io.mockk.coVerify(atLeast = 1) {
-            repository.getMessagesPagedUnanchored(any(), any(), any(), any())
+            repository.getMessagesPagedUnanchored(any(), any(), any())
         }
         // The anchored getMessagesPaged must NOT be called for the cold-load
         // path — the empty window is treated as a miss, not a hit-with-refresh.
         io.mockk.coVerify(exactly = 0) {
-            repository.getMessagesPaged(any(), any(), any(), any())
+            repository.getMessagesPaged(any(), any(), any())
         }
     }
 
@@ -834,7 +834,7 @@ class AppCoreDispatcherTest : MainViewModelTestBase() {
         )
         // loadMessages never ran (entry guard returned before it).
         io.mockk.coVerify(exactly = 0) {
-            repository.getMessagesPaged(any(), any(), any(), any())
+            repository.getMessagesPaged(any(), any(), any())
         }
     }
 
@@ -870,7 +870,7 @@ class AppCoreDispatcherTest : MainViewModelTestBase() {
             c.store.chatFlow.value.messages.isEmpty(),
         )
         io.mockk.coVerify(exactly = 0) {
-            repository.getMessagesPaged(any(), any(), any(), any())
+            repository.getMessagesPaged(any(), any(), any())
         }
     }
 

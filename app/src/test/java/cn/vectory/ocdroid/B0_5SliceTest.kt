@@ -70,7 +70,7 @@ class B0_5SliceTest : MainViewModelTestBase() {
         seedSession("ses_A")
 
         // Stub non-empty page.
-        coEvery { repository.getMessagesPagedUnanchored(any(), any(), any(), any()) } returns
+        coEvery { repository.getMessagesPagedUnanchored(any(), any(), any()) } returns
             Result.success(page("m1"))
 
         // First nav-A.
@@ -121,7 +121,7 @@ class B0_5SliceTest : MainViewModelTestBase() {
         val req2 = CompletableDeferred<Result<MessagesPage>>()
         var callCount = 0
 
-        coEvery { repository.getMessagesPagedUnanchored(any(), any(), any(), any()) } coAnswers {
+        coEvery { repository.getMessagesPagedUnanchored(any(), any(), any()) } coAnswers {
             callCount++
             when (callCount) {
                 1 -> req1.await()   // req-1: first nav-A (T1), held
@@ -174,7 +174,7 @@ class B0_5SliceTest : MainViewModelTestBase() {
         val req1 = CompletableDeferred<Result<MessagesPage>>()
         var callCount = 0
 
-        coEvery { repository.getMessagesPagedUnanchored(any(), any(), any(), any()) } coAnswers {
+        coEvery { repository.getMessagesPagedUnanchored(any(), any(), any()) } coAnswers {
             callCount++
             when (callCount) {
                 1 -> req1.await()  // req-1: held (will fail)
@@ -287,7 +287,7 @@ class B0_5SliceTest : MainViewModelTestBase() {
         val vm = OrchestratorViewModel(core)
         seedSession("ses_A")
 
-        coEvery { repository.getMessagesPagedUnanchored(any(), any(), any(), any()) } returns
+        coEvery { repository.getMessagesPagedUnanchored(any(), any(), any()) } returns
             Result.success(MessagesPage(emptyList(), null))
 
         vm.navigateToChat("ses_A")
@@ -308,7 +308,7 @@ class B0_5SliceTest : MainViewModelTestBase() {
         val vm = OrchestratorViewModel(core)
         seedSession("ses_A")
 
-        coEvery { repository.getMessagesPagedUnanchored(any(), any(), any(), any()) } returns
+        coEvery { repository.getMessagesPagedUnanchored(any(), any(), any()) } returns
             Result.success(page("m1"))
 
         // navigateToChat is synchronous — mutateState mints the token
