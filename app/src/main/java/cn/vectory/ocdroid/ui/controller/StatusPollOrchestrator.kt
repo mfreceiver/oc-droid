@@ -27,6 +27,16 @@ import kotlinx.coroutines.launch
  * 🔴 EPOCH-ORDER landmine is preserved verbatim inside [launchLoadSessionStatus]:
  * the slim SWEEP short-circuit MUST execute BEFORE
  * `statusLoadEpoch.incrementAndGet()` (see the in-method comment for the full rationale).
+ *
+ * §Wave2.3 nit#2 — DI deferral note (verified, NOT migrated):
+ * The `repository` param is typed [OpenCodeRepository] (concrete), but the method set
+ * actually touched here is interface-clean — `usesSlimStatusFanOut` (ConnectionRepository)
+ * + `getSessionStatus` / `getActiveSessionIds` / `getSlimapiSessionsStatus` (SessionRepository),
+ * i.e. a dual (Connection + Session) seam would suffice. Migration is DEFERRED: these are
+ * per-call params threaded in by RefreshOrchestrator (which itself holds OCR concrete and is
+ * transitively blocked by the slim-token shim via launchLoadMessages / launchCatchUp). Narrowing
+ * the param type here would force a dual-param split at every caller now, before the caller chain
+ * is unblocked. Revisit after B3 (slim-token retirement) — see oracle wave2-3 §3.4.
  */
 internal object StatusPollOrchestrator {
 
