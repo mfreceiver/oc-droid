@@ -335,8 +335,12 @@ class BackgroundUnreadPoller internal constructor(
             .toSet()
         if (directories.isEmpty()) return@runSuspendCatching emptyMap()
         // Single global call via shared background cache. Any single directory
-        // returns the host-wide map; the first is used as both the request
-        // directory and the cache scoping key.
+        // returns the host-wide map (upstream `directory` is a no-op);
+        // `directories.first()` is the request param ONLY. The cache scoping
+        // key is the caller-supplied `cacheKey` (hostProfileId) — it MUST match
+        // StatusFetchService's key so the two background loops share one cache
+        // slot. Do NOT use the directory as the key: that was the f3df423a bug
+        // (dir-vs-hostId mismatch silently disabled cross-loop dedup).
         slimStatusFetchCache.fetchGlobal(directories.first(), cacheKey)
             .getOrThrow()
     }
