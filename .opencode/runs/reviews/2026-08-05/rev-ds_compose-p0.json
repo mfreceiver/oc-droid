@@ -1,0 +1,68 @@
+{
+  "bundle_id": "compose-p0-2026-08-05",
+  "reviewer": "rev-ds",
+  "scope": "main...feature/compose-p0 (4 commits, 4 test files)",
+  "verdict": "APPROVE_WITH_NITS",
+  "completion_assessment": "P0-PARTIAL",
+  "dimensions": {
+    "correctness": {
+      "rating": "YELLOW",
+      "findings": [
+        "RED (file-level) — ChatMessageContentRememberTest.kt (16 cases, 731 lines): tests are self-authored replicas of the source remember blocks, NOT the production code. The remember(...) blocks at ChatMessageContent.kt:114 (messages), :148 (staleQuestionPartKeys), :192 (reversedMessages) are re-implemented inline in the test with a counter; no production composable is invoked (only the pure helpers filterBeforeRevert / injectMetadataMarkers / computeFilteredReversedMessages / isStaleQuestionPart / isStaleRunningPart run inside the replica body). A dropped/added key dimension in ChatMessageContent.kt would NOT fail any of these tests — the KDoc claim (lines 36-38) 'a dropped/added key dimension in the source immediately fails the corresponding test' is false. Contrast with the template ChatRenderPipelineComposeTest.kt which calls the REAL rememberRenderPipeline. The counter-inside-remember mechanism itself is sound (remember bodies re-execute only on key change — proven by the 2 'does NOT recompute' negative tests at :194 and :680, and the M3 set-equality test at :396 which correctly relies on structural Map.keys equality), so the replicas are internally consistent — but they pin the test's own copy of the contract, not the source's, so the oracle's '少一维 → 渲染陈旧' blind spot is documented, not instrumented.",
+        "ChatScaffoldSaveableTest.kt:84-92 — negative control deleted and the KDoc justification is logically flawed. The pre-tap gate (assertCountEquals(1), :230) only rules out a sticky-default false positive; it does NOT rule out a vacuous emulateSaveAndRestore cycle. If the cycle is a no-op, the sheet stays visible post-restore because showSessionPicker was never reset — count=2 passes even if the flag were plain remember. The template ScrollManagerSaveableTest.kt:72-75/115-121 treats a plain-remember reset as mandatory proof the cycle ran. Practical risk is low (framework API + template proves the environment), but the test as written cannot distinguish saveable-restored from cycle-noop.",
+        "ScrollManagerEffectTest.kt:114-117 — KDoc mechanism claim '(c) new controller[0] instance (fresh remember for plain flags)' is factually wrong: plain remember() retains state across recomposition (same MutableState instances are reused), so the post-switch reset of navFabVisible/navJumping/pendingRestoreSession is done by the LaunchedEffect(sessionId) body (ScrollManager.kt:210-214), not by fresh remember slots. The assertions are still correct — deleting the effect body leaves the probed mutations in place and the test fails; the followBottom=true negative control (:150-157) genuinely pins the saveable boundary — but the documented mechanism misleads.",
+        "ScrollManagerEffectTest.kt:281 — mainClock.advanceTimeBy(3001) genuinely drives delay(3000) under Robolectric. The KDoc (:234-247) honestly documents the uncertainty. Nit: the assertion only pins 'auto-hide fires within 3001ms' — a delay(100) regression would still pass (duration not pinned tightly).",
+        "ChatScrollEffectsTest.kt — fake-green audit passed. Every re-fire test's phase-2 coVerify(atLeast=1) requires a NEW mocked call recorded after clearMocks; a dropped key dimension => no re-fire => assertion fails (genuine). clearMocks(listState, answers=false, childMocks=false) at :630 correctly preserves the totalItemsCount=5 stub so RSE phase 2's guard does not short-circuit. CVSE tests use full clearMocks(listState) safely because the non-streaming body never reads layoutInfo. The followBottom/navFabVisible assertions in USCE tests 1-3 are weak (values already at defaults) but the consumeScrollRequest coVerify is the real fire-detector. USCE Restore branch body (resolveRestoreIndex path) is not exercised.",
+        "SharedFlow timing in RSE test: MutableSharedFlow(replay=0, extraBufferCapacity=1) + tryEmit before collector subscription silently drops the value; empirically stable behind waitForIdle, but a latent flake source on loaded CI. Failure mode is loud (asserts fail), not green."
+      ]
+    },
+    "coverage": {
+      "rating": "YELLOW",
+      "findings": [
+        "Oracle §2.2 #2 (ChatScrollEffects key tuples) — CLOSED. All 5 CVSE key dims + both restore guards; all 3 USCE dims; RSE orchestratorVM identity. Dropping any dimension fails its test.",
+        "Oracle §2.2 #3 (ScrollManager effect timing) — CLOSED for the oracle's stated P0-3 asks: session-reset fires on sessionId change + does NOT over-fire on recomposition, navFabTick 3s auto-hide with real clock advance, null-session guards, followBottom saveable boundary via negative control. Direction/bottom-track effect BODIES remain uncovered (KDoc honest: needs a live LazyColumn scroll) — acceptable per oracle's own P0-3 scope.",
+        "Oracle §2.2 #1 (ChatScaffold saveable flags) — PARTIAL. showSessionPicker slot positionality is genuinely pinned via real UI gesture + StateRestorationTester. showAgentPicker/showModelPicker/pendingWorkdirPick AND chatBodySaveableHolder positionality remain open. The KDoc scoping is honest but oracle P0-1 budgeted all 4 flags — P0-1 not fully delivered.",
+        "Oracle §2.2 #5 (ChatMessageContent remember chains) — PARTIAL. The M3 set-equality case is present and mechanically correct, and all 3 remember key tuples are pinned as documented contracts — but replica-bound: source-side drift is undetected, so this blind spot is only documented.",
+        "Oracle §2.2 #4 (§R-1 expand-key handoff) — NOT covered; correctly out of scope (explicit P1).",
+        "Net: 2 of 5 oracle blind spots fully closed (ChatScrollEffects key tuples, ScrollManager timing), 2 partially closed (ChatScaffold flags, ChatMessageContent remembers), 1 explicitly deferred (§R-1)."
+      ]
+    },
+    "pattern": {
+      "rating": "GREEN",
+      "findings": [
+        "All 4 files carry the template annotations: @RunWith(RobolectricTestRunner::class) + @Config(sdk = [34], application = android.app.Application::class).",
+        "Correct tool split per template: runAndroidComposeUiTest for saveable/timing vs createComposeRule for recompose-driven.",
+        "No Thread.sleep anywhere; only 'androidTest' occurrence is a KDoc comment.",
+        "Failure messages are exemplary — cite exact key tuples, the mutation performed, and the regression scenario each assertion guards.",
+        "Deviation: ChatMessageContentRememberTest does NOT follow the template's core idiom (calling the REAL production composable) — it re-implements the remember blocks. This is the single significant pattern deviation.",
+        "Minor: ScrollManagerEffectTest uses mainClock.advanceTimeBy directly without asserting autoAdvance state — works empirically, slightly framework-version-sensitive."
+      ]
+    },
+    "integration": {
+      "rating": "GREEN",
+      "findings": [
+        "All 4 files under app/src/test/java/cn/vectory/ocdroid/ui/chat/ (NOT androidTest/) — all enter check.sh.",
+        "All APIs used resolve under testImplementation — no instrumentation-only API.",
+        "ChatScaffoldSaveableTest uses MainViewModelTestBase.newCore() + internal AppCore.writeChat/writeSessionList (same module) — resolves in JVM tests.",
+        "Orchestrator-verified: ./scripts/check.sh exit 0 (3m49s, full suite incl. detekt + testDebugUnitTest)."
+      ]
+    }
+  },
+  "must_fix": [],
+  "nits": [
+    "ChatMessageContentRememberTest.kt:36-38 — KDoc overclaims source-drift detection. Either extract the 3 remember blocks into internal @Composable testable functions (production refactor, then test the real ones), or reword the KDoc to 'reference-contract pinning + pure-chain exercise' so the team does not rely on it for source key-tuple regressions.",
+    "ChatScaffoldSaveableTest.kt — add a negative control proving the save+restore cycle ran, or explicitly document the vacuous-cycle caveat.",
+    "ChatScaffoldSaveableTest.kt:236 — .onFirst() relies on undocumented tree order. Failure mode is loud (click misses → sheet never opens → count stays 1 → assert fails), not silent, but a testTag on the ChatTopBar title would make it robust.",
+    "ScrollManagerEffectTest.kt:114-117 — fix the '(c) fresh remember' mechanism comment; the reset is effect-driven, not slot-driven.",
+    "ChatScrollEffectsTest.kt — consider a USCE Restore-branch case (resolveRestoreIndex path) and a CVSE atBottom=false (isStreaming, firstVisibleItemIndex>0) case for completeness.",
+    "ChatScrollEffectsTest.kt — MutableSharedFlow(replay=0, extraBufferCapacity=1) tryEmit drops when the collector is not yet subscribed; replay=1 would harden it.",
+    "ScrollManagerEffectTest.kt — optionally pin the 3s duration tighter (advance 2999ms → still visible, 3001ms → hidden).",
+    "ChatScaffoldSaveableTest.kt — consider filing the 3 remaining flags + chatBodySaveableHolder as a tracked follow-up item."
+  ],
+  "summary": "The bundle delivers genuine regression protection for the two highest-ROI oracle blind spots — ChatScrollEffects key tuples and ScrollManager effect timing — with exemplary failure messages and mostly honest gap documentation; check.sh integration is clean. However P0 is only partially closed: ChatScaffoldSaveableTest pins 1 of 4 saveable flags and lacks the template's negative-control proof that the restore cycle actually ran, and ChatMessageContentRememberTest (16 cases, the largest file) tests self-authored replicas rather than the production remembers, so source-side key-tuple drift would not be detected despite the KDoc's claim. No blocking defects; the nits above should be addressed before the bundle is relied on as the P0-1/P0-4 defense line.",
+  "uncertain": [
+    "ChatScaffoldSaveableTest vacuous-cycle: whether emulateSaveAndRestore genuinely applies restored state for THIS ChatScaffold composition is unproven by the test itself (no negative control).",
+    "ChatMessageContentRememberTest source-binding: whether a future refactor touching ChatMessageContent.kt key tuples would be noticed via code review of the stale replica — process risk.",
+    "RobolectricMainTestClock driving Handler-posted delay(3000): mechanism inferred from empirical green + framework knowledge."
+  ]
+}

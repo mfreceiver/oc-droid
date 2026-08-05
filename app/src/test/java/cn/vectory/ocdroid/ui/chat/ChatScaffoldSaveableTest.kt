@@ -81,14 +81,19 @@ import cn.vectory.ocdroid.ui.SettingsViewModel
  * - `pendingWorkdirPick` (drawer ≥2-workdirs path — needs multiple connected
  *   workdirs set up in the store, a separate test surface).
  *
- * **Negative control** (plain `remember` reset): `showTodoDialog` is toggled
- * via the overflow menu's Todo entry, also behind the untagged DropdownMenu.
- * The negative-control assertion from the framework-vacuous test 3 (deleted)
- * is now intrinsic to the save+restore mechanism tested by Approach A: if
- * the cycle did not actually run, the SessionPickerSheet would still be
- * rendered by chance (initial state) — but the pre-condition assertion
- * (`onNodeWithText("Recent sessions").assertDoesNotExist()` before tap)
- * ensures the cycle is the ONLY reason the sheet could be present post-restore.
+ * **Negative control caveat** (rev-ds §correctness YELLOW): this test does
+ * NOT include an inline negative control proving the emulateSaveAndRestore
+ * cycle actually applied restored state. The count-based gate
+ * (`assertCountEquals(1)` before tap) only rules out a sticky-default false
+ * positive; it does NOT rule out a vacuous cycle — if the cycle were a
+ * no-op, `assertCountEquals(2)` would still pass because showSessionPicker
+ * was never reset. The cycle's correctness is trusted from the framework
+ * API plus the [ScrollManagerSaveableTest] template, whose plain-remember
+ * negative control (lines 72-75 / 115-121) PROVES the environment runs a
+ * real save+restore. Hardening this test to carry its own inline negative
+ * control would require driving a plain-remember flag (e.g. showTodoDialog
+ * via the overflow menu), which is currently untagged-brittle (same gap as
+ * the 3 remaining flags below).
  *
  * Closing the remaining 3 flags requires either production testTags or
  * instrumentation tests (androidTest, not check.sh).

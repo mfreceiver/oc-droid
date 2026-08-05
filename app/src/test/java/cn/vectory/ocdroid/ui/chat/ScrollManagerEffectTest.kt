@@ -112,9 +112,16 @@ class ScrollManagerEffectTest {
             }
 
             // Switch sessionId — this triggers:
-            //   a) new rememberSaveable slots (listState, followBottom re-init)
-            //   b) new LaunchedEffect(sessionId) — fires session-reset body
-            //   c) new controller[0] instance (fresh remember for plain flags)
+            //   a) new rememberSaveable slots (listState, followBottom re-init
+            //      to defaults: the saveable key changed)
+            //   b) new LaunchedEffect(sessionId) — re-fires the session-reset
+            //      body, which resets navFabVisible/navJumping/
+            //      pendingRestoreSession to their defaults (ScrollManager.kt:210-214).
+            //      NOTE (rev-ds §correctness): plain remember() RETAINS its
+            //      MutableState across recomposition (same instances reused),
+            //      so the reset asserted below is EFFECT-DRIVEN (the
+            //      LaunchedEffect body), NOT slot-driven. Deleting that body
+            //      would leave the probed mutations in place and fail this test.
             runOnIdle { sessionId = "s2" }
             waitForIdle()
 

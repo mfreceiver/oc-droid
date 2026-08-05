@@ -31,11 +31,26 @@ import org.robolectric.annotation.Config
 /**
  * §remember-key regression tests for [cn.vectory.ocdroid.ui.chat.ChatMessageContent].
  *
- * Pins the key-tuple contracts of three [remember] blocks inside [ChatMessageList]
- * that had zero test coverage despite complex key dependencies. Each test drives
- * the REAL [remember] via a tiny inline @Composable wrapper — not a mock or
- * pure-function isolation — so a dropped/added key dimension in the source
- * immediately fails the corresponding test.
+ * Reference-contract pinning of the key-tuple contracts for three [remember]
+ * blocks inside [ChatMessageList] that had zero test coverage despite complex
+ * key dependencies.
+ *
+ * NOTE (rev-ds §correctness YELLOW): these tests drive a SELF-AUTHORED REPLICA
+ * of each remember block (same key tuple + the REAL pure helpers
+ * filterBeforeRevert / injectMetadataMarkers / computeFilteredReversedMessages
+ * / isStaleQuestionPart / isStaleRunningPart), NOT the production
+ * [ChatMessageList] composable itself. The counter-inside-remember mechanism
+ * is sound (remember bodies re-execute only on key change — proven by the
+ * negative tests at the bottom of each section), so each replica genuinely
+ * pins its key-tuple SEMANTICS and exercises the pure chain. BUT a source-side
+ * key-tuple change in ChatMessageContent.kt would NOT fail these tests unless
+ * this replica is kept in sync.
+ *
+ * To close the source-drift gap: extract the 3 remember blocks into internal
+ * @Composable testable functions and test the real ones (like
+ * ChatRenderPipelineComposeTest tests rememberRenderPipeline directly). Until
+ * then, treat this file as reference-contract documentation + pure-chain
+ * exercise, NOT automated source-drift detection.
  *
  * Strategy: a counter INSIDE the remember body increments only when the keys
  * cause re-execution. Mutating a key dimension must increment the counter;
