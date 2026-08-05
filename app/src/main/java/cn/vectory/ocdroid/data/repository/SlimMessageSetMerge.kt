@@ -94,6 +94,7 @@ private fun mergeSameMessageWithConflict(
         // Keep the authoritative entry; the caller keeps dirty=true so a
         // later reconcile re-fetches to resolve the divergence. The wire
         // model has no part revision, so a part-level authoritative merge
-        // is deferred to phase B.
+        // is deferred to a future part-revision merge pass (NOT the
+        // repository-interface "Phase B" — this is a wire-merge concern).
     }
 }

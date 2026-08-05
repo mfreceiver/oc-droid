@@ -3,8 +3,16 @@ package cn.vectory.ocdroid.data.repository
 import cn.vectory.ocdroid.data.model.MessageWithParts
 
 /** Phase B narrow seam: message load / expand / probe / skeleton. Implemented by [OpenCodeRepository].
- *  Note: token-default methods declare `token` REQUIRED here; OCR's override keeps the
- *  `= captureSlimCommitToken()` default for source-compat with the frozen concrete surface. */
+ *
+ *  Note: the `token` params carry no default on the overriding concrete repo — Kotlin forbids
+ *  default values on `override` methods, so this interface is the authoritative surface. For
+ *  the paged/skeleton fetches (`getMessagesPaged`, `getMessagesPagedUnanchored`,
+ *  `getSlimapiMessagesPage`) the token is REQUIRED and callers supply one via the concrete
+ *  repo's `captureSlimCommitToken()`; `expandMessagesFullBatch` keeps an optional nullable
+ *  token. This couples the seam to OCR's nested [OpenCodeRepository.SlimCommitToken] type —
+ *  a compile-time coupling (the method *surface* is additionally pinned by
+ *  T3RepositoryExtractFreezeTest §6b, which checks method names, not param types) that holds
+ *  until the slim-token compatibility shim is retired (B3). */
 interface MessageRepository {
     suspend fun getMessages(sessionId: String, limit: Int? = null): Result<List<MessageWithParts>>
     suspend fun getMessagesPaged(

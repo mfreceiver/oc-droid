@@ -4,6 +4,7 @@ import cn.vectory.ocdroid.data.api.TokenStreamClient
 import cn.vectory.ocdroid.data.repository.HostProfileStore
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.data.repository.ServerCompatProfile
+import cn.vectory.ocdroid.data.repository.SessionRepository
 import cn.vectory.ocdroid.ui.SkeletonReloadCoordinator
 import cn.vectory.ocdroid.ui.SharedEffectBus
 import cn.vectory.ocdroid.ui.SharedStateStore
@@ -133,7 +134,11 @@ object ControllerModule {
         appLifecycleMonitor: AppLifecycleMonitor,
         @UiApplicationScope appScope: CoroutineScope,
         store: SharedStateStore,
-        repository: OpenCodeRepository,
+        // §Wave2.3 nit#5: narrowed from OpenCodeRepository — the only repo consumer
+        // here is ForegroundSessionTreeHydrator, which needs solely SessionRepository
+        // (getChildren + getSessionStatus). The OCR @Singleton satisfies this via the
+        // RepositoryInterfaceModule @Binds.
+        repository: SessionRepository,
         effectBus: SharedEffectBus,
     ): UnreadSoakController = UnreadSoakController(
         appLifecycleMonitor = appLifecycleMonitor,

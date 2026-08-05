@@ -517,8 +517,11 @@ class T3RepositoryExtractFreezeTest {
     /**
      * §6b: each interface declares its contracted method set (reflection on the
      * interface, resolving suspend name-mangling). Pins the Phase B surface so an
-     * accidental removal/rename of an interface method turns RED. Method COUNT per
-     * interface is also pinned to catch silent additions/drops.
+     * accidental removal/rename of an interface method turns RED: the `missing`
+     * check below asserts expected ⊆ declared. Silent ADDITIONS (declared methods
+     * beyond this spec) are NOT caught by the current assertion — to catch those,
+     * add an `assertEquals(spec.methods.size, declared.size)` check (deferred until
+     * a full reconciliation pass confirms no benign extras exist on any interface).
      */
     @Test
     fun `6 narrow interfaces declare their contracted method surface`() {

@@ -183,10 +183,8 @@ class SessionViewModelTest : MainViewModelTestBase() {
         advanceUntilIdle()
 
         coVerify(exactly = 0) { repository.createSession(any(), any()) }
-        // §R18 Phase 2-E step 2: createSessionInWorkdir no longer calls the
-        // repository's global setCurrentDirectory (the API was removed); the
-        // workdir is carried forward by composerFlow.draftWorkdir +
-        // settingsManager.currentWorkdir.
+        // The workdir is carried forward by composerFlow.draftWorkdir +
+        // settingsManager.currentWorkdir (no global directory-set call).
         assertEquals("/home/user/myproject", composerVM.composerFlow.value.draftWorkdir)
         assertNull(chatVM.chatFlow.value.currentSessionId)
     }
@@ -577,9 +575,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
         verify { settingsManager.currentWorkdir = trimmed }
         verify { settingsManager.addRecentWorkdir(any(), trimmed) }
         coVerify { repository.getSessionsForDirectory(trimmed, any()) }
-        // §R18 Phase 2-E step 2: the repository.setCurrentDirectory verify
-        // was removed (the API is gone); the workdir is now carried by
-        // settingsManager (verified above).
+        // The workdir is carried by settingsManager (verified above).
     }
 
     @Test
@@ -794,9 +790,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
         assertEquals("dir-only-1", chatVM.chatFlow.value.currentSessionId)
         assertNotNull(currentSession(sessionVM.sessionListFlow.value.sessions, chatVM.chatFlow.value.currentSessionId))
         assertEquals("dir-only-1", currentSession(sessionVM.sessionListFlow.value.sessions, chatVM.chatFlow.value.currentSessionId)?.id)
-        // §R18 Phase 2-E step 2: switchTo no longer calls repository's global
-        // setCurrentDirectory; directory routing now uses the session's
-        // directory field directly at each callsite.
+        // Directory routing uses the session's directory field directly at each callsite.
     }
 
     @Test
