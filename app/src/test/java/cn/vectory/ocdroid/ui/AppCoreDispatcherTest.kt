@@ -168,7 +168,8 @@ class AppCoreDispatcherTest : MainViewModelTestBase() {
         advanceUntilIdle()
 
         assertTrue(handled)
-        coVerify { repository.getPendingQuestions("/proj") }
+        // §slimapi-p3: P3 fan-out collapse — single global call with null directory.
+        coVerify { repository.getPendingQuestions(null) }
     }
 
     @Test

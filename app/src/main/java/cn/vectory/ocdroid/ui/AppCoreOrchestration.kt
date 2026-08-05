@@ -4,7 +4,6 @@ import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.ComposerImageAttachment
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.util.DebugLog
-import cn.vectory.ocdroid.util.WorkdirPaths
 import cn.vectory.ocdroid.util.runSuspendCatching
 
 /**
@@ -192,20 +191,6 @@ internal suspend fun AppCore.resolveQuestionDirectory(requestId: String): String
 // ════════════════════════════════════════════════════════════════════════════
 // Free predicates / utilities (no AppCore coupling)
 // ════════════════════════════════════════════════════════════════════════════
-
-/**
- * §issue-1 Phase 2a Fix B: the ONE shared workdir-set computation for pending-
- * question fan-out. Used at BOTH fan-out sites so they cannot drift.
- */
-internal fun computeQuestionFanOutWorkdirs(
-    directorySessionKeys: Set<String>,
-    currentWorkdir: String?,
-    recentWorkdirs: List<String>,
-): List<String> =
-    (directorySessionKeys + listOfNotNull(currentWorkdir) + recentWorkdirs)
-        .filter { it.isNotBlank() }
-        .map { WorkdirPaths.normalizeDirectory(it) }
-        .distinct()
 
 /**
  * §token-stream-open-gate: the shared predicate for whether to open the

@@ -106,7 +106,7 @@ class SessionSyncCoordinator(
     )
     private val flushScheduler = DeltaFlushScheduler(scope, slices, repository)
     private val questionWorker = QuestionReconcileWorker(
-        scope, slices, settingsManager, currentProfileId,
+        scope, slices,
     )
     private val statusApplier = StatusFanOutApplier(
         scope, slices, effects, currentProfileId, clock, skeletonReloadCoordinator,

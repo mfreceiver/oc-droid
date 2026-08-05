@@ -125,14 +125,8 @@ internal class RefreshOrchestrator @Inject constructor(
             onColdSnapshot = { sid -> sessionSyncCoordinator.markSessionColdSnapshotted(sid) },
             expectedRouteInstance = store.slices.routeInstanceFor(sessionId),
         )
-        val catchUpWorkdirs = computeQuestionFanOutWorkdirs(
-            directorySessionKeys = store.sessionListFlow.value.directorySessions.keys,
-            currentWorkdir = settingsManager.currentWorkdir,
-            recentWorkdirs = settingsManager.getRecentWorkdirs(currentProfileId()),
-        )
         foregroundCatchUpController.catchUpPendingQuestionsAllWorkdirs(
             repository = repository,
-            workdirs = catchUpWorkdirs,
         )
     }
 

@@ -1517,16 +1517,14 @@ class SessionSyncCoordinatorTest {
 
     // §issue-1 Phase 2a Fix B: fan-out site (1) now INCLUDES per-fp recent_workdirs
     // (flipped green from the Phase 1b characterization that asserted their absence).
-    // §badge-stale-fix: behavior changed from optimistic keep-existing merge to
-    // AUTHORITATIVE reconcile — the fan-out covers every known workdir at once, so
-    // its union is the server's source of truth; a question the server no longer
-    // reports (resolved without the client receiving the resolve event) is DROPPED
-    // instead of lingering as a ghost that keeps the Sessions nav badge lit.
+    // §slimapi-p3: P3 fan-out collapse — single global /question=null call
+    // replaces the per-workdir fan-out loop. The server returns ALL pending
+    // questions across all workdirs in one response; no workdir iteration needed.
     @Test
-    fun `loadPendingQuestionsAllWorkdirs fans out across recent_workdirs plus currentWorkdir and reconciles authoritatively`() {
-        // §P1-9: the single-workdir AppCore dispatch path polls only
-        // currentWorkdir; background workdirs' questions vanish. The fan-out
-        // here queries recent_workdirs + currentWorkdir (per-fp).
+    fun `loadPendingQuestionsAllWorkdirs makes a single global call and reconciles authoritatively`() {
+        // §slimapi-p3: a single getPendingQuestions(null) returns ALL pending
+        // questions across all workdirs. Authoritative reconcile: questions the
+        // server no longer reports are dropped.
         seed {
             it.copy(
                 pendingQuestions = listOf(
@@ -1534,75 +1532,63 @@ class SessionSyncCoordinatorTest {
                 )
             )
         }
-        every { settingsManager.currentWorkdir } returns "/current"
-        every { settingsManager.getRecentWorkdirs("test-fp") } returns listOf("/recent-1", "/recent-2")
-        val queriedDirs = mutableListOf<String>()
         val repository = mockk<cn.vectory.ocdroid.data.repository.OpenCodeRepository>(relaxed = true)
-        coEvery { repository.getPendingQuestions(any()) } answers {
-            val dir = firstArg<String>()
-            queriedDirs += dir
-            when (dir) {
-                "/current" -> Result.success(
-                    listOf(QuestionRequest(id = "qc", sessionId = "sc", questions = emptyList()))
-                )
-                else -> Result.success(emptyList())
-            }
-        }
+        coEvery { repository.getPendingQuestions(null) } returns Result.success(
+            listOf(QuestionRequest(id = "qc", sessionId = "sc", questions = emptyList()))
+        )
 
         coordinator.loadPendingQuestionsAllWorkdirs(repository)
         scope.testScheduler.advanceUntilIdle()
 
         val ids = slices.sessionList.value.pendingQuestions.map { it.id }.toSet()
-        // Authoritative reconcile: only results from queried dirs survive.
-        assertTrue("qc from /current", "qc" in ids)
-        // existing-not-on-server was NOT in any query result → dropped by
+        // Authoritative reconcile: only the single global call's result survives.
+        assertTrue("qc from global call", "qc" in ids)
+        // existing-not-on-server was NOT in the global result → dropped by
         // authoritative reconcile (server is source of truth).
         assertFalse(
             "existing-not-on-server is dropped by authoritative reconcile",
             "existing-not-on-server" in ids)
-        // Exact workdir SET = recent_workdirs + currentWorkdir (per-fp).
-        // Each queried exactly once (distinct).
-        assertEquals(3, queriedDirs.size)
-        assertEquals(
-            "fan-out set must be recent_workdirs + currentWorkdir",
-            setOf("/recent-1", "/recent-2", "/current"),
-            queriedDirs.toSet())
+        // Exactly ONE global call — no per-dir fan-out.
+        coVerify(exactly = 1) { repository.getPendingQuestions(null) }
+        coVerify(exactly = 0) { repository.getPendingQuestions("/current") }
     }
 
     @Test
-    fun `loadPendingQuestionsAllWorkdirs dedupes workdirs that appear in both directorySessions and currentWorkdir`() {
+    fun `loadPendingQuestionsAllWorkdirs issues a single global call regardless of workdir count`() {
+        // §slimapi-p3: the workdir set no longer affects the fetch — one
+        // global call covers all workdirs.
         seed {
             it.copy(directorySessions = mapOf("/dup" to listOf(Session(id = "sx", directory = "/dup"))))
         }
-        every { settingsManager.currentWorkdir } returns "/dup"
         val repository = mockk<cn.vectory.ocdroid.data.repository.OpenCodeRepository>(relaxed = true)
-        coEvery { repository.getPendingQuestions("/dup") } returns Result.success(emptyList())
+        coEvery { repository.getPendingQuestions(null) } returns Result.success(emptyList())
 
         coordinator.loadPendingQuestionsAllWorkdirs(repository)
         scope.testScheduler.advanceUntilIdle()
 
-        coVerify(exactly = 1) { repository.getPendingQuestions("/dup") }
+        coVerify(exactly = 1) { repository.getPendingQuestions(null) }
     }
 
     @Test
-    fun `loadPendingQuestionsAllWorkdirs is a no-op when no workdirs are known`() {
+    fun `loadPendingQuestionsAllWorkdirs fires a single global call even with no known workdirs`() {
+        // §slimapi-p3: the global call is always valid (directory=null),
+        // no longer gated on any workdir being known.
         seed { it.copy(directorySessions = emptyMap()) }
-        every { settingsManager.currentWorkdir } returns null
         val repository = mockk<cn.vectory.ocdroid.data.repository.OpenCodeRepository>(relaxed = true)
+        coEvery { repository.getPendingQuestions(null) } returns Result.success(emptyList())
 
         coordinator.loadPendingQuestionsAllWorkdirs(repository)
         scope.testScheduler.advanceUntilIdle()
 
-        coVerify(exactly = 0) { repository.getPendingQuestions(any()) }
+        coVerify(exactly = 1) { repository.getPendingQuestions(null) }
     }
 
     @Test
-    fun `loadPendingQuestionsAllWorkdirs swallows per-directory failures and keeps the slice unchanged for that dir`() {
+    fun `loadPendingQuestionsAllWorkdirs swallows global fetch failure and keeps the slice unchanged`() {
+        // §slimapi-p3: single global call failure doesn't wipe the slice.
         seed { it.copy(directorySessions = emptyMap()) }
-        every { settingsManager.currentWorkdir } returns "/bad"
-        every { settingsManager.getRecentWorkdirs(any()) } returns emptyList()
         val repository = mockk<cn.vectory.ocdroid.data.repository.OpenCodeRepository>(relaxed = true)
-        coEvery { repository.getPendingQuestions("/bad") } returns Result.failure(java.io.IOException("network down"))
+        coEvery { repository.getPendingQuestions(null) } returns Result.failure(java.io.IOException("network down"))
 
         coordinator.loadPendingQuestionsAllWorkdirs(repository)
         scope.testScheduler.advanceUntilIdle()

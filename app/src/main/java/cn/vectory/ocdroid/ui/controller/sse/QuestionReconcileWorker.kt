@@ -1,9 +1,7 @@
 package cn.vectory.ocdroid.ui.controller.sse
 
-import cn.vectory.ocdroid.data.model.QuestionRequest
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.ui.SliceFlows
-import cn.vectory.ocdroid.util.SettingsManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 
@@ -18,12 +16,17 @@ import kotlinx.coroutines.launch
  * Multiple concurrent requests are coalesced: only the latest request's
  * generation survives; earlier in-flight responses are dropped by the
  * generation gate.
+ *
+ * §slimapi-p3: P3 fan-out collapse — no longer iterates known workdirs. A
+ * single global `getPendingQuestions(directory = null)` call returns ALL
+ * pending questions across all workdirs (the `/question` directory parameter
+ * is a no-op for filtering, only instance routing). The per-dir fan-out loop
+ * and its associated `settingsManager`/`currentProfileId` dependencies have
+ * been removed.
  */
 internal class QuestionReconcileWorker(
     private val scope: CoroutineScope,
     private val slices: SliceFlows,
-    private val settingsManager: SettingsManager,
-    private val currentProfileId: () -> String,
 ) {
     // These plain vars depend on Main.immediate thread-imprisonment.
     // Do NOT upgrade to AtomicReference/ConcurrentHashMap — see class kdoc.
@@ -33,16 +36,18 @@ internal class QuestionReconcileWorker(
     private var latestQuestionRepository: OpenCodeRepository? = null
 
     /**
-     * §P1-9: refreshes pending questions across EVERY known workdir (the in-memory
-     * `directorySessions` keys + `settingsManager.currentWorkdir`), not just
-     * `currentWorkdir`.
+     * §slimapi-p3: P3 fan-out collapse — single global /question=null call.
      *
-     * Merge semantics: successful directory responses are authoritative (server is
-     * source of truth — questions absent from server response are dropped), failed
-     * directories conservatively retain locally-held questions for that directory,
-     * race-window arrivals (SSE `question.asked` during the fan-out) are preserved,
-     * and the generation gate ensures stale (superseded) responses from a prior
-     * reconcile round are not committed.
+     * Previously this refreshed pending questions across EVERY known workdir
+     * (the in-memory `directorySessions` keys + `settingsManager.currentWorkdir`).
+     * Now a single `getPendingQuestions(directory = null)` call returns ALL
+     * pending questions across all workdirs, reducing the fan-out from N→1.
+     *
+     * Merge semantics: the response is authoritative (server is source of truth
+     * — questions absent from server response are dropped), race-window arrivals
+     * (SSE `question.asked` during the fetch) are preserved, and the generation
+     * gate ensures stale (superseded) responses from a prior reconcile round
+     * are not committed.
      */
     fun loadPendingQuestionsAllWorkdirs(repository: OpenCodeRepository) {
         latestQuestionRepository = repository
@@ -58,21 +63,14 @@ internal class QuestionReconcileWorker(
     private fun launchLatestQuestionReconcile(repository: OpenCodeRepository, generation: Long) {
         scope.launch {
             try {
-                val currentWd = settingsManager.currentWorkdir
-                val recentWds = settingsManager.getRecentWorkdirs(currentProfileId())
-                val allDirs = (recentWds + listOfNotNull(currentWd))
-                    .filter { it.isNotBlank() }
-                    .distinct()
-                val allQuestions = mutableListOf<QuestionRequest>()
-                for (dir in allDirs) {
-                    repository.getPendingQuestions(dir)
-                        .onSuccess { allQuestions += it }
-                }
-                if (generation == questionReconcileGeneration) {
-                    slices.mutateSessionList { state ->
-                        state.copy(pendingQuestions = allQuestions)
+                repository.getPendingQuestions(directory = null)
+                    .onSuccess { allQuestions ->
+                        if (generation == questionReconcileGeneration) {
+                            slices.mutateSessionList { state ->
+                                state.copy(pendingQuestions = allQuestions)
+                            }
+                        }
                     }
-                }
             } finally {
                 finishQuestionReconcile()
             }
