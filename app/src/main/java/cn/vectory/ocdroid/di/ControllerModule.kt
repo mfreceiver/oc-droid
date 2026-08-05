@@ -391,8 +391,6 @@ object ControllerModule {
         effectiveConnectionConfigResolver: cn.vectory.ocdroid.service.streaming.EffectiveConnectionConfigResolver,
         // L1 FGS commit 1: new params for post-FGS architecture.
         sseOwner: cn.vectory.ocdroid.service.streaming.ServiceSseConnectionOwner,
-        processStatusPoller: cn.vectory.ocdroid.service.streaming.ProcessStatusPoller,
-        sessionSnapshotProvider: cn.vectory.ocdroid.service.streaming.SessionSnapshotProvider,
         ownershipGate: cn.vectory.ocdroid.service.StreamingOwnershipGate,
     ): ConnectionCoordinator = ConnectionCoordinator(
         scope = appScope,
@@ -407,8 +405,6 @@ object ControllerModule {
         // sseOwner+ownershipGate sole path. L7: bootstrapCoordinator (TOFU)
         // also removed — per-server trust-all toggle replaces it.
         sseOwner = sseOwner,
-        processStatusPoller = processStatusPoller,
-        sessionSnapshotProvider = sessionSnapshotProvider,
         ownershipGate = ownershipGate,
         connectionBootstrapEngine = connectionBootstrapEngine,
         bootstrapRetryPolicy = bootstrapRetryPolicy,

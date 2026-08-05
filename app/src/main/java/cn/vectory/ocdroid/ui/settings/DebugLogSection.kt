@@ -114,8 +114,7 @@ internal fun DebugLogSection(hideHeader: Boolean = false) {
     // §streaming-state-sync-diag (release-enabling): the verbose-diag toggle.
     // M3 ListItem + Switch per ui-style-spec §2 (no scattered dp; ListItem
     // self-pads horizontal 16dp so it shares one keyline with the Card below
-    // + AppSectionHeader above). Whole row is tappable (mirrors the
-    // persistent-notification row pattern in SettingsNotificationsRoute).
+    // + AppSectionHeader above). Whole row is tappable.
     // Default OFF; on toggle, persist to ESP AND set DebugLog.verboseDiagEnabled
     // for immediate effect (no restart).
     ListItem(
@@ -481,8 +480,7 @@ private fun LevelChip(
 /**
  * §streaming-state-sync-diag (release-enabling): Hilt EntryPoint that exposes
  * the application-wide [SettingsManager] to [DebugLogSection] without threading
- * a new parameter through AppShell / SettingsAboutRoute. Mirrors the
- * [NotificationsSettingsManagerEntryPoint] pattern in SettingsScreen.kt.
+ * a new parameter through AppShell / SettingsAboutRoute.
  */
 @EntryPoint
 @InstallIn(SingletonComponent::class)

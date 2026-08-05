@@ -1,14 +1,5 @@
 package cn.vectory.ocdroid.ui.settings
 
-import android.Manifest
-import android.app.NotificationManager
-import android.content.pm.PackageManager
-import android.content.Intent
-import android.net.Uri
-import android.provider.Settings
-import android.os.Build
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -29,7 +20,6 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -39,27 +29,19 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
-import androidx.core.content.ContextCompat
-import androidx.core.app.NotificationManagerCompat
-import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.lifecycle.compose.LifecycleEventEffect
 import cn.vectory.ocdroid.R
-import cn.vectory.ocdroid.di.NotificationChannels
 import cn.vectory.ocdroid.ui.ComposerViewModel
 import cn.vectory.ocdroid.ui.ConnectionViewModel
 import cn.vectory.ocdroid.ui.HostViewModel
@@ -72,10 +54,6 @@ import cn.vectory.ocdroid.ui.theme.AppSectionHeader
 import cn.vectory.ocdroid.ui.theme.Dimens
 import cn.vectory.ocdroid.util.SettingsManager
 import cn.vectory.ocdroid.util.ThemeMode
-import dagger.hilt.EntryPoint
-import dagger.hilt.InstallIn
-import dagger.hilt.android.EntryPointAccessors
-import dagger.hilt.components.SingletonComponent
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 
@@ -98,7 +76,6 @@ import kotlinx.coroutines.flow.map
  *  - [NavRoute.settingsHostsRoute]       → [SettingsHostsRoute]
  *  - [NavRoute.settingsAppearanceRoute]  → [SettingsAppearanceRoute]
  *  - [NavRoute.settingsModelsRoute]      → [SettingsModelsRoute]
- *  - [NavRoute.settingsNotificationsRoute] → [SettingsNotificationsRoute]
  *  - [NavRoute.settingsAboutRoute]       → [SettingsAboutRoute]
  *
  * §phase3 red line: the Appearance sub-route REUSES the existing M3
@@ -186,10 +163,9 @@ private data class SettingsSectionEntry(
  */
 private fun settingsSections(): List<SettingsSectionEntry> = listOf(
     // §setux-unify: 服务器入口与 hub TopAppBar 共用同一短文案 key
-    // （「服务器」/「Server」），与其它三项（外观/通知/关于）「入口名 = 页面名」一致。
+    // （「服务器」/「Server」），与其它三项（外观/关于）「入口名 = 页面名」一致.
     SettingsSectionEntry(NavRoute.settingsHostsRoute, R.string.setux_settings_hosts_entry, R.string.settings_section_hosts_subtitle, Icons.Default.Dns),
     SettingsSectionEntry(NavRoute.settingsAppearanceRoute, R.string.settings_section_appearance, R.string.settings_section_appearance_subtitle, Icons.Default.Palette),
-    SettingsSectionEntry(NavRoute.settingsNotificationsRoute, R.string.settings_section_notifications, R.string.settings_section_notifications_subtitle, Icons.Default.Notifications),
     SettingsSectionEntry(NavRoute.settingsDebugRoute, R.string.settings_section_debug, 0, Icons.Default.BugReport),
     SettingsSectionEntry(NavRoute.settingsAboutRoute, R.string.settings_section_about, R.string.settings_section_about_subtitle, Icons.Default.Info),
 )
@@ -418,131 +394,6 @@ fun SettingsModelsRoute(
 }
 
 /**
- * settings/notifications — Phase 3 / D.8 new section. Minimal read-only
- * surface: shows the system's POST_NOTIFICATIONS grant state + the §18
- * completion channel's purpose line. No controller surgery (no new state
- * slice, no SettingsManager write) — runtime permission prompt (when the
- * user has not yet granted) is still gated by the existing §18 toggle and
- * AppLifecycleMonitor; we just surface the resulting state here.
- */
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun SettingsNotificationsRoute(onBack: () -> Unit) {
-    val context = LocalContext.current
-    var granted by remember { mutableStateOf(notificationsEnabled(context)) }
-    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
-        granted = notificationsEnabled(context)
-    }
-    // Optional runtime prompt for API 33+. Mirrors AppLifecycleMonitor's
-    // grant-bypass-on-older-OS check. Launched lazily via a button so the
-    // system dialog is never triggered from the background.
-    val permLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestPermission(),
-    ) { _ ->
-        granted = notificationsEnabled(context)
-    }
-
-    // T5-C3: the persistent-notification toggle reads/writes
-    // [SettingsManager.persistentNotificationEnabled] directly. Mirrors the
-    // EntryPoint pattern already used in HostProfilesManagerScreen so the
-    // AppShell call site (which does not pass a SettingsManager) is
-    // unchanged.
-    val settingsManager = rememberSettingsManager()
-    var persistentEnabled by remember { mutableStateOf(settingsManager.persistentNotificationEnabled) }
-
-    SettingsSubRouteScaffold(titleRes = R.string.settings_section_notifications, onBack = onBack) { mod ->
-        // §review-AB: no parent horizontal padding — AppSectionHeader +
-        // ListItem self-pad at 16dp; the bare grant-button Row below also
-        // self-pads (`Modifier.padding(horizontal = Dimens.spacing4)`).
-        Column(
-            modifier = mod.verticalScroll(rememberScrollState()),
-        ) {
-            AppSectionHeader(text = stringResource(R.string.settings_section_notifications))
-            // §setux #new5: 移除 leadingContent icon，与其它 settings item
-            // 风格一致（无 leading icon 的标准 ListItem）。颜色态在
-            // supportingContent 文案里仍可读。
-            ListItem(
-                headlineContent = {
-                    Text(
-                        if (granted) stringResource(R.string.settings_notifications_runtime_perm_granted)
-                        else stringResource(R.string.settings_notifications_runtime_perm_blocked),
-                    )
-                },
-                supportingContent = {
-                    Text(stringResource(R.string.settings_notifications_completion_channel_desc))
-                },
-            )
-            // T5-C3: persistent-notification toggle. Default OFF — when off,
-            // the FGS ongoing notification is silent (PRIORITY_MIN +
-            // setSilent); the FGS slot still survives and SSE keepalive is
-            // unchanged. The whole row is tappable (mirrors ModelRow).
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = Dimens.spacing4)
-                    .clickable {
-                        val next = !persistentEnabled
-                        settingsManager.persistentNotificationEnabled = next
-                        persistentEnabled = next
-                    },
-                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(Dimens.spacing3),
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = stringResource(R.string.settings_notifications_persistent_title),
-                        style = MaterialTheme.typography.bodyLarge,
-                        color = MaterialTheme.colorScheme.onSurface,
-                    )
-                    Text(
-                        text = stringResource(R.string.settings_notifications_persistent_desc),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                Switch(
-                    checked = persistentEnabled,
-                    onCheckedChange = {
-                        settingsManager.persistentNotificationEnabled = it
-                        persistentEnabled = it
-                    },
-                )
-            }
-            ListItem(
-                headlineContent = {
-                    Text(
-                        text = stringResource(R.string.settings_notifications_system_settings),
-                        style = MaterialTheme.typography.bodyLarge,
-                    )
-                },
-                supportingContent = {
-                    Text(stringResource(R.string.settings_notifications_system_settings_desc))
-                },
-                modifier = Modifier.clickable { openSystemNotificationSettings(context) },
-            )
-            // The grant button is shown only when blocked AND API 33+ (the OS
-            // surface that requires a runtime prompt). Pre-33 installs inherit
-            // the install-time grant, so the button would be a dead no-op.
-            if (!granted && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                Spacer(modifier = Modifier.height(Dimens.spacing3))
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = Dimens.spacing4),
-                    horizontalArrangement = Arrangement.Center,
-                ) {
-                    androidx.compose.material3.TextButton(onClick = {
-                        permLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-                    }) {
-                        Text(stringResource(R.string.settings_section_notifications))
-                    }
-                }
-            }
-        }
-    }
-}
-
-/**
  * settings/about — wraps [AboutSection] + License information.
  *
  * The Debug section was migrated to [SettingsDebugRoute]; this page now shows
@@ -565,79 +416,5 @@ fun SettingsAboutRoute(
 
             LicenseSection()
         }
-    }
-}
-
-/** POST_NOTIFICATIONS grant state (pre-33 = install-time granted). */
-private fun notificationPermissionGranted(context: android.content.Context): Boolean {
-    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return true
-    return ContextCompat.checkSelfPermission(
-        context,
-        Manifest.permission.POST_NOTIFICATIONS,
-    ) == PackageManager.PERMISSION_GRANTED
-}
-
-internal fun notificationDeliveryEnabled(
-    runtimeGranted: Boolean,
-    appEnabled: Boolean,
-    relevantChannelImportances: List<Int>,
-): Boolean = runtimeGranted && appEnabled &&
-    (relevantChannelImportances.isEmpty() || relevantChannelImportances.any { it != NotificationManager.IMPORTANCE_NONE })
-
-private fun notificationsEnabled(context: android.content.Context): Boolean {
-    val managerCompat = NotificationManagerCompat.from(context)
-    val channelImportances = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-        val manager = context.getSystemService(NotificationManager::class.java)
-        listOf(
-            NotificationChannels.CHANNEL_DECISIONS,
-            NotificationChannels.CHANNEL_IDLE,
-        ).mapNotNull { manager?.getNotificationChannel(it)?.importance }
-    } else {
-        emptyList()
-    }
-    return notificationDeliveryEnabled(
-        runtimeGranted = notificationPermissionGranted(context),
-        appEnabled = managerCompat.areNotificationsEnabled(),
-        relevantChannelImportances = channelImportances,
-    )
-}
-
-private fun openSystemNotificationSettings(context: android.content.Context) {
-    val packageName = context.packageName
-    val channelSettings = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
-        putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
-        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-    }
-    runCatching { context.startActivity(channelSettings) }
-        .recoverCatching {
-            context.startActivity(
-                Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
-                    data = Uri.parse("package:$packageName")
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                }
-            )
-        }
-}
-
-/**
- * T5-C3: Hilt EntryPoint that exposes the application-wide
- * [SettingsManager] to the (Composable-owned) [SettingsNotificationsRoute]
- * without threading a new parameter through AppShell. Mirrors the pattern
- * already used in [HostSettingsManagerEntryPoint].
- */
-@EntryPoint
-@InstallIn(SingletonComponent::class)
-interface NotificationsSettingsManagerEntryPoint {
-    fun settingsManager(): SettingsManager
-}
-
-@Composable
-private fun rememberSettingsManager(): SettingsManager {
-    val context = LocalContext.current
-    return remember(context) {
-        EntryPointAccessors.fromApplication(
-            context.applicationContext,
-            NotificationsSettingsManagerEntryPoint::class.java,
-        ).settingsManager()
     }
 }

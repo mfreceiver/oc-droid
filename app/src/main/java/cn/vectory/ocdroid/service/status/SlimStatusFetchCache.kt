@@ -7,10 +7,16 @@ import kotlinx.coroutines.sync.withLock
 import javax.inject.Singleton
 
 /**
- * SlimApi P2: shared background status-fetch cache. Dedups the two 30s
- * background loops (ProcessStatusPoller via StatusFetchService, and
- * BackgroundUnreadPoller) that both issue a single global
- * `getSlimapiSessionsStatus(directory)` call at each 30s boundary.
+ * SlimApi P2: shared background status-fetch cache. Dedups the background
+ * status-fetch loop (ProcessStatusPoller via StatusFetchService) that issues
+ * a single global `getSlimapiSessionsStatus(directory)` call at each 30s
+ * boundary.
+ *
+ * Phase 1 (后台驻留移除): the loop is currently inert-by-design —
+ * ProcessStatusPoller is no longer started (its only background start path
+ * was removed). The cache + this kdoc are retained for the future
+ * foreground-degraded-polling re-wiring. See [cn.vectory.ocdroid.ui.AppCore]
+ * processStatusPoller kdoc for the full inert-by-design rationale.
  *
  * # Why a cache
  *
@@ -47,10 +53,10 @@ import javax.inject.Singleton
  * The cache does NOT track identity/host itself. Callers pass a
  * [cacheKey] (hostProfileId) so a host switch naturally produces a
  * different key (old entry unreachable, expires by TTL). Additionally,
- * BOTH callers have their OWN identity guards (ProcessStatusPoller:
- * `identityStore.isCurrent`; BackgroundUnreadPoller: `identityValid`) that
- * drop a result whose identity moved mid-fetch — so a stale cached entry
- * served across a host switch is rejected by the caller's guard. Defense
+ * the caller has its OWN identity guard (ProcessStatusPoller:
+ * `identityStore.isCurrent`) that drops a result whose identity moved
+ * mid-fetch — so a stale cached entry served across a host switch is
+ * rejected by the caller's guard. Defense
  * in depth.
  */
 @Singleton

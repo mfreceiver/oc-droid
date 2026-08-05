@@ -36,20 +36,8 @@
     <string name="settings_section_appearance">外观</string>
     <string name="settings_section_appearance_subtitle">主题、字体、显示尺寸</string>
     <string name="settings_section_models">模型</string>
-    <string name="settings_section_notifications">通知</string>
-    <string name="settings_section_notifications_subtitle">完成与错误提醒</string>
     <string name="settings_section_about">关于</string>
     <string name="settings_section_about_subtitle">版本与诊断</string>
-    <!-- §phase3: 通知子路由占位内容。运行时权限提示仍由 §18 通道 + Settings 开关驱动。 -->
-    <string name="settings_notifications_runtime_perm_granted">通知：已允许</string>
-    <string name="settings_notifications_runtime_perm_blocked">通知：已被系统拦截</string>
-    <string name="settings_notifications_completion_channel">完成提醒</string>
-    <string name="settings_notifications_completion_channel_desc">会话完成或出错时推送</string>
-    <string name="settings_notifications_system_settings">系统通知设置</string>
-    <string name="settings_notifications_system_settings_desc">分别配置完成提醒与决策提醒</string>
-    <!-- T5-C3: 常驻（前台服务）通知开关。默认关闭。 -->
-    <string name="settings_notifications_persistent_title">常驻状态通知</string>
-    <string name="settings_notifications_persistent_desc">在通知栏显示常驻的「已连接」通知。关闭后通知将静默（后台服务仍会运行）。</string>
     <string name="session_picker_state_selected">已选中</string>
     <string name="session_picker_state_question">有待回答问题</string>
     <string name="session_picker_state_retry">正在重试</string>

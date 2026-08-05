@@ -147,11 +147,9 @@ abstract class MainViewModelTestBase {
 
     /** Builds a fresh [AppCore] for a single test. */
     protected fun createCore(): AppCore {
-        // §R18 Phase 2-G: AppCore now takes a `@ApplicationContext Context` to
-        // resolve UiEvent.Error's @StringRes resId for the AppLifecycleMonitor
-        // notification path. The monitor itself is mocked (relaxed) so the
-        // resolved text is unused; a relaxed Context mock satisfies the
-        // constructor without dragging Robolectric into every test.
+        // AppCore retains an @ApplicationContext Context param (used by the
+        // test-only SettingsViewModel secondary constructor). A relaxed mock
+        // satisfies the constructor without dragging Robolectric in.
         val appContext = mockk<Context>(relaxed = true)
         // §R-19 Sprint 3 P2-5: AppCore's 5 controllers + the @UiApplicationScope
         // CoroutineScope are now Hilt @Provides-bound in production. In unit

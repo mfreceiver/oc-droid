@@ -23,7 +23,6 @@ enum class NavRoute(val route: String, val legacyPage: Int) {
         const val settingsHostsRoute: String = "settings/hosts"
         const val settingsAppearanceRoute: String = "settings/appearance"
         const val settingsModelsRoute: String = "settings/models"
-        const val settingsNotificationsRoute: String = "settings/notifications"
         const val settingsAboutRoute: String = "settings/about"
         const val settingsDebugRoute: String = "settings/debug"
 

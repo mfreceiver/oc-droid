@@ -4,9 +4,6 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-    <!-- §18 background notifications (best-effort). Runtime request is gated by
-         a Settings toggle so we never prompt from the background. -->
-    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
 
     <application

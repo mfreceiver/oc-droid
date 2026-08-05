@@ -77,8 +77,7 @@ class StatusFetchService @Inject internal constructor(
      *  callers so they hit the same [SlimStatusFetchCache] slot. The caller
      *  supplies the active [hostProfileId]; a host switch produces a different
      *  key → automatic cache miss. Defaults to [DEFAULT_CACHE_KEY] when the
-     *  host profile is null (e.g. cold-start before connect) — the same fallback
-     *  used by [cn.vectory.ocdroid.ui.controller.BackgroundUnreadPoller] for alignment.
+     *  host profile is null (e.g. cold-start before connect).
      */
     suspend fun fetch(
         snapshot: StatusSnapshot,
@@ -113,9 +112,9 @@ class StatusFetchService @Inject internal constructor(
     companion object {
         /**
          * Shared fallback cacheKey when hostProfileId is null (cold-start before
-         * connect). Both background callers ([StatusAggregatorImpl.refresh] via
-         * [StatusFetchService] and [cn.vectory.ocdroid.ui.controller.BackgroundUnreadPoller]) use this same value
-         * so they share a cache slot even when no host is connected yet.
+         * connect). The background caller ([StatusAggregatorImpl.refresh] via
+         * [StatusFetchService]) uses this value so the cache slot is stable
+         * even when no host is connected yet.
          */
         const val DEFAULT_CACHE_KEY = "global"
     }

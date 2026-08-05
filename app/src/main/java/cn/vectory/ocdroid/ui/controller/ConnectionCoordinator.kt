@@ -8,9 +8,7 @@ import cn.vectory.ocdroid.service.DegradedBootstrapTerminator
 import cn.vectory.ocdroid.service.StreamingOwnershipGate
 import cn.vectory.ocdroid.service.streaming.BootstrapRetryPolicy
 import cn.vectory.ocdroid.service.streaming.ConnectionBootstrapEngine
-import cn.vectory.ocdroid.service.streaming.ProcessStatusPoller
 import cn.vectory.ocdroid.service.streaming.ServiceSseConnectionOwner
-import cn.vectory.ocdroid.service.streaming.SessionSnapshotProvider
 import cn.vectory.ocdroid.service.streaming.SourceActivation
 import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
 import cn.vectory.ocdroid.di.AppLifecycleMonitor
@@ -153,16 +151,6 @@ class ConnectionCoordinator(
      * param stays unused for now — removed in Commit 2).
      */
     private val sseOwner: ServiceSseConnectionOwner,
-    /**
-     * L1 FGS commit 1: the process-level status poller. Used by the fg/bg
-     * source switch to start background polling when the app goes to
-     * background.
-     */
-    private val processStatusPoller: ProcessStatusPoller? = null,
-    /**
-     * L1 FGS commit 1: snapshot provider for the poller identity guard.
-     */
-    private val sessionSnapshotProvider: SessionSnapshotProvider? = null,
     /**
      * L1 FGS commit 1: the streaming ownership gate. Used in conjunction with
      * [sseOwner.disconnect] for the fg/bg source switch and teardowns.
@@ -332,18 +320,19 @@ class ConnectionCoordinator(
     )
 
     /**
-     * L1 FGS commit 1: fg/bg source switch. When the app goes to background,
-     * ensure the polling source is running and disconnect the SSE transport
-     * (the foreground-return path re-probes and re-connects via the health
-     * probe). Launched on the init scope — never runs during construction.
+     * fg/bg source switch. When the app goes to background, disconnect the SSE
+     * transport (the foreground-return path re-probes and re-connects via the
+     * health probe). Launched on the init scope — never runs during construction.
+     *
+     * Phase 1 (后台驻留移除): the [ProcessStatusPoller.ensureRunning]
+     * background-polling start that USED to fire here was removed — background
+     * is now completely silent (0 polling). The SSE disconnect stays so a
+     * backgrounded app does not hold an open socket. Foreground return re-arms
+     * SSE via the health probe's foreground monitor.
      */
     init {
         val monitor = appLifecycleMonitor
-        val poller = processStatusPoller
-        val snapProvider = sessionSnapshotProvider
-        val idStore = identityStore
-        // sseOwner and ownershipGate are non-nullable (L1 FGS commit 3).
-        if (monitor != null && poller != null && snapProvider != null) {
+        if (monitor != null) {
             scope.launch {
                 // StateFlow has operator fusion — distinctUntilChanged is
                 // already built-in. Use drop(1) to skip the initial value.
@@ -351,9 +340,6 @@ class ConnectionCoordinator(
                     .drop(1)
                     .collect { inForeground ->
                         if (!inForeground) {
-                            val identity = idStore?.currentIdentity?.value ?: return@collect
-                            // Start background polling before disconnecting SSE.
-                            poller.ensureRunning(identity, snapProvider.current())
                             sseOwner.disconnect(markGap = true)
                             ownershipGate.disconnectAndRelease(markGap = true)
                         }
@@ -918,9 +904,10 @@ class ConnectionCoordinator(
 
     /**
      * L1 FGS commit 3: cancels the in-flight SSE feed (foreground ON_STOP /
-     * ViewModel onCleared / process teardown). Uses generic Disconnect path
-     * (replacement poller + markGap=true) — NOT the no-source teardown used
-     * by [cancelSseForReconfigure].
+     * ViewModel onCleared / process teardown). Uses the generic Disconnect
+     * path with markGap=true so the catch-up state machine records the gap
+     * and [ForegroundCatchUpController] refreshes on reconnect — NOT the
+     * no-source teardown used by [cancelSseForReconfigure].
      *
      * Routes through [sseOwner.disconnect] + [ownershipGate.disconnectAndRelease].
      * Does NOT reset the catch-up state machine — the foreground return path
@@ -931,13 +918,14 @@ class ConnectionCoordinator(
     }
 
     /**
-     * lite-v2 D-barrier-fixup: no-source teardown (no replacement poller,
-     * markGap=false). Stores the pending teardown Job so [coldStartReconnect]
-     * can await it before probing (serializes teardown→bootstrap, equivalent to
-     * the old [ConnectionReconfigureBarrier] serialization).
+     * lite-v2 D-barrier-fixup: no-source teardown (markGap=false — no gap is
+     * marked because a reconfigure immediately re-connects). Stores the
+     * pending teardown Job so [coldStartReconnect] can await it before probing
+     * (serializes teardown→bootstrap, equivalent to the old
+     * [ConnectionReconfigureBarrier] serialization).
      *
      * [cancelSse] (generic Disconnect path) is UNCHANGED — it still uses
-     * the generic teardown with replacement poller + markGap=true.
+     * markGap=true so the catch-up controller records the gap.
      */
     fun cancelSseForReconfigure() {
         DebugLog.i("SSE", "cancelSse (reconfigure, no-source)")
@@ -1007,7 +995,7 @@ class ConnectionCoordinator(
      * Generic teardown shared body used by [cancelSse] only. Closes the token
      * stream for the current session, then tears down via
      * [sseOwner.disconnect] + [ownershipGate.disconnectAndRelease] with
-     * markGap=true (replacement poller expected).
+     * markGap=true so the catch-up controller records the gap.
      */
     private fun cancelSseInternal() {
         // §Stage-D2: close the token stream for the current session (background /

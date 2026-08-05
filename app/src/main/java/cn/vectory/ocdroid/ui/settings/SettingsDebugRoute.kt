@@ -35,7 +35,7 @@ import dagger.hilt.components.SingletonComponent
  * Contains the DebugLogSection (migrated from SettingsAboutRoute) plus a new
  * SSE-disabled toggle (REST-only degraded mode). The SSE toggle reads/writes
  * [SettingsManager.sseDisabled] directly via the Hilt EntryPoint pattern
- * already used by [DebugLogSection] and [SettingsNotificationsRoute].
+ * already used by [DebugLogSection].
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable

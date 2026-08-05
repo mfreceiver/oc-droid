@@ -104,12 +104,14 @@ class AppCore @Inject constructor(
      *  them in its [init] block and dispatches. UiEvents ride
      *  [SharedEffectBus.uiEvents]. */
     internal val effectBus: SharedEffectBus,
-    /** §R18 Phase 2-G (P0-6): application Context used to resolve
-     *  [UiEvent.Error]'s `@StringRes resId` + args to a localized String
-     *  before forwarding to [AppLifecycleMonitor.onAppError] (whose
-     *  notification body needs a real String). Composable collectors
-     *  resolve via [LocalContext] instead; this Context serves only the
-     *  app-lifetime notification path that has no Composition available. */
+    /**
+     * Application Context. Retained as a constructor param so the test-only
+     * secondary constructor of [SettingsViewModel] can forward it without a
+     * separate Hilt binding in unit tests. The Phase 1 (后台驻留移除) cleanup
+     * removed the only production consumer (the [AppLifecycleMonitor.onAppError]
+     * notification path); production code no longer reads this directly, but
+     * Hilt still injects it (cheap, and keeps the test path simple).
+     */
     @ApplicationContext internal val appContext: Context,
     /** R-19 Sprint 3 P2-5: the 5 application-scoped controllers are now
      *  Hilt-injected (@Singleton via [cn.vectory.ocdroid.di.ControllerModule])
@@ -208,6 +210,18 @@ class AppCore @Inject constructor(
      * AppCore receives the SAME instance [SessionStreamingService] injects
      * (the L3 background loop owner) so the backoff state machine is
      * process-coherent.
+     *
+     * **Phase 1 (后台驻留移除) inert-by-design note**: the poller's only
+     * production start path (`ConnectionCoordinator`'s background-transition
+     * `ensureRunning` call) was removed with the rest of the background
+     * polling subsystem — background is now fully silent. The class + this
+     * DI binding + the backoff effect handlers are RETAINED so a future
+     * foreground-degraded-polling path can re-wire `ensureRunning` without
+     * rebuilding the backoff/slim-fan-out machinery. Until then the poller
+     * loop never starts; `scheduleBackoff`/`resetBackoff`/`requestSlimFanOutRetry`
+     * mutate an inert instance's backoff state (no runtime effect, no
+     * regression — the foreground SSE-disconnect case was never covered by
+     * this poller, which was always background-started-only).
      */
     private val processStatusPoller: cn.vectory.ocdroid.service.streaming.ProcessStatusPoller,
 ) {
@@ -448,22 +462,9 @@ class AppCore @Inject constructor(
             }
         }
         appScope.launch(start = CoroutineStart.UNDISPATCHED) {
-            // §R18 Phase 2-G (P0-6): UiEvent.Error now carries a `@StringRes`
-            // resId + format args instead of a hardcoded String. Resolve to
-            // a localized String here (the only app-lifetime UiEvent consumer
-            // without a Composition); the in-app snackbar is rendered by
-            // ChatScreen, which resolves via its own LocalContext.
-            uiEvents.collect { event ->
-                if (event is UiEvent.Error) {
-                    val message = appContext.getString(event.resId, *event.args.toTypedArray())
-                    appLifecycleMonitor.onAppError(message)
-                }
-            }
-        }
-        // R-17 batch3b: subscribe to controller effects BEFORE any external
-        // caller can drive a controller. UNDISPATCHED so the collector is
-        // registered synchronously here, before the constructor returns.
-        appScope.launch(start = CoroutineStart.UNDISPATCHED) {
+            // R-17 batch3b: subscribe to controller effects BEFORE any external
+            // caller can drive a controller. UNDISPATCHED so the collector is
+            // registered synchronously here, before the constructor returns.
             effectBus.effects.collect { effect -> dispatchEffect(effect) }
         }
 

@@ -40,8 +40,7 @@ import javax.inject.Singleton
  *  - [NavigationPrefs] — session id + top-level nav persistence.
  *  - [WorkdirPrefs] — current workdir + reactive mirror + per-fp recent
  *    workdirs (+ cluster 17 `isValidFp` guard).
- *  - [AppearancePrefs] — theme / locale / UI scale / fonts / markdown fonts
- *    / persistent-notification visibility.
+ *  - [AppearancePrefs] — theme / locale / UI scale / fonts / markdown fonts.
  *  - [SessionPrefs] — open tabs + session cache + per-(fp,sessionId) drafts.
  *  - [DebugPrefs] — verbose-diag + debug-card-identity toggles.
  *  - [TrafficPrefs] — cumulative HTTP byte counters.
@@ -193,10 +192,6 @@ class SettingsManager @Inject constructor(
     var themeMode: ThemeMode
         get() = appearancePrefs.themeMode
         set(value) { appearancePrefs.themeMode = value }
-
-    var persistentNotificationEnabled: Boolean
-        get() = appearancePrefs.persistentNotificationEnabled
-        set(value) { appearancePrefs.persistentNotificationEnabled = value }
 
     var localeMode: LocaleMode
         get() = appearancePrefs.localeMode

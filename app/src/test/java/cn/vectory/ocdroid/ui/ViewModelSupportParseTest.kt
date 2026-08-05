@@ -416,12 +416,11 @@ class ViewModelSupportParseTest {
     // ── T5-re-review M1-R — ssePayloadJson config pinning ──────────────────
 
     /**
-     * T5-re-review M1-R: the prior coercion test
-     * (`SseNotificationBridgeTest.I4 - session_status with explicit null on
-     * optional field decodes to default`) supplied null to ALREADY-nullable
-     * fields (`Int? = null` / `String? = null`), which the default `Json`
-     * accepts even WITHOUT `coerceInputValues`. Removing `coerceInputValues`
-     * from the canonical config would have gone undetected.
+     * T5-re-review M1-R: the prior coercion test supplied null to
+     * ALREADY-nullable fields (`Int? = null` / `String? = null`), which the
+     * default `Json` accepts even WITHOUT `coerceInputValues`. Removing
+     * `coerceInputValues` from the canonical config would have gone
+     * undetected.
      *
      * This test pins all four [ssePayloadJson.configuration] flags directly
      * so any removal (of ANY flag) is caught immediately.

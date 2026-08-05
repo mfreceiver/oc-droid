@@ -21,7 +21,7 @@ internal class DebugPrefs(
      * `DigestDiag` / `LayerDiag`). Default OFF — release users get zero log
      * noise / perf cost unless they flip the toggle in Settings → Debug.
      *
-     * ESP-persisted Boolean mirroring [persistentNotificationEnabled]'s pattern.
+     * ESP-persisted Boolean mirroring the standard ESP get/set pattern.
      * On set, the caller (the Settings UI) ALSO writes
      * [DebugLog.verboseDiagEnabled] so the change takes effect immediately
      * without a restart; on app start [AppCore]'s init seeds

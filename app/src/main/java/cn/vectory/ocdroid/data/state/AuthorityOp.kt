@@ -59,9 +59,9 @@ sealed interface AuthorityOp {
 
     /**
      * A whole-graph REST / TREE authoritative snapshot replacement WITHIN the
-     * covered scope. This is the op behind the 4 REST/hydration writer paths
-     * (StatusPollOrchestrator legacy + slim, BackgroundUnreadPoller,
-     * SessionTreeHydrator, launchLoadChildSessions).
+     * covered scope. This is the op behind the REST/hydration writer paths
+     * (StatusPollOrchestrator legacy + slim, SessionTreeHydrator,
+     * launchLoadChildSessions).
      *
      * Carries the raw inputs the reducer needs to reproduce the EXACT legacy
      * behavior:

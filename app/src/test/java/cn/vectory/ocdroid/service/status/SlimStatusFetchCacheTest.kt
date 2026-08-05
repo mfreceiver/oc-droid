@@ -15,14 +15,16 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Regression coverage for [SlimStatusFetchCache] — guards the cross-caller
- * cacheKey alignment that enables the 2N→1 background dedup (SlimApi P2).
+ * Regression coverage for [SlimStatusFetchCache] — guards the cacheKey
+ * alignment that enables background status-fetch dedup (SlimApi P2).
  *
- * The critical regression that was broken before the fix: [StatusFetchService]
- * used `cacheKey = dir` (a workdir PATH) while [BackgroundUnreadPoller] used
+ * Historical context: an earlier regression had [StatusFetchService] using
+ * `cacheKey = dir` (a workdir PATH) while a sibling background caller used
  * `startHostId ?: "default"` (a host PROFILE ID). Since the cache checks
  * `cached.cacheKey == cacheKey`, these NEVER matched across the two callers
- * → every cross-caller lookup was a miss → 2N→1 dedup was completely broken.
+ * → every cross-caller lookup was a miss → dedup was completely broken. The
+ * sibling caller was removed in Phase 1 (后台驻留移除), but the cacheKey-
+ * isolation guard below stays as a regression guard for any future caller.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class SlimStatusFetchCacheTest {
@@ -82,9 +84,9 @@ class SlimStatusFetchCacheTest {
         now += 1 // well within TTL but different key → miss
         cache.fetchGlobal("/repo", "host-B")
 
-        // This is the regression guard: before the fix, StatusFetchService used
-        // cacheKey=dir (path) and BackgroundUnreadPoller used cacheKey=hostId,
-        // so TWO different keys were used by the two callers → NEVER deduped.
+        // Regression guard: two different cacheKeys must NOT reuse each
+        // other's cached entry (the historical cross-caller key-mismatch bug
+        // silently defeated dedup).
         coVerify(exactly = 2) { repo.getSlimapiSessionsStatus(any()) }
     }
 

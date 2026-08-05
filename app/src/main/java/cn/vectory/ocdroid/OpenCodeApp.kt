@@ -3,10 +3,8 @@ package cn.vectory.ocdroid
 import android.app.Application
 import android.content.ComponentCallbacks2
 import cn.vectory.ocdroid.di.AppLifecycleMonitor
-import cn.vectory.ocdroid.di.NotificationChannels
 import cn.vectory.ocdroid.ui.AppCore
 import cn.vectory.ocdroid.ui.util.HttpImageHolder
-import cn.vectory.ocdroid.ui.controller.BackgroundUnreadPoller
 import cn.vectory.ocdroid.ui.controller.SessionMetadataPoller
 import cn.vectory.ocdroid.util.AppLocaleController
 import cn.vectory.ocdroid.util.CrashLogger
@@ -23,9 +21,6 @@ class OpenCodeApp : Application() {
      */
     @Inject
     lateinit var appLifecycleMonitor: AppLifecycleMonitor
-
-    @Inject
-    lateinit var backgroundUnreadPoller: BackgroundUnreadPoller
 
     @Inject
     lateinit var sessionMetadataPoller: SessionMetadataPoller
@@ -49,11 +44,6 @@ class OpenCodeApp : Application() {
         // a SYSTEM-locale change that happened while the process was alive.
         // SettingsManager is available here via the Hilt-injected appCore.
         AppLocaleController.applyPersisted(this, appCore.settingsManager)
-        // §18.1/T3b: create notification channels up front (idempotent,
-        // wrapped in try/catch inside createChannels). Required before any
-        // notify() call, otherwise notifications silently no-op on API 26+.
-        NotificationChannels.createChannels(this)
-        appLifecycleMonitor.registerBackgroundUnreadPoller(backgroundUnreadPoller::poll)
         // R-06: the former warmUpWebViewAfterLaunch() pre-warmed a throwaway
         // WebView on the main thread to prime the WebView singleton's class
         // loader / JNI init (~50ms on cold start). Removed: that work ran on

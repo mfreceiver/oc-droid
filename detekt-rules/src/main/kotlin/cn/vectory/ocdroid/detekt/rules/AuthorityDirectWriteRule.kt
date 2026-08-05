@@ -21,9 +21,8 @@ import org.jetbrains.kotlin.psi.KtNamedFunction
  * Any OTHER `copy(authority = ...)` — e.g. a caller that runs the reducer then
  * re-assigns the authority slice via `snapshot.copy(authority = reducerOutput.authority)`
  * — bypasses the reducer's single-writer discipline (the caller could later
- * diverge by dropping/altering slices). The BackgroundUnreadPoller:236 site
- * was the historical offender; it was refactored in U-MN6 to derive from the
- * reducer output directly.
+ * diverge by dropping/altering slices). A historical offender site was
+ * refactored in U-MN6 to derive from the reducer output directly.
  *
  * Reports any `copy(authority = ...)` named argument outside the reducer
  * (file-path allowlist AuthorityReducer.kt OR function-name allowlist

@@ -46,7 +46,6 @@ import cn.vectory.ocdroid.ui.settings.SettingsAppearanceRoute
 import cn.vectory.ocdroid.ui.settings.SettingsDebugRoute
 import cn.vectory.ocdroid.ui.settings.SettingsHostsRoute
 import cn.vectory.ocdroid.ui.settings.SettingsModelsRoute
-import cn.vectory.ocdroid.ui.settings.SettingsNotificationsRoute
 import cn.vectory.ocdroid.ui.settings.SettingsScreen
 import cn.vectory.ocdroid.ui.workspace.GitScreen
 
@@ -575,13 +574,6 @@ fun AppShell(orchestratorVM: OrchestratorViewModel) {
                 popExitTransition = { ExitTransition.None },
             ) {
                 SettingsModelsRoute(composerVM, settingsVM) { navController.popBackStack() }
-            }
-            composable(
-                NavRoute.settingsNotificationsRoute,
-                exitTransition = { ExitTransition.None },
-                popExitTransition = { ExitTransition.None },
-            ) {
-                SettingsNotificationsRoute { navController.popBackStack() }
             }
             composable(
                 NavRoute.settingsDebugRoute,

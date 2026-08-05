@@ -56,10 +56,10 @@ class SharedStateStore @Inject constructor(
     /**
      * §P0-A rev-gpt #5: the current connection identity, used to derive the
      * REAL authority [ScopeKey] at the non-aggregator snapshot sites
-     * (StatusPollOrchestrator / BackgroundUnreadPoller / SessionTreeHydrator /
-     * SessionListActions). Previously these sites used an EMPTY ScopeKey
-     * ("","") → coverage was written under a key the aggregator never reads →
-     * globalState degraded to Unknown. */
+     * (StatusPollOrchestrator / SessionTreeHydrator / SessionListActions).
+     * Previously these sites used an EMPTY ScopeKey ("","") → coverage was
+     * written under a key the aggregator never reads → globalState degraded
+     * to Unknown. */
     private val identityStore: cn.vectory.ocdroid.service.identity.ConnectionIdentityStore,
     @cn.vectory.ocdroid.di.UiApplicationScope
     private val scope: kotlinx.coroutines.CoroutineScope? = null,

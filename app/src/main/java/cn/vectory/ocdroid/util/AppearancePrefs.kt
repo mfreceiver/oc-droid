@@ -10,18 +10,10 @@ import kotlinx.serialization.json.Json
  *
  * Owns the user-tunable presentation prefs: theme, locale, UI scale (font +
  * content), the four font-family pickers (app + markdown × Latin + CJK),
- * the markdown font-size map, and the persistent-notification visibility
- * toggle.
+ * and the markdown font-size map.
  *
- * ⚠ AMBIGUOUS DOMAIN ASSIGNMENT (flagged per L4b instructions):
- * [persistentNotificationEnabled] controls FGS notification *presentation
- * behaviour*, which is not strictly "appearance". It is folded into this
- * domain (rather than given a one-key NotificationsPrefs) because it is a
- * single user-facing Settings toggle configured on the same surface as the
- * other appearance prefs, and it shares the exact ESP-Boolean shape. Its
- * key string + default + read/write cadence are byte-identical to the
- * pre-split code. If a future split promotes notifications to their own
- * domain, this is the only key that needs to move.
+ * Phase 1 (后台驻留移除): the `persistentNotificationEnabled` toggle that
+ * USED to live here was deleted with the rest of the notification subsystem.
  *
  * Behavior byte-identical to pre-split [SettingsManager]: same ESP instance,
  * same key strings, same clamps ([UI_SCALE_MIN]–[UI_SCALE_MAX]), same
@@ -34,23 +26,6 @@ internal class AppearancePrefs(
     var themeMode: ThemeMode
         get() = ThemeMode.valueOf(encryptedPrefs.getString(KEY_THEME, ThemeMode.SYSTEM.name) ?: ThemeMode.SYSTEM.name)
         set(value) = encryptedPrefs.edit().putString(KEY_THEME, value.name).apply()
-
-    /**
-     * T5-C1/C2: when `false` (default), the persistent/ongoing FGS
-     * session-status notification is built with `PRIORITY_MIN` +
-     * `setSilent(true)` so it does not surface in the shade nor make
-     * sound/vibrate, while still `setOngoing` so the FGS slot survives and
-     * SSE keepalive continues unchanged. When `true`, the prior LOW +
-     * non-silent surface is restored (the user explicitly opts in to a
-     * visible ongoing notification).
-     *
-     * ESP-persisted Boolean mirroring the existing key/get/set pattern
-     * (e.g. [themeMode]); default `false` so a fresh install keeps the
-     * notification drawer quiet.
-     */
-    var persistentNotificationEnabled: Boolean
-        get() = encryptedPrefs.getBoolean(KEY_PERSISTENT_NOTIFICATION_ENABLED, false)
-        set(value) = encryptedPrefs.edit().putBoolean(KEY_PERSISTENT_NOTIFICATION_ENABLED, value).apply()
 
     /**
      * §P5a (Q5): user-facing language preference. SYSTEM = follow the real
@@ -144,8 +119,6 @@ internal class AppearancePrefs(
         private const val TAG = "SettingsManager"
 
         internal const val KEY_THEME = "theme"
-        /** T5-C1: ESP key for [persistentNotificationEnabled]. Default false. */
-        internal const val KEY_PERSISTENT_NOTIFICATION_ENABLED = "persistent_notification_enabled"
         /** §P5a (Q5): persisted [LocaleMode] (language preference). Default null → SYSTEM. */
         internal const val KEY_LOCALE = "locale"
         internal const val KEY_UI_FONT_SCALE = "ui_font_scale"
