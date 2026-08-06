@@ -560,7 +560,15 @@ class ChatViewModel @Inject constructor(
         // 单次探测（retries=0）在网络抖动（DNS/连接中断）下必败，导致 banner 无法靠 banner
         // 刷新清除。retries=3 扛过抖动期（engine 退避 2s/5s/15s）。
         core.connectionCoordinator.testConnection(force = true, retries = 3, onSettled = { ok ->
-            if (ok && !core.store.chatFlow.value.isLoadingMessages && !core.store.chatFlow.value.isLoadingMoreMessages) {
+            // §stale-session-guard (MINOR 2): suppress success toast when the
+            // user has switched sessions during the retry window (retries=3 →
+            // up to ~22s). The onSettled callback is captured at lambda creation
+            // time; if currentSessionId no longer matches sid (captured at
+            // refresh initiation), the feedback would mislead on the wrong session.
+            if (ok && core.store.chatFlow.value.currentSessionId == sid
+                && !core.store.chatFlow.value.isLoadingMessages
+                && !core.store.chatFlow.value.isLoadingMoreMessages
+            ) {
                 core.effectBus.tryEmitUiEvent(UiEvent.Success(R.string.success_refreshed))
             }
         })

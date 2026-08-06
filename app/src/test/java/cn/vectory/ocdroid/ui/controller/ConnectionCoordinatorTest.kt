@@ -2,7 +2,11 @@ package cn.vectory.ocdroid.ui.controller
 
 import cn.vectory.ocdroid.service.StreamingOwnershipGate
 import cn.vectory.ocdroid.service.status.StatusAggregator
+import cn.vectory.ocdroid.service.streaming.BootstrapRetryPolicy
+import cn.vectory.ocdroid.service.streaming.ConnectionBootstrapEngine
+import cn.vectory.ocdroid.service.streaming.ConnectionBootstrapOutcome
 import cn.vectory.ocdroid.service.streaming.ServiceSseConnectionOwner
+import cn.vectory.ocdroid.service.streaming.SourceActivation
 
 import android.util.Log
 import cn.vectory.ocdroid.R
@@ -36,6 +40,8 @@ import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.runCurrent
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -1231,6 +1237,131 @@ class ConnectionCoordinatorTest {
 
         assertEquals(listOf(true), settled)
         assertTrue(connectionFlow.value.isConnected)
+    }
+
+    // ── Engine path: retry policy (MINOR 1 rev-2) ──────────────────────────
+
+    @Test
+    fun `engine retries=3 exhausts budget then disconnects`() {
+        val engine = mockk<ConnectionBootstrapEngine>()
+        coEvery { engine.bootstrap() } returns
+            ConnectionBootstrapOutcome.Failed(IOException("retry test"))
+        val settled = mutableListOf<Boolean>()
+        val cc = ConnectionCoordinator(
+            scope = scope,
+            slices = slices,
+            repository = repository,
+            settingsManager = settingsManager,
+            effects = effects,
+            serverCompatProfile = cn.vectory.ocdroid.data.repository.ServerCompatProfile(),
+            clock = { now },
+            identityStore = identityStore,
+            connectionBootstrapEngine = engine,
+            bootstrapRetryPolicy = BootstrapRetryPolicy(),
+            sseOwner = sseOwner,
+            ownershipGate = ownershipGate,
+        )
+
+        cc.testConnection(force = true, retries = 3, onSettled = settled::add)
+        runPending()
+
+        // 4 attempts total (1 initial + 3 retries)
+        coVerify(exactly = 4) { engine.bootstrap() }
+        assertEquals(listOf(false), settled)
+        assertFalse(connectionFlow.value.isConnected)
+        assertEquals(ConnectionPhase.Disconnected, connectionFlow.value.connectionPhase)
+    }
+
+    @Test
+    fun `engine retries=3 succeeds on 3rd attempt after 2 transient failures`() {
+        val engine = mockk<ConnectionBootstrapEngine>()
+        var callCount = 0
+        coEvery { engine.bootstrap() } answers {
+            if (++callCount < 3) {
+                ConnectionBootstrapOutcome.Failed(IOException("transient"))
+            } else {
+                val identity = identityStore.bind("group", "/work", "endpoint")
+                ConnectionBootstrapOutcome.Success(identity, HealthResponse(true, "3.0"))
+            }
+        }
+        val settled = mutableListOf<Boolean>()
+        // Mock SSE connect to accept so the full success path commits Connected.
+        val testOwner = mockk<ServiceSseConnectionOwner>(relaxed = true)
+        coEvery { testOwner.connect(any()) } returns SourceActivation.Ready
+        coEvery { repository.getCommands() } returns Result.success(emptyList())
+        val cc = ConnectionCoordinator(
+            scope = scope,
+            slices = slices,
+            repository = repository,
+            settingsManager = settingsManager,
+            effects = effects,
+            serverCompatProfile = cn.vectory.ocdroid.data.repository.ServerCompatProfile(),
+            clock = { now },
+            identityStore = identityStore,
+            connectionBootstrapEngine = engine,
+            bootstrapRetryPolicy = BootstrapRetryPolicy(),
+            sseOwner = testOwner,
+            ownershipGate = ownershipGate,
+        )
+
+        cc.testConnection(force = true, retries = 3, onSettled = settled::add)
+        runPending()
+
+        // 3 attempts total (fail, fail, success)
+        coVerify(exactly = 3) { engine.bootstrap() }
+        assertEquals(listOf(true), settled)
+        assertTrue(connectionFlow.value.isConnected)
+        assertEquals(ConnectionPhase.Connected, connectionFlow.value.connectionPhase)
+    }
+
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    @Test
+    fun `engine retries=3 consumes delays in BootstrapRetryPolicy order 2s 5s 15s`() {
+        val engine = mockk<ConnectionBootstrapEngine>()
+        coEvery { engine.bootstrap() } returns
+            ConnectionBootstrapOutcome.Failed(IOException("transient"))
+        val timeScope = TestScope(StandardTestDispatcher())
+        val cc = ConnectionCoordinator(
+            scope = timeScope,
+            slices = slices,
+            repository = repository,
+            settingsManager = settingsManager,
+            effects = effects,
+            serverCompatProfile = cn.vectory.ocdroid.data.repository.ServerCompatProfile(),
+            identityStore = identityStore,
+            connectionBootstrapEngine = engine,
+            bootstrapRetryPolicy = BootstrapRetryPolicy(),
+            sseOwner = sseOwner,
+            ownershipGate = ownershipGate,
+        )
+
+        cc.testConnection(force = true, retries = 3)
+
+        // Coroutine not yet started with StandardTestDispatcher.
+        // Run what's queued at time=0: probe coroutine starts, writes
+        // Connecting, calls bootstrap() once, gets Failed, hits delay(2000).
+        timeScope.testScheduler.runCurrent()
+        coVerify(exactly = 1) { engine.bootstrap() }
+
+        // Advance past 2000ms delay → second bootstrap call.
+        timeScope.testScheduler.advanceTimeBy(2000)
+        timeScope.testScheduler.runCurrent()
+        coVerify(exactly = 2) { engine.bootstrap() }
+
+        // Advance past 5000ms delay → third bootstrap call.
+        timeScope.testScheduler.advanceTimeBy(5000)
+        timeScope.testScheduler.runCurrent()
+        coVerify(exactly = 3) { engine.bootstrap() }
+
+        // Advance past 15000ms delay → fourth (final) bootstrap call,
+        // which exhausts the budget and writes Disconnected.
+        timeScope.testScheduler.advanceTimeBy(15000)
+        timeScope.testScheduler.runCurrent()
+        coVerify(exactly = 4) { engine.bootstrap() }
+
+        // Terminal state after all retries exhausted.
+        assertEquals(ConnectionPhase.Disconnected, slices.connection.value.connectionPhase)
+        assertFalse(slices.connection.value.isConnected)
     }
 
     // ── RecordingConnectionCoordinatorCallbacks (removed in batch 3b) ──────

@@ -176,8 +176,10 @@ internal class ConnectionHealthProbe(
      * mark connected, run [loadInitialData], and [startSSE]. On failure (or
      * healthy=false past the retry budget): surface the error and mark
      * disconnected. [retries] extra attempts follow on failure with exponential
-     * backoff (1s, 2s, 4s, ...); default callers pass retries=0 (one-shot),
-     * only [coldStartReconnect] opts into retries.
+     * backoff (1s, 2s, 4s, ...); default callers pass retries=0 (one-shot).
+     * Cold-start and explicit refresh callers ([coldStartReconnect],
+     * [cn.vectory.ocdroid.ui.ChatViewModel.refreshCurrentSession],
+     * performForceRefresh) opt into retries.
      *
      * [onSettled] is invoked EXACTLY ONCE when the probe reaches a terminal
      * state — `true` on a healthy connect, `false` on failure / retry
@@ -245,9 +247,11 @@ internal class ConnectionHealthProbe(
                 // Retry loop: attempt 1 is always made; up to `retries` extra
                 // attempts follow on failure/unhealthy with exponential backoff
                 // (1s, 2s, 4s, ...). Default callers pass retries=0 (one-shot),
-                // preserving the original single-attempt semantics; only
-                // coldStartReconnect() opts into retries. isActive is checked so
-                // ViewModel cancellation aborts cleanly mid-backoff.
+                // preserving the original single-attempt semantics;
+                // coldStartReconnect() and explicit refresh callers
+                // (refreshCurrentSession, performForceRefresh) opt into retries.
+                // isActive is checked so ViewModel cancellation aborts cleanly
+                // mid-backoff.
                 val maxAttempts = 1 + retries.coerceAtLeast(0)
                 var attempt = 0
                 var backoffMs = 1000L
