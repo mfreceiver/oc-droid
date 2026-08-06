@@ -119,7 +119,7 @@ internal class ConnectionGateway(
                 (payload.acceptedClientVersions?.first ?: Int.MIN_VALUE)..(payload.acceptedClientVersions?.second ?: Int.MIN_VALUE)
             HealthResponse(
                 healthy = healthy,
-                version = payload.serverApiVersion?.let { "slimapi/api_version=$it" }
+                version = payload.serverApiVersion?.let { "$it-slim" }
             )
         }
     }
@@ -206,7 +206,7 @@ internal class ConnectionGateway(
                     if (!healthy) error("slimapi sidecar unhealthy or client version incompatible")
                     HealthResponse(
                         healthy = true,
-                        version = payload.serverApiVersion?.let { "slimapi/api_version=$it" }
+                        version = payload.serverApiVersion?.let { "$it-slim" }
                     )
                 } else {
                     json.decodeFromString(HealthResponse.serializer(), body)

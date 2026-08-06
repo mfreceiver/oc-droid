@@ -292,7 +292,7 @@ class ConnectionViewModelFormTest : MainViewModelTestBase() {
                     acceptedClientVersions = 5 to 9,
                 )
             )
-            Result.success(HealthResponse(healthy = true, version = "slimapi/api_version=5"))
+            Result.success(HealthResponse(healthy = true, version = "5-slim"))
         }
 
         var result: Pair<Boolean, String>? = null
@@ -349,7 +349,7 @@ class ConnectionViewModelFormTest : MainViewModelTestBase() {
                     acceptedClientVersions = 1 to 5,
                 )
             )
-            Result.success(HealthResponse(healthy = true, version = "slimapi/api_version=1"))
+            Result.success(HealthResponse(healthy = true, version = "1-slim"))
         }
 
         var result: Pair<Boolean, String>? = null
@@ -439,7 +439,7 @@ class ConnectionViewModelFormTest : MainViewModelTestBase() {
                     acceptedClientVersions = null,
                 )
             )
-            Result.success(HealthResponse(healthy = true, version = "slimapi/api_version=1"))
+            Result.success(HealthResponse(healthy = true, version = "1-slim"))
         }
 
         var result: Pair<Boolean, String>? = null
