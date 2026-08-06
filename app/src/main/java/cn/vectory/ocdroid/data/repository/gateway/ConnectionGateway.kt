@@ -12,6 +12,7 @@ import cn.vectory.ocdroid.data.repository.http.SlimapiContract
 import cn.vectory.ocdroid.data.repository.http.SslConfig
 import cn.vectory.ocdroid.data.repository.http.applyClientIdentityHeaders
 import cn.vectory.ocdroid.data.repository.http.hostPortFromUrl
+import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.runSuspendCatching
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -40,6 +41,10 @@ internal class ConnectionGateway(
     private val networkGraph: RepositoryNetworkGraph,
     private val identityProvider: () -> String,
 ) {
+    companion object {
+        private const val TAG = "ConnectionGateway"
+    }
+
     // ── SSL / TLS / mTLS ────────────────────────────────────────────────
 
     fun currentSslConfig(): SslConfig = bundleProvider().effectiveSslConfig
@@ -117,6 +122,19 @@ internal class ConnectionGateway(
                 payload.serverApiVersion != null &&
                 SlimapiContract.SLIMAPI_CLIENT_VERSION in
                 (payload.acceptedClientVersions?.first ?: Int.MIN_VALUE)..(payload.acceptedClientVersions?.second ?: Int.MIN_VALUE)
+            // §banner-stuck-diag: healthy=false 时打印三元组细节到应用内 DebugLog
+            // （设置→Debug 页可见），让"版本门 / sidecar degraded / api_version 缺失"
+            // 可在应用内一秒区分，无需 adb。
+            if (!healthy) {
+                DebugLog.w(
+                    TAG,
+                    "slimapi health unhealthy: sidecarOk=${payload.sidecarOk} " +
+                        "schemaDegraded=${payload.schemaDegraded} " +
+                        "apiVersion=${payload.serverApiVersion} " +
+                        "acceptedClientVersions=${payload.acceptedClientVersions} " +
+                        "clientVersion=${SlimapiContract.SLIMAPI_CLIENT_VERSION}",
+                )
+            }
             HealthResponse(
                 healthy = healthy,
                 version = payload.serverApiVersion?.let { "$it-slim" }

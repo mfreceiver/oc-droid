@@ -99,7 +99,9 @@ internal class RefreshOrchestrator @Inject constructor(
             explicit = true,
         )
         if (!refreshed) return
-        connectionCoordinator.testConnection(force = true)
+        // 与 coldStartReconnect 对齐 retries=3：瞬时网络抖动（DNS 解析失败 / 连接中断）下
+        // 单次探测（retries=0）必败，导致 banner 无法靠硬刷新清除——必须 retries=3 才能扛过抖动。
+        connectionCoordinator.testConnection(force = true, retries = 3)
         effectBus.tryEmitEffect(ControllerEffect.LoadSessions)
     }
 
