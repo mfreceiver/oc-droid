@@ -68,17 +68,30 @@ data class ScrollCheckpoint(
     val anchorKey: String?,
     val fallbackIndex: Int,
     val offset: Int,
+    /**
+     * §scroll-guard-fix: the session id of the PARENT that captured this
+     * checkpoint at openSubAgent time. Used by [consumeAnySubAgentCheckpoint]
+     * as the direction guard: a checkpoint is consumed ONLY when the current
+     * session == capturedFromSessionId (the user returned to the parent that
+     * wrote it). Nullable for backward-compat with checkpoints persisted
+     * before this field existed (treated as "unknown origin" → never consumed,
+     * degrading to Latest — same as the pre-fix broken return-to-parent, so
+     * no new regression).
+     */
+    val capturedFromSessionId: String? = null,
 ) : Parcelable {
     constructor(parcel: Parcel) : this(
         anchorKey = parcel.readString(),
         fallbackIndex = parcel.readInt(),
         offset = parcel.readInt(),
+        capturedFromSessionId = parcel.readString(),
     )
 
     override fun writeToParcel(parcel: Parcel, flags: Int) {
         parcel.writeString(anchorKey)
         parcel.writeInt(fallbackIndex)
         parcel.writeInt(offset)
+        parcel.writeString(capturedFromSessionId)
     }
 
     override fun describeContents(): Int = 0
@@ -90,20 +103,25 @@ data class ScrollCheckpoint(
 }
 
 /**
- * §chat-list-detail §11 / G6 (B5): per-route-entry SavedStateHandle key under
- * which the PARENT's scroll checkpoint is persisted at openSubAgent time.
- * The handle belongs to the parent route entry; when the user pops back to
- * parent, the parent's [ChatScaffold] LaunchedEffect reads this key, consumes
- * it (single-shot), and replays the checkpoint as a Restore scroll intent.
+ * §chat-list-detail §11 / G6 (B5) + §scroll-guard-fix: SavedStateHandle key
+ * under which the PARENT's scroll checkpoint is persisted at openSubAgent time.
  *
- * Keyed by childId (the route being navigated INTO) so a parent that has
- * multiple in-flight children (rare; only possible via deep-link fan-in) can
- * distinguish them. The single-slot pattern (one openSubAgent → one
- * checkpoint → one pop) means in practice there is at most one entry per
- * parent handle.
+ * §scroll-guard-fix: chat→chat navigation uses `launchSingleTop`, which in
+ * Navigation 2.8.x IN-PLACE REPLACES the single chat back-stack slot (entry
+ * object is new, but id/ViewModelStore/SavedStateHandle bloodline is
+ * inherited). So parent and child do NOT each get their own NavBackStackEntry
+ * — they SHARE one slot and one SavedStateHandle. The stack is always
+ * [Sessions, <one chat entry>] for chat→chat transitions (no separate child
+ * entry is ever pushed). Nested sub-agents (P→C→G) therefore accumulate
+ * multiple `subAgentCheckpoint:*` keys on this SAME shared handle.
  *
- * The consume side iterates all keys with this prefix and consumes the
- * (single) match — see [consumeAnySubAgentCheckpoint].
+ * Direction (enter-child vs return-to-parent vs jump-to-unrelated) is
+ * disambiguated at consume time by the checkpoint's
+ * [ScrollCheckpoint.capturedFromSessionId] vs the current chromeSessionId —
+ * see [consumeAnySubAgentCheckpoint]. The key's childId is now only for
+ * uniqueness (one key per child), NOT for direction.
+ *
+ * Keyed by childId (the route being navigated INTO) for uniqueness.
  */
 internal const val SUB_AGENT_CHECKPOINT_KEY_PREFIX: String = "subAgentCheckpoint:"
 
@@ -113,28 +131,56 @@ internal fun checkpointKeyForChild(childSessionId: String): String =
     SUB_AGENT_CHECKPOINT_KEY_PREFIX + childSessionId
 
 /**
- * §chat-list-detail §11 / G6 (B5): consume-once helper. Pulls the first
- * `subAgentCheckpoint:*` entry out of [handle] (if any) and removes it so a
- * subsequent re-entry (config change / duplicate nav / fast pop) cannot
- * double-fire Restore. Returns null when no checkpoint is present (the
- * Latest-by-default case).
+ * §chat-list-detail §11 / G6 (B5) + §scroll-guard-fix: consume-once helper
+ * with a DIRECTION GUARD keyed by [ScrollCheckpoint.capturedFromSessionId].
  *
- * Single-shot contract (§11): the caller MUST treat a non-null return as the
- * single scroll intent — re-dispatching Latest from openForRoute's default is
- * the no-checkpoint path.
+ * Because chat→chat navigation uses `launchSingleTop` (Navigation 2.8.x
+ * IN-PLACE REPLACES the single chat back-stack slot — entry object is new but
+ * id/ViewModelStore/SavedStateHandle bloodline is inherited), parent and
+ * child SHARE one SavedStateHandle. Nested sub-agents (P→C→G) accumulate
+ * multiple `subAgentCheckpoint:*` keys on this SAME handle. So enter-child,
+ * return-to-parent, enter-deeper-nested-child, and jump-to-unrelated-session
+ * ALL re-fire the consumer LaunchedEffect and all see the same key set.
+ *
+ * Direction is disambiguated by comparing each checkpoint's
+ * `capturedFromSessionId` (the parent that CAPTURED it) against
+ * [currentSessionId]:
+ *
+ *  - capturedFrom == [currentSessionId] ⇒ RETURN-TO-PARENT. The user is back
+ *    on the session that wrote this checkpoint → consume-once + Restore.
+ *  - capturedFrom != [currentSessionId] (or null) ⇒ NOT ours. This is either
+ *    enter-child, enter-deeper-nested-child, or a jump to an unrelated
+ *    session. LEAVE the key in the handle — its own return-to-capturing-
+ *    parent path still needs it. openForRoute's Latest stands.
+ *
+ * This precisely handles every shared-handle scenario:
+ *  - P→C enter-child:        `:C{from:P}`,  current=C → P≠C, skip ✓
+ *  - C→P return-parent:      `:C{from:P}`,  current=P → P==P, consume ✓
+ *  - P→C→G enter-G:          `:C{from:P}`,`:G{from:C}`, current=G → both≠G, skip both ✓
+ *  - G→C return (nested):    current=C → `:G{from:C}` consume, `:C{from:P}` skip ✓
+ *  - C→D jump-unrelated:     `:C{from:P}`,  current=D → P≠D, skip (no wrong Restore) ✓
+ *
+ * Single-shot contract (§11): the caller treats a non-null return as the
+ * single scroll intent. A parent has one outgoing openSubAgent at a time, so
+ * at most one checkpoint matches capturedFrom==current per return; a
+ * degenerate multi-match consumes all matches but only the first is Restore.
  */
-internal fun consumeAnySubAgentCheckpoint(handle: SavedStateHandle): ScrollCheckpoint? {
+internal fun consumeAnySubAgentCheckpoint(
+    handle: SavedStateHandle,
+    currentSessionId: String,
+): ScrollCheckpoint? {
     val keys = handle.keys().filter { it.startsWith(SUB_AGENT_CHECKPOINT_KEY_PREFIX) }
     if (keys.isEmpty()) return null
-    // §11: there is at most ONE in-flight child per parent in normal flow.
-    // Iterate the (single) match; if a degenerate case ever produces more
-    // than one, consume them all but only the first becomes a Restore intent
-    // (the others are silently dropped — never applied — preserving the
-    // "single scroll intent" contract).
+    // §scroll-guard-fix: consume ONLY the checkpoint whose capturing-parent ==
+    // currentSessionId (return-to-parent). All others (enter-child / nested /
+    // unrelated-jump) are LEFT for their own return path.
     var first: ScrollCheckpoint? = null
     for (k in keys) {
-        val cp = handle.remove<ScrollCheckpoint>(k)
-        if (first == null) first = cp
+        val cp = handle.get<ScrollCheckpoint>(k) ?: continue
+        if (cp.capturedFromSessionId == currentSessionId) {
+            handle.remove<ScrollCheckpoint>(k)
+            if (first == null) first = cp
+        }
     }
     return first
 }

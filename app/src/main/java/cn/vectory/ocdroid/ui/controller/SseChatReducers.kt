@@ -31,11 +31,12 @@ import cn.vectory.ocdroid.ui.reasoningPartOrNull
  * (one committed state, no torn "session archived but scroll intent still
  * references it").
  *
- * §chat-list-detail §11 / G6 (B5): the legacy per-child checkpoint
- * backstack clear is GONE — checkpoints now live on per-route-entry
- * SavedStateHandle, so an archive cannot leave a stale checkpoint in
- * ChatState. If the archived session had a parent entry with a stored
- * checkpoint, that entry's pop (B4 §10 transition) auto-cleans the handle.
+ * §chat-list-detail §11 / G6 (B5) + §scroll-guard-fix: the legacy per-child
+ * checkpoint backstack clear is GONE — checkpoints live on the shared chat-
+ * slot SavedStateHandle, so an archive cannot leave a stale checkpoint in
+ * ChatState. Under launchSingleTop there is no per-child entry pop; a stale
+ * checkpoint is simply overwritten on the next openSubAgent write to the same
+ * childId key, or consumed-once on return-to-capturing-parent.
  */
 internal fun ChatState.applyArchivedChatClear(): Pair<ChatState, List<SseSideEffect>> = copy(
     currentSessionId = null,
@@ -65,10 +66,11 @@ internal fun ChatState.applyArchivedChatClear(): Pair<ChatState, List<SseSideEff
  *    but leaving it risks a stale fire if the user re-opens the same id
  *    later via a fresh create).
  *
- * §chat-list-detail §11 / G6 (B5): the per-child checkpoint filter is GONE
- * — checkpoints now live on per-route-entry SavedStateHandle. An archived
- * subtree's parent entry (if any) pops via the §10 transition, auto-cleaning
- * its handle. ChatState has no checkpoint map to filter.
+ * §chat-list-detail §11 / G6 (B5) + §scroll-guard-fix: the per-child checkpoint
+ * filter is GONE — checkpoints live on the shared chat-slot SavedStateHandle.
+ * Under launchSingleTop there is no per-child entry pop; ChatState has no
+ * checkpoint map to filter (a stale key on the shared handle is overwritten on
+ * the next write or consumed-once on return-to-parent).
  *
  * Pure; effects empty. Callers MUST already have computed [subtree] via
  * [subtreeIds] (the SAME three-source union used for unread/questions

@@ -200,17 +200,19 @@ data class ChatState(
        * (see [cn.vectory.ocdroid.ui.clearSessionData] +
        * [cn.vectory.ocdroid.ui.controller.applyArchivedChatClear] + the same-
        * group host-purge branch in [cn.vectory.ocdroid.ui.reduce]). The legacy
-       * global checkpoint map is GONE (B5 §11): checkpoint lifecycle is now
-       * bound to the route entry's SavedStateHandle, so pop-driven cleanup is
-       * automatic.
+       * global checkpoint map is GONE (B5 §11 + §scroll-guard-fix):
+       * checkpoint lifecycle is bound to the shared chat-slot
+       * SavedStateHandle; cleanup is consume-once on return-to-parent, not
+       * entry-pop-driven.
        */
       val pendingScrollRequest: PendingScrollRequest? = null,
-      // §chat-list-detail §11 / G6 (B5): the legacy per-child checkpoint
-      // map field is REMOVED. Checkpoints now live on the parent route
-      // entry's SavedStateHandle (keyed by childId via
-      // [checkpointKeyForChild]); entry pop auto-cleans the handle, so the
-      // three manual sweep sites (host-purge / archive subtree / draft
-      // materialize) no longer need to touch checkpoints. The single-slot
+      // §chat-list-detail §11 / G6 (B5) + §scroll-guard-fix: the legacy
+      // per-child checkpoint map field is REMOVED. Checkpoints live on the
+      // shared chat-slot SavedStateHandle (keyed by childId via
+      // [checkpointKeyForChild]); cleanup is consume-once on
+      // return-to-capturing-parent (NOT entry-pop-driven), so the three
+      // manual sweep sites (host-purge / archive subtree / draft materialize)
+      // no longer need to touch checkpoints. The single-slot
       // [pendingScrollRequest] above is unchanged.
       /**
       * §chat-ux-batch T7 (B2): the user's just-picked agent for the active

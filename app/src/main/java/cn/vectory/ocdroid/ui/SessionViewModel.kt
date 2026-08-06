@@ -188,9 +188,12 @@ class SessionViewModel @Inject constructor(
                 // openForRoute's sessions+directorySessions lookup succeeds.
                 store.dispatch(AppAction.SessionUpserted(child))
                 // §11 sequence step 3-4: write checkpoint + route-aware nav +
-                // hydrate. Each child gets its own NavBackStackEntry, giving
-                // the parent's SavedStateHandle a distinct lifecycle
-                // counterpart (per §11 protocol 2).
+                // hydrate. §scroll-guard-fix: the child does NOT get its own
+                // NavBackStackEntry — chat→chat singleTop in-place replaces
+                // the shared slot. The checkpoint (stamped with
+                // capturedFromSessionId=parentId by the caller) lives on the
+                // shared handle and is consumed when the user returns to the
+                // parent (see consumeAnySubAgentCheckpoint).
                 onNavigateToChild(childSessionId, checkpoint)
             } else {
                 // §B5 BLOCK-fix MAJOR 1: fetch failed → no checkpoint write,

@@ -222,26 +222,32 @@ fun AppShell(orchestratorVM: OrchestratorViewModel) {
     // keeps the back stack flat (Sessions → target). System Back from chat/{id}
     // pops to Sessions naturally.
     //
-    // §chat-list-detail §11 / G6 (B5): chat-to-chat navigation preserves the
-    // parent's NavBackStackEntry (and its SavedStateHandle, which carries the
-    // openSubAgent checkpoint). Two cases:
-    //  (1) PUSH (openSubAgent child push): target=child, previousBackStackEntry
-    //      is the parent (sessionId != target) → plain navigate() without
-    //      popUpTo. Stack: [Sessions, parent, child].
-    //  (2) POP-RESTORE (navigateToChat parent): target=parent,
-    //      previousBackStackEntry.sessionId == target → popBackStack().
-    //      Stack: [Sessions, parent]. The OLD parent entry (with its
-    //      SavedStateHandle checkpoint) is re-activated — Restore fires via
-    //      the parent's ChatScaffold LaunchedEffect.
+    // §chat-list-detail §11 / G6 (B5) + §scroll-guard-fix: chat-to-chat
+    // navigation. Because BOTH the PUSH and POP-RESTORE branches below use
+    // `launchSingleTop = true`, Navigation 2.8.x IN-PLACE REPLACES the single
+    // chat back-stack slot (new entry object, but id/ViewModelStore/
+    // SavedStateHandle bloodline inherited). The stack for chat→chat is thus
+    // ALWAYS [Sessions, <one chat entry>] — there is never a separate child
+    // entry pushed, and the POP-RESTORE branch below (which would require a
+    // real child entry to pop) is effectively UNREACHABLE in current flow
+    // (`previousBackStackEntry` is always Sessions for chat→chat, so
+    // `targetSid == previousSid` is always false). It is retained defensively
+    // for any future real-push path.
+    //
+    // Direction (enter-child vs return-to-parent) is NOT signaled by entry
+    // identity / push-vs-pop here — it is disambiguated at consume time in
+    // [consumeAnySubAgentCheckpoint] by the checkpoint key's childId vs the
+    // current chromeSessionId. The single shared chat-slot SavedStateHandle
+    // carries the checkpoint across both directions.
+    //
     // The non-chat-to-chat paths (Sessions → chat, chat → Sessions, Files /
     // Git / Settings transitions) keep the original popUpTo behavior (flat
     // backstack, system-back pops to Sessions).
     //
-    // §B5 BLOCK-fix (rev-gpt CRITICAL): the pop-restore branch is REQUIRED so
-    // returnToParent does NOT push a new parent entry on top of the child. The
-    // prior B5 implementation always plain-navigated on chat→chat, which
-    // produced [Sessions, parent(old), child, parent(NEW)] — the NEW parent's
-    // fresh SavedStateHandle had no checkpoint, so Restore never fired.
+    // §B5 BLOCK-fix history (rev-gpt CRITICAL, now superseded by singleTop
+    // in-place semantics): the pop-restore branch was added so returnToParent
+    // would not push a new parent entry on top of the child. Under singleTop
+    // that scenario cannot arise — the slot is replaced, not stacked.
     LaunchedEffect(navState.lastRoute, navState.navEpoch) {
         val target = navState.lastRoute
         val currentDest = navController.currentDestination
@@ -415,12 +421,13 @@ fun AppShell(orchestratorVM: OrchestratorViewModel) {
                         orchestratorVM = orchestratorVM,
                         settingsVM = settingsVM,
                         routeSessionId = sessionId,
-                        // §chat-list-detail §11 / G6 (B5): pass the route
-                        // entry's SavedStateHandle so ChatScaffold can use it
-                        // as the per-entry backing store for sub-agent
-                        // checkpoints (protocol 2 — parent-keyed-by-child).
-                        // The handle's lifecycle is bound to this
-                        // NavBackStackEntry; pop auto-cleans the checkpoint.
+                        // §chat-list-detail §11 / G6 (B5) + §scroll-guard-fix:
+                        // pass the chat slot's SavedStateHandle so ChatScaffold
+                        // can use it as the shared backing store for sub-agent
+                        // checkpoints. Under chat→chat launchSingleTop the slot
+                        // is in-place replaced (parent/child share one handle);
+                        // checkpoints are consumed-once on return-to-parent, NOT
+                        // cleaned by entry pop — see ScrollCheckpoint.kt.
                         routeSavedStateHandle = routeEntry.savedStateHandle,
                         onNavigateToSettings = { orchestratorVM.requestNavigate(NavRoute.Settings) },
                         onNavigateToSessions = { backToHome() },

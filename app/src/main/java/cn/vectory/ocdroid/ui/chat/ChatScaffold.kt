@@ -160,11 +160,12 @@ fun ChatScaffold(
      * bare-chat compatibility surface. */
     routeSessionId: String? = null,
     /**
-     * §chat-list-detail §11 / G6 (B5): the parent route entry's
-     * [SavedStateHandle]. Used as the per-entry backing store for sub-agent
-     * checkpoints (protocol 2 — parent-keyed-by-child). The handle's
-     * lifecycle is bound to the chat/{sessionId} NavBackStackEntry, so the
-     * checkpoint is naturally cleaned when the entry pops.
+     * §chat-list-detail §11 / G6 (B5) + §scroll-guard-fix: the chat slot's
+     * [SavedStateHandle]. Used as the shared backing store for sub-agent
+     * checkpoints. Under chat→chat `launchSingleTop`, parent and child SHARE
+     * one slot/handle (Navigation in-place replaces it — see ScrollCheckpoint.kt),
+     * so checkpoints are NOT cleaned by entry pop; they are consumed-once on
+     * return-to-capturing-parent (see [consumeAnySubAgentCheckpoint]).
      *
      * Three roles:
      *  1. WRITE — at openSubAgent time (user is on parent): the
@@ -255,17 +256,22 @@ fun ChatScaffold(
     // session's chrome. The legacy bare-chat branch keeps flat currentSessionId.
     val chromeSessionId = chromeSessionIdFor(routeSessionId, chat.currentSessionId)
 
-    // §chat-list-detail §11 / G6 (B5): per-entry SavedStateHandle checkpoint
-    // consume-once. This LaunchedEffect fires every time ChatScaffold enters
-    // composition for a route id (first entry AND re-entry after a pop — when
-    // the user returns from a child via [SessionViewModel.returnToParent]).
-    // The handle is the route entry's, so its `subAgentCheckpoint:*` key (if
-    // present) was written by THIS SAME composable's onOpenSubAgent callback
-    // BEFORE the user navigated to the child. consume-once removes the key so
-    // a second re-entry (config change / duplicate nav / fast pop) cannot
-    // double-fire Restore. When the handle has no checkpoint (first entry /
-    // deep-link direct into this session / process-death without a stored
-    // checkpoint), the default Latest from openForRoute stands.
+    // §chat-list-detail §11 / G6 (B5) + §scroll-guard-fix: checkpoint consume
+    // with a DIRECTION GUARD. Because chat→chat navigation uses `launchSingleTop`
+    // (Navigation 2.8.x in-place slot replacement — see ScrollCheckpoint.kt),
+    // parent and child SHARE one SavedStateHandle, and nested sub-agents
+    // accumulate multiple `subAgentCheckpoint:*` keys on it. This LaunchedEffect
+    // re-fires on every chat→chat transition (enter-child / return-parent /
+    // nested / unrelated-jump) and sees the whole key set.
+    //
+    // Direction is decided inside [consumeAnySubAgentCheckpoint] by comparing
+    // each checkpoint's `capturedFromSessionId` (the parent that captured it)
+    // against `sid`:
+    //  - capturedFrom == sid (return-to-parent): this session IS the capturing
+    //    parent → consume + Restore.
+    //  - capturedFrom != sid (enter-child / nested / unrelated-jump): NOT ours
+    //    → skip WITHOUT consuming → openForRoute's Latest stands; the key
+    //    stays for its own return path.
     //
     // Single-scroll-intent contract (§11): Restore vs Latest is decided in
     // exactly this one place. The dispatch goes through the unified
@@ -274,44 +280,50 @@ fun ChatScaffold(
     LaunchedEffect(chromeSessionId, routeSavedStateHandle) {
         val handle = routeSavedStateHandle ?: return@LaunchedEffect
         val sid = chromeSessionId ?: return@LaunchedEffect
-        val cp = consumeAnySubAgentCheckpoint(handle)
+        val cp = consumeAnySubAgentCheckpoint(handle, sid)
         if (cp != null) {
             chatVM.requestScrollRestore(sid, cp)
         }
     }
 
     /**
-     * §chat-list-detail §11 / G6 (B5): the openSubAgent-side callback passed
-     * down to ChatMessageList. The listState live-capture stays in
-     * ChatMessageContent (where the LazyListState reference is owned); this
+     * §chat-list-detail §11 / G6 (B5) + §scroll-guard-fix: the openSubAgent-side
+     * callback passed down to ChatMessageList. The listState live-capture stays
+     * in ChatMessageContent (where the LazyListState reference is owned); this
      * callback is invoked AFTER the synchronous capture, with the resulting
      * [ScrollCheckpoint].
      *
+     * §scroll-guard-fix: stamps `capturedFromSessionId = chromeSessionId`
+     * (the CURRENT parent) onto the checkpoint before persisting, so the
+     * consume guard can later tell return-to-parent (capturedFrom == current)
+     * from enter-child / nested / unrelated-jump. Without this stamp the guard
+     * could not distinguish "the user came back to me" from "the user jumped
+     * to a different session while my checkpoint was still pending".
+     *
      * §B5 BLOCK-fix (rev-gpt MAJOR 1): the checkpoint write + nav call are
      * INSIDE the SessionViewModel.openSubAgent success callback — NOT before
-     * the call. This avoids leaving a stale checkpoint on the parent handle
-     * when the child fetch fails or the route changed mid-fetch. The
-     * callback receives `(resolvedChildId, checkpoint)` and writes the
-     * checkpoint to the parent route entry's SavedStateHandle in the SAME
-     * atomic step as the route-aware navigation.
+     * the call. This avoids leaving a stale checkpoint on the shared handle
+     * when the child fetch fails or the route changed mid-fetch.
      *
-     * The handle is THIS entry's (the user is on parent at click time), so
-     * the persisted checkpoint is bound to the parent entry's lifecycle and
-     * will be auto-cleaned when that entry pops.
-     *
-     * Delegates child-session fetch + navigation to [SessionViewModel.openSubAgent]
-     * with an `orchestratorVM.navigateToChat(childId)` nav callback — each
-     * child gets its own NavBackStackEntry, giving the parent's SavedStateHandle
-     * a distinct lifecycle counterpart (per §11 protocol 2).
+     * The handle is THIS slot's (parent and child share one chat back-stack
+     * slot under `launchSingleTop` — see ScrollCheckpoint.kt §scroll-guard-fix),
+     * so the persisted checkpoint is readable when the slot later re-enters
+     * composition as the parent.
      */
     val onOpenSubAgentNavigate: (childSessionId: String, checkpoint: ScrollCheckpoint) -> Unit =
         { childSessionId, checkpoint ->
+            // The capturing parent is the session currently in the chrome at
+            // click time. Captured into a local so the lambda stamps the SAME
+            // id even if chromeSessionId recomposes mid-openSubAgent-fetch.
+            val capturedFromParentId = chromeSessionId
             sessionVM.openSubAgent(childSessionId, checkpoint) { resolvedId, cp ->
                 // §B5 BLOCK-fix MAJOR 1: checkpoint write + nav fire ONLY on
-                // the success path (VM re-validated the route + token AFTER
-                // the async fetch landed). The handle write is bound to the
-                // parent route entry that is STILL current at callback time.
-                routeSavedStateHandle?.set(checkpointKeyForChild(resolvedId), cp)
+                // the success path. Stamp capturedFromSessionId so the consume
+                // guard recognizes this checkpoint on return-to-parent.
+                routeSavedStateHandle?.set(
+                    checkpointKeyForChild(resolvedId),
+                    cp.copy(capturedFromSessionId = capturedFromParentId),
+                )
                 orchestratorVM.navigateToChat(resolvedId)
             }
         }
