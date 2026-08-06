@@ -1,7 +1,5 @@
 # OCDroid
 
-[![CI](https://git.vectory.cn:18443/mfreceiver/oc-droid/actions/workflows/integration-check.yml/badge.svg)](https://git.vectory.cn:18443/mfreceiver/oc-droid/actions)
-
 OCDroid — 基于 OpenCode 协议的原生 Android 客户端，用于远程连接 AI coding agent、发送指令、监控工作进度、浏览代码变更。
 
 ## 功能概述
@@ -107,9 +105,9 @@ app/src/main/java/cn/vectory/ocdroid/
 
 ## 兼容的 OpenCode 服务端版本
 
-当前适配 **OpenCode Server [v1.18.13](https://github.com/anomalyco/opencode/releases)**。
+当前适配 **OpenCode Server v1.18.13**。
 
 ## License
 
-本项目基于 [grapeot/opencode_android_client](https://github.com/grapeot/opencode_android_client)（MIT）深度改造。
+本项目基于 grapeot/opencode_android_client（MIT）深度改造。
 采用 MIT 协议，详见 [LICENSE](./LICENSE)。
