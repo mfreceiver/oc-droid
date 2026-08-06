@@ -1,10 +1,10 @@
 # 状态机大幅精简方案（v5.3-final）— 实施依据（冻结决策版 · 修订版）
 
 > **状态**：实施依据（冻结决策版 · 修订版）。本版基于 v5.2-final + rev-gpt 评审意见（3 P0 + 7 P1 + 5 P2）修订而成，落实用户对 **Decision 5（OwnershipGate）的重新决策**，并修复全部 3 个 P0、7 个 P1、5 个 P2。
-> **前序（均保留不动作为历史/材料）**：
-> - `state-machine-simplification-v5.2-final.md` — 上一冻结决策版（被 rev-gpt 评为 REJECTED 5/10）
-> - `state-machine-simplification-v5.1-lean.md` — 讨论稿（13 修正 + opencode 借鉴专章）
-> - `state-machine-simplification-v5-lean.md` — v5-lean 原稿
+> **前序（已归档至 [`../archive/`](../archive/)，作为历史/材料保留）**：
+> - [`state-machine-simplification-v5.2-final.md`](../archive/state-machine-simplification-v5.2-final.md) — 上一冻结决策版（被 rev-gpt 评为 REJECTED 5/10）
+> - [`state-machine-simplification-v5.1-lean.md`](../archive/state-machine-simplification-v5.1-lean.md) — 讨论稿（13 修正 + opencode 借鉴专章）
+> - [`state-machine-simplification-v5-lean.md`](../archive/state-machine-simplification-v5-lean.md) — v5-lean 原稿
 > - `.omni-orch/reports/ses_03cd6ddbaffeLRChdWhnV0DGb0.md` — **rev-gpt 对 v5.2 的评审报告（P0/P1/P2 全文，本版修订依据）**
 > - `.omni-orch/reports/eventfold-migration-assessment.md` — 事件折叠迁移评估
 > - `/home/mar/personal_projects/oc-slimapi/.omni-orch/reports/ses_03cdf5aacffeZZJCoAZSGRD6E2.md` — slimapi status 评估（跨项目只读）
@@ -39,7 +39,7 @@
 | 2 | **token 聚合**（TokenStreamReducer 415 行纯 reducer + TokenStreamCoordinator 聚合逻辑） | ✅ **保留** | 纯 reducer `(State,Event)->(State,List<Effect>)`，与传输安全层 4 守卫正交。删聚合层=失去实时打字 | `eventfold-migration-assessment.md`；`feature-removal-assessment-webalign.md` §2.1 |
 | 3 | **multi-host** | ✅ **移除**（单 host） | opencode 单 baseUrl；多 host profile 管理是移动端厚层（HostProfilesManagerScreen 444 行 + HostProfileStore + 切换 FSM） | `feature-removal-assessment-webalign.md` §1.3 / §5.3 |
 | 4 | **TOFU 证书钉扎** | ✅ **→ per-server trust-all 开关** | TOFU 是仅 server pinning（单向），非 mTLS 依赖（mTLS 走独立 `HostProfile.mtlsEnabled + clientCertId` 路径）。退化为 per-server "信任所有证书"开关，满足自签服务器连接需求。**代价：失去 MITM 防护**（见 §6.2） | `feature-removal-assessment-webalign.md` §1.1 / §2.2 |
-| 🔴 **5** | **OwnershipGate** | ✅ **精简到 ~200 行**（**回退到 v5.1 原推荐；v5.2 的"完整版保留 ~664"被推翻**） | rev-gpt 证明完整版 `prepareAttempt/registerStarting/markReady` 驱动链在 L1 删 Launcher+Service 后**整体消失**（不可达代码，非冗余）。用户接受降级精简：**只保留重连窗口防双发的 max-1 仲裁**；放弃 Starting/Ready 两阶段 + attemptId 超时（依赖已删驱动链）。**决策变更理由见下** | rev-gpt 评审 P0-1；`state-machine-simplification-v5.1-lean.md` §3.3 |
+| 🔴 **5** | **OwnershipGate** | ✅ **精简到 ~200 行**（**回退到 v5.1 原推荐；v5.2 的"完整版保留 ~664"被推翻**） | rev-gpt 证明完整版 `prepareAttempt/registerStarting/markReady` 驱动链在 L1 删 Launcher+Service 后**整体消失**（不可达代码，非冗余）。用户接受降级精简：**只保留重连窗口防双发的 max-1 仲裁**；放弃 Starting/Ready 两阶段 + attemptId 超时（依赖已删驱动链）。**决策变更理由见下** | rev-gpt 评审 P0-1；`docs/archive/state-machine-simplification-v5.1-lean.md` §3.3 |
 | 6 | **事件折叠迁移** | ✅ **不大迁移** | ocdroid 数据投影层已是成熟事件折叠（4 reducer 2516 行 + AppAction 988 行 ≈ 3504 行已折叠，零迁移成本）。命令式 FSM 本质是网络 I/O + 协程生命周期 + 并发锁，reducer 管不了副作用与并发，**迁移收益不足**（非"绝对不可折叠"） | `eventfold-migration-assessment.md` §核心结论 |
 | 7 | **replay 断线恢复** | ✅ **Plan A**（slimapi 加回 `GET /slimapi/sessions/status`） | 透传上游 `/session/status` + merge TurnRegistry。加性、不 bump wire 版本（仍为 2）。**与 digest 同源但因果快照非原子**（见 §3.3 诚实论证） | `ses_03cdf5aacffeZZJCoAZSGRD6E2.md`；rev-gpt 评审 P0-3 |
 
@@ -482,9 +482,9 @@ ocdroid 的核心问题多数在 opencode 根本不存在（架构前提不同�
 
 ## 10. 相关文档
 
-- `docs/specs/state-machine-simplification-v5.2-final.md` — 上一冻结决策版（被 rev-gpt REJECTED）
-- `docs/specs/state-machine-simplification-v5.1-lean.md` — 讨论稿（13 修正 + opencode 借鉴）
-- `docs/specs/state-machine-simplification-v5-lean.md` — v5-lean 原稿（历史）
+- `docs/archive/state-machine-simplification-v5.2-final.md` — 上一冻结决策版（被 rev-gpt REJECTED）
+- `docs/archive/state-machine-simplification-v5.1-lean.md` — 讨论稿（13 修正 + opencode 借鉴）
+- `docs/archive/state-machine-simplification-v5-lean.md` — v5-lean 原稿（历史）
 - `docs/specs/feature-removal-assessment-webalign.md` — 三档决策材料
 - `.omni-orch/reports/ses_03cd6ddbaffeLRChdWhnV0DGb0.md` — **rev-gpt 对 v5.2 评审报告（本版修订依据）**
 - `.omni-orch/reports/eventfold-migration-assessment.md` — 事件折叠迁移评估

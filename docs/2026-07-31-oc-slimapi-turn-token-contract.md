@@ -3,7 +3,7 @@
 > **状态**：**已落地**——oc-slimapi 1.0.1（2026-07-31）实现 turn-token fence 全套（发字段 + 输入头 + commit point + incarnation 持久化 + ingest 时快照），ocdroid 消费侧（`0d572d2`）+ serverGroupFp header 透传（ocdroid 0.18.3）均 merged。本文档是 oc-slimapi 与 ocdroid **双方共同阅读**的独立、完整契约。
 > **日期**：2026-07-31。
 > **bundle**：B-ocdroid-sm-20260730（批次 2 — 文档）。
-> **权威来源**：方案 v3 §5（`docs/2026-07-30-ocdroid-state-machine-improvement-plan.md` §5.1–5.4）+ §3.1（两层 fence）。本文档把 v3 的紧凑叙述**扩写为面向双方的实施规格**，并对 v3 紧凑表述中存在的顺序歧义给出**精确定义**（见 §4.4、§B）。
+> **权威来源**：方案 v3 §5（`docs/archive/2026-07-30-ocdroid-state-machine-improvement-plan.md` §5.1–5.4）+ §3.1（两层 fence）。本文档把 v3 的紧凑叙述**扩写为面向双方的实施规格**，并对 v3 紧凑表述中存在的顺序歧义给出**精确定义**（见 §4.4、§B）。
 > **读者**：① oc-slimapi 维护者（Python 中继层，负责发送字段 / commit point / 持久化 / 共享 registry）；② ocdroid 维护者（Kotlin 客户端，消费字段做因果 fence）。
 > **范围**：**本文档只描述契约，不改任何代码。** slimapi 已发字段（1.0.1），ocdroid 侧消费解析**已就绪并 merged**（commit `0d572d2`）+ serverGroupFp header 已注入（ocdroid 0.18.3），双方就绪，可实机联调。
 > **不可改约束**：上游 opencode 服务端**不可改**；所有 fence 由 slimapi（派生因果标识）+ ocdroid（消费归约）两侧完成，不依赖上游改动。

@@ -212,7 +212,7 @@ exp-1 标记的最高风险单点。9 个 `@Volatile` generation 字段的非原
 - `docs/specs/state-machine-architecture-spec.md` — 现有状态机架构规范
 - `docs/specs/sse-client-spec.md` — SSE 客户端设计
 - `docs/specs/slim-mode-api-routing.md` — slimapi 路由
-- `docs/specs/l4-sse-lifecycle-design.md` — L4 SSE 生命周期设计
+- `docs/archive/l4-sse-lifecycle-design.md` — L4 SSE 生命周期设计
 - `/tmp/opencode/sse-fix-a-design-v4.md` — v0.18.13 的 Fix A 设计（oracle v4）
 
 ## 9. 调研产物索引

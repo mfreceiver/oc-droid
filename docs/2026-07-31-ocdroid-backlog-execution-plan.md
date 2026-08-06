@@ -3,7 +3,7 @@
 > 编制日期：2026-07-31 ｜ 基线 `main@1149a0e` ｜ bundle `B-ocdroid-sm-20260730`
 > **本文件是后续执行 main 的规格依据**：file:line + 改法 + 风险 + 验证 + 写域 + 执行顺序。
 > 全部 file:line 经 explorer（ses_0497505a, ses_04974df1, ses_04974bcc）核实 + orchestrator 抽样回读。
-> 方案 v3（`docs/2026-07-30-ocdroid-state-machine-improvement-plan.md`）为**意图来源**；落地差异以本文件核实结果为准。
+> 方案 v3（`docs/archive/2026-07-30-ocdroid-state-machine-improvement-plan.md`）为**意图来源**；落地差异以本文件核实结果为准。
 
 ---
 
@@ -383,4 +383,4 @@ fun `turn sequence with a hole - turns 1,2,3,5 applied, turn 4 lost to connectio
 - exp-1 (ses_0497505a)：W1（spec §8.1 现状 + hole 测试位置 + BLK-2 equal-turn 时钟域）—— orchestrator 回读 spec 376-386 + reducer 259-284 确认。
 - exp-2 (ses_04974df1)：W2（aggregator/freshness/epoch/retry 现状）—— orchestrator 回读 aggregator 160-171 + orchestrator 35-38,140-151 确认。
 - exp-3 (ses_04974bcc)：W3（flaky 根因 + P2 缺口）。
-- 意图来源：`docs/2026-07-30-ocdroid-state-machine-improvement-plan.md`（方案 v3 §2.3/§9/R11）+ `docs/2026-07-31-oc-slimapi-coordination-response.md` §4（BLK-2 闭合）。
+- 意图来源：`docs/archive/2026-07-30-ocdroid-state-machine-improvement-plan.md`（方案 v3 §2.3/§9/R11）+ `docs/2026-07-31-oc-slimapi-coordination-response.md` §4（BLK-2 闭合）。

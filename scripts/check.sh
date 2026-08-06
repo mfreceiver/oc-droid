@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# scripts/check.sh — 改动校验三合一（替代 LSP 自检）
+# scripts/check.sh — 改动校验三合一（编译 + detekt + 单测；LSP 不跑单测，故仍须本脚本）
 # 详见 AGENTS.md「改动校验」与 .opencode/policies/build-signing.md。
 #
 # 用法:
@@ -7,7 +7,7 @@
 #   ./scripts/check.sh --lint    # 额外跑 lintDebug
 #   ./scripts/check.sh --full    # 编译 + 单测 + 覆盖率 + lint
 #
-# 本工作区 opencode 服务端已关闭 LSP，编辑后必须主动跑此脚本确认无编译/测试错误。
+# 本机 opencode 已启用 LSP（编辑后编译/类型诊断秒级回流）；但 LSP 不跑单测，改 Kotlin/资源后仍须跑此脚本（编译 + detekt + 单测）确认。
 
 set -euo pipefail
 source "$(dirname "$0")/env.sh"

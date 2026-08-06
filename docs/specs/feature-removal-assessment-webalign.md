@@ -1,7 +1,7 @@
 # 功能移除评估：向 opencode web/TUI 极简状态机靠拢
 
 > **状态**：决策材料（不替用户做决定）。供用户选择激进/中度/保守档。
-> **基础**：`state-machine-simplification-v5.1-lean.md`（Phase A 整合）+ opencode 设计调研 + ocdroid 功能全貌调研。
+> **基础**：[`state-machine-simplification-v5.1-lean.md`](../archive/state-machine-simplification-v5.1-lean.md)（Phase A 整合，已归档）+ opencode 设计调研 + ocdroid 功能全貌调研。
 > **核心问题**：v5-lean/v5.1 已砍 ~50-58% 状态机行数。**还能更激进吗？** 本文档穷举 ocdroid 当前所有功能/保证，对照 opencode web/TUI 范式，逐项给决策材料。
 
 ---
@@ -369,8 +369,8 @@ opencode 用「事件折叠」替代 FSM。ocdroid 能迁移多少？
 
 ## 7. 相关文档
 
-- `docs/specs/state-machine-simplification-v5.1-lean.md` — Phase A 整合文档（v5-lean 修订版）
-- `docs/specs/state-machine-simplification-v5-lean.md` — v5-lean 原稿（历史）
+- `docs/archive/state-machine-simplification-v5.1-lean.md` — Phase A 整合文档（v5-lean 修订版）
+- `docs/archive/state-machine-simplification-v5-lean.md` — v5-lean 原稿（历史）
 - `.omni-orch/reports/v5lean-feasibility-ocdroid.md` — ocdroid 可行性调研
 - `.omni-orch/reports/opencode-fsm-study-summary.md` / `opencode-fsm-study-full.md` — opencode 设计调研
 - `/home/mar/personal_projects/oc-slimapi/.omni-orch/reports/v5lean-feasibility-slimapi.md` — slimapi 影响评估（跨项目只读）

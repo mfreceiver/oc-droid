@@ -26,16 +26,16 @@ export PATH="$JAVA_HOME/bin:$PATH:$ANDROID_HOME/platform-tools"
 - Debug 包**仅用于模拟器测试**，**禁止装到物理手机**（见「设备安全」）。
 - Release 包才可分发。
 
-## 改动校验（替代 LSP 自检，必做）
+## 改动校验（必做：LSP 管编译期，check.sh 管测试/detekt）
 
-本工作区 opencode 服务端已关闭 LSP，编辑后无编译器自动反馈。每次改 Kotlin/资源后必须：
+本机 opencode 已启用 LSP（编辑后编译/类型诊断秒级回流）；但 LSP 不跑单测/detekt，每次改 Kotlin/资源后仍必须：
 
 ```bash
 ./scripts/check.sh          # 编译 + 单测（默认）
 ./scripts/check.sh --full   # + lint + 覆盖率
 ```
 
-等价于手动 LSP 自检。详见 AGENTS.md「改动校验」。
+LSP 覆盖编译期诊断（快）；check.sh 是测试/detekt 的权威判据。详见 AGENTS.md「改动校验」。
 
 - **Daemon（v0.13.5）**：`check.sh` 默认 `./gradlew --no-daemon`（CI / 共享机安全）。本地 dev loop 想复用 daemon，`export OC_GRADLE_DAEMON=1` 后脚本切回 `./gradlew`（复用常驻 daemon 提速迭代）。
 - **Gradle 并行 / 缓存（v0.13.5）**：`gradle.properties` 已默认 `org.gradle.parallel=true` + `org.gradle.caching=true`。**`org.gradle.configuration-cache` 故意不开**——`app/build.gradle.kts` 配置期用 `ProcessBuilder("git", …)` 派生 `versionName`/`versionCode`（见 `versioning.md`），与 configuration-cache 不兼容（待迁 `providers.exec`/`ValueSource`）；在 git-versioning 迁移完成前不得手动开启。
@@ -82,13 +82,13 @@ export PATH="$JAVA_HOME/bin:$PATH:$ANDROID_HOME/platform-tools"
 ./scripts/release.sh <patch|minor|major>
 ```
 
-脚本内部依次执行：分支/工作区校验 → 质量门禁 → bump 版本 → assembleRelease → 产物归档 → commit + tag。
+脚本内部依次执行：分支/工作区校验 → 质量门禁 → 由最新 tag 推算下一版本 → assembleRelease → 产物归档 → 创建 annotated tag（**仅打 tag，不 commit**——版本号由 git 派生，无版本文件可 commit）。
 `git push` 与 `tea releases create` **不自动执行**（对外发布需人工确认），脚本只打印命令。
 
 ## 发布产物约定
 
 - APK 放项目根目录 `APK/`（gitignored，不入库）。
-- 命名：`oc-droid-<versionName>.apk`（如 `oc-droid-0.2.4.apk`）。
+- 命名：`oc-droid-<versionName>.apk`（如 `oc-droid-0.8.2-5f5f243.apk`——versionName 始终含短 commit hash）。
 - 应用名称：**OC Droid**。
 - tag：`v<versionName>`（如 `v0.2.4`），指向 main 分支提交。
 

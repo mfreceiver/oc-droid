@@ -4,7 +4,7 @@
 >
 > **Status**: approved by the user after rev-ogpt design review. This document is the authoritative implementation contract for background main-SSE transport loss and foreground recovery.
 >
-> **Scope precedence**: for reconnect ownership, transport liveness, retry, foreground recovery, and Service destruction, this document supersedes the corresponding reconnect clauses in [`l4-sse-lifecycle-design.md`](l4-sse-lifecycle-design.md) and [`slimapi-v2-adapt-traffic-plan.md`](slimapi-v2-adapt-traffic-plan.md).
+> **Scope precedence**: for reconnect ownership, transport liveness, retry, foreground recovery, and Service destruction, this document supersedes the corresponding reconnect clauses in [`l4-sse-lifecycle-design.md`](../archive/l4-sse-lifecycle-design.md) and [`slimapi-v2-adapt-traffic-plan.md`](slimapi-v2-adapt-traffic-plan.md).
 >
 > **Execution model**: implement M0-M8 by dependency wave with fresh fixer-zlm sessions. Modules in the same wave may run in parallel only when the write scopes below remain disjoint. Do not commit unless explicitly requested.
 

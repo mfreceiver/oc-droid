@@ -8,11 +8,11 @@ OCDroid — 基于 OpenCode 协议的原生 Android 客户端，用于远程连�
 - **会话导航**：Sessions 标签 = 所有项目所有根会话的**扁平历史**（按时间倒序、全量加载、无分页）；每张根会话卡片显示**未读点 / 待问「?」 / 待授权锁**，子 agent 的待处理沿 parentId 链聚合到根卡片（让底部 badge 可溯源到具体会话）；Chat 顶部 Tab 条切换「打开的」根会话（workdir hash 色高亮、可关闭 Tab），标题点击打开 SessionPickerSheet（全部 / 搜索 / 归档）；关闭所有 Tab 时顶栏显示 app 名+版本号、Git 页提示「未选取工作目录」、Chat 空态可点直达会话页；子 agent 会话在父会话内导航
 - **Files**：项目工作区——首屏「已连接的项目」列表（项目为**独立实体**：空项目 / 全归档项目不消失，仅显式断开才移除），每项目进入文件树浏览、git 状态标记、代码与 Markdown 预览；支持 `files?workdir=` 深链直达
 - **Settings**：服务器（连接配置、Basic Auth）、模型清单开关（启用/禁用逐模型）、缓存管理（每会话清除、失联会话清扫）、主题切换（Light / Dark / System）
-- **平板适配**：手机底部 Tab 导航，平板三栏布局（文件 / 预览 / Chat）
+- **导航架构**：hub-and-spoke 单 scaffold（`AppShell`）——Sessions 为首页（根），Chat / Files / Git / Settings 经会话卡片行操作或服务器状态入口进入；Chat 顶部 Tab 条切换「打开的」根会话（workdir hash 色高亮、可关闭）
 
 ## 环境要求
 
-- Android 8.0+（API 26）
+- Android 14+（API 34）
 - Android Studio（用于构建）
 - 运行中的 OpenCode Server（`opencode serve` 或 `opencode web`）
 
@@ -105,7 +105,7 @@ app/src/main/java/cn/vectory/ocdroid/
 
 ## 兼容的 OpenCode 服务端版本
 
-当前适配 **OpenCode Server v1.18.13**。
+兼容 OpenCode Server（按服务端 health 探测的版本动态启用能力，不锁定具体版本号）。
 
 ## License
 

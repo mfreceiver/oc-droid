@@ -1,6 +1,6 @@
 # ocdroid 会话状态机架构规格（authority 模式）
 
-> **状态**：**实施后规格（post-implementation spec）**——本文档反映 `main` 分支真实落地代码（HEAD `0871ca36`，含 P0-A/B/C/D/E/F + final-fix + slim 收官），由 5 路 explorer 核实 `file:line` 后沉淀。**不是**实施前计划（方案 v3 那份在 `docs/2026-07-30-ocdroid-state-machine-improvement-plan.md`，是历史快照）。
+> **状态**：**实施后规格（post-implementation spec）**——本文档反映 `main` 分支真实落地代码（HEAD `0871ca36`，含 P0-A/B/C/D/E/F + final-fix + slim 收官），由 5 路 explorer 核实 `file:line` 后沉淀。**不是**实施前计划（方案 v3 那份在 `docs/archive/2026-07-30-ocdroid-state-machine-improvement-plan.md`，是历史快照）。
 >
 > **定位**：本文件是 ocdroid **会话状态（session status）权威机**的架构规格。它**互补而非重复** `./architecture.md`：`architecture.md` 覆盖整体分层 / 双 API 变体 / OCR 冻结门面，但**没有**状态机段落；本文件把 `./decomposition-guidelines.md` §4.4「纯 Reducer」先例（`SlimSseStateMachine` / `SseChatReducers`）扩展为 authority 这一更大尺度的实例化，并给出其设计理念、硬约束、fence 模型、扩展指引与实践教训。
 >

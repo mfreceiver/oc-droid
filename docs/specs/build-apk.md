@@ -24,7 +24,7 @@
 | Kotlin | **2.2.10** | `gradle/libs.versions.toml` |
 | KSP | **2.3.6** | `gradle/libs.versions.toml` |
 | JDK | **21**（JBR，Android Studio 内置） | 需要 ≥17，实测 21 可用 |
-| compileSdk / minSdk / targetSdk | 35 / 26 / 34 | `app/build.gradle.kts` |
+| compileSdk / minSdk / targetSdk | 35 / 34 / 34 | `app/build.gradle.kts` |
 
 > 注意：JDK 21、android-35 平台、build-tools 35.0.x 本机已具备，可直接用。
 
@@ -196,7 +196,7 @@ git push origin main && git push origin "$TAG"
 | 项目 | 结果 |
 |------|------|
 | JDK | 21.0.9（JBR）✓ |
-| Android SDK | android-35 + build-tools 35.0.0/35.0.1 ✓ |
+| Android SDK | android-35 + build-tools 35.0.0/35.0.1（本机）；CI 镜像装 build-tools 36.0.0（见 `docker/ci-android/Dockerfile`，AGP 9.x 默认）✓ |
 | `./gradlew assembleDebug` | **BUILD SUCCESSFUL**（首次约 10+ 分钟）✓ |
 | Debug APK | `app/build/outputs/apk/debug/app-debug.apk`（约 26 MB，调试密钥签名）✓ |
 | Release 签名 | 已配置（`signingConfigs.release` 读 `local.properties`，凭证经 `pass` + `setup-signing.sh` 注入）；**v0.13.5 新 key**（cert SHA-256 `15:6C:58:B7…:F1:7A`）✓ |
