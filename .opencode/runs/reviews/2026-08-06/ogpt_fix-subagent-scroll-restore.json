@@ -1,0 +1,21 @@
+{
+  "agent": "ogpt",
+  "scope": "fix-subagent-scroll-restore",
+  "date": "2026-08-06",
+  "reviewed_commit": "9b386cf9",
+  "version_target": "0.20.14",
+  "verdict": "block",
+  "score": 6.5,
+  "blocking_issues": [
+    "Shared SavedStateHandle under launchSingleTop: nested P→C→G consumes :C{from:P} on enter-G (C≠G guard logic), feeding parent's checkpoint to grandchild as a wrong Restore and losing P's checkpoint for the later C→P return.",
+    "C→D unrelated jump consumes residual :C{from:P} (C≠D), applying P's checkpoint to D as a wrong Restore — a NEW regression introduced by the childId-based guard (the pre-fix code had already consumed it on enter-child).",
+    "Guard keyed only on childId cannot distinguish return-to-parent from enter-deeper-child or unrelated-jump; direction is necessary-but-not-sufficient."
+  ],
+  "non_blocking_issues": [
+    "Stale comments still assuming per-entry NavBackStackEntry / entry-pop auto-clean (ChatScaffold param KDoc, AppShell, SessionViewModel, SseChatReducers, ChatState).",
+    "multi-level test uses two independent SavedStateHandle instances, not matching the shared-slot reality; masks the nested bug.",
+    "No Compose/NavController-level integration test of the Latest→Restore timing.",
+    "first{totalItemsCount>0} early-trigger in UnifiedScrollConsumerEffect left unaddressed (acceptable: followBottom backstop + Restore does not read totalItemsCount)."
+  ],
+  "notes": "Round 1 review of the childId-based direction guard (plan D). Correctly identified that the single-slot shared-handle model breaks the childId guard under nesting/unrelated-jump. Drove the capturedFromSessionId upgrade applied in the same commit. The blocking issues above were RESOLVED by the upgrade — see the -r2 review."
+}

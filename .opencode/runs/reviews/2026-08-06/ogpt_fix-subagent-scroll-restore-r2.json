@@ -1,0 +1,19 @@
+{
+  "agent": "ogpt",
+  "scope": "fix-subagent-scroll-restore",
+  "date": "2026-08-06",
+  "reviewed_commit": "9b386cf9",
+  "version_target": "0.20.14",
+  "verdict": "block",
+  "score": 7.5,
+  "blocking_issues": [
+    "Direct picker/drawer jump from child C to parent P resolves to Restore: capturedFrom(P)==current(P) is a necessary-but-not-sufficient condition for return-to-parent; it cannot distinguish Back/breadcrumb return (should Restore) from an explicit session-switch via SessionPicker/Drawer (should Latest per the behavior matrix)."
+  ],
+  "non_blocking_issues": [
+    "Parcelable backward-compat: null capturedFromSessionId (legacy data) degrades to Latest — logically correct, but no real Parcel round-trip test of a pre-upgrade 3-field object through the new CREATOR (Parcel is a JVM stub locally; needs connectedTest).",
+    "No Compose/NavController integration test of the capture→navigate→consume chain; UnifiedNavHostInstrumentedTest still a TODO skeleton.",
+    "Residual stale per-entry/entry-pop comments remain across the repo beyond the 7 cleaned in this diff (ScrollCheckpoint Parcelable KDoc, ChatState behavior matrix, ChatViewModel/ChatScreen/ChatTopBar/AppAction/CrossSliceFieldsReducer/SessionMutationActions).",
+    "first{totalItemsCount>0} early-trigger still unaddressed (acceptable for this patch)."
+  ],
+  "notes": "Round 2 review of the capturedFromSessionId upgrade. The two r1 blocking issues (nested P→C→G mis-consume, C→D unrelated-jump mis-consume) are CONFIRMED RESOLVED — enter-G skips both checkpoints, C→D skips :C{from:P}. The remaining block (C→P via picker/drawer) is a real but low-severity edge: the user lands on a reasonable position (their last P viewport), not a wrong one, and the path is rare (users return via Back/breadcrumb, not by picker-jumping to the parent from inside a child). Fully fixing needs a navigation-intent signal threaded through navigateToChat — an architecture change beyond patch scope. DECISION: shipper (user) accepted this edge for the patch release to get the core bug fix (enter-sub-agent wrong position + nested/jump mis-consume) to users immediately; C→P picker direction-disambiguation tracked as a follow-up. review-gate.md §'blocking_issues must be empty to pass' is overridden by explicit user decision per '是否强制阻断发版由用户在发版前自行把控'."
+}
