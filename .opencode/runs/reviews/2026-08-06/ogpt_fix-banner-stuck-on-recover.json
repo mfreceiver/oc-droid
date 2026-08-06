@@ -1,0 +1,17 @@
+{
+  "agent": "ogpt",
+  "scope": "fix-banner-stuck-on-recover",
+  "date": "2026-08-06",
+  "reviewed_commit": "7ef41620",
+  "version_target": "0.20.13",
+  "verdict": "pass-with-fixes",
+  "score": 8.5,
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "🔴#1 AUTH_FAILURE 吞没（初版补丁）：Disconnected+sseConnected=true 无条件映射 Live 会清掉 AUTH_FAILURE banner，违反 AUTH_FAILURE>REST_OUTAGE 优先级契约。→ 已修：AUTH_GATE 门控 authFailureReason==null && mtlsDegradedError==null，补 3 个回归测试，commit 7ef41620。",
+    "🔴#2 stale-true 窗口可能 >3min 甚至无界（readTimeout(0)+eventCount==0 watchdog skip+无 readiness timeout）——既有 SSEClient/transport 健壮性缺陷，非本次回归。列为后续 issue：retry 时把 shared transport 轴置 false + first-frame/readiness 超时。",
+    "🟠#4 其它 UI 面（ChatEmptyState/连接图标/StatusPollOrchestrator）仍读 connectionPhase，banner 隐藏后可能短暂不一致——独立后续项。",
+    "🟡 建议：retry budget/jitter/first-frame timeout 改可注入配置，补 exhaustion/silent-reconnect 测试。"
+  ],
+  "notes": "初版 diff 评审为 CHANGES_REQUESTED。阻塞项 #1（AUTH_GATE）已采纳落地并 check.sh 全绿；#2/#4 为既有传输层问题/独立 UI 一致性项，文档化并列为后续 issue，不阻塞本次 patch 发版。确认 slim/legacy 接线层 mode-agnostic（无 TokenStream 混入 banner 的 shared sseConnectedFlow），仅质疑裸布尔证据强度（=#2 复述）。最终 amended code @ 7ef41620。"
+}

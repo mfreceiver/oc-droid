@@ -1,0 +1,14 @@
+{
+  "agent": "oracle",
+  "scope": "fix-banner-stuck-on-recover",
+  "date": "2026-08-06",
+  "reviewed_commit": "7ef41620",
+  "version_target": "0.20.13",
+  "verdict": "pass",
+  "score": 9.0,
+  "blocking_issues": [],
+  "non_blocking_issues": [
+    "stale-true 窗口：sseConnected 是 liveness flag 非 freshness token，retryWhen 预算内（名义 ~3min）真 outage banner 会延迟显示——有界自愈，列为后续 transport-freshness issue。"
+  ],
+  "notes": "方案评审（实现前）。确认根因成立：connectionPhase 仅由 REST 探针写（全仓仅 ConnectionHealthProbe 两处 Connected 写入点），SSE 自愈只写 sseConnected 不写 phase，无监听 sseConnected→true 重置 phase 的 coordinator。slim/legacy 共用同一 SSE 管线 + 同一 sseConnectedFlow 写入者，mode-agnostic 成立（本仓 legacy 是 instance 级 /global/event，TokenStreamClient 是 slimapi 专属且不写该 flow）。推荐方案 A（推导层覆盖），精确覆盖清单=仅 Disconnected+SseBootstrapFailed，绝不动 SseDisabled。后续 rev-ogpt #1 在此基础上追加 AUTH_GATE（authFailureReason/mtlsDegradedError 非空时不覆盖），已采纳落地。"
+}
