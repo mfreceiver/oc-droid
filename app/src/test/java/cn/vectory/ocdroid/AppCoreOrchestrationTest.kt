@@ -918,6 +918,31 @@ class AppCoreOrchestrationTest : MainViewModelTestBase() {
     }
 
     @Test
+    fun `performForceRefresh passes retries=3 so the probe survives transient network jitter`() = runTest {
+        // rev-ogpt MINOR 8 wiring guard: performForceRefresh (ChatTopBar "Force
+        // refresh") must pass retries=3 to the health probe. A single-shot
+        // probe (retries=0) fails under transient network jitter (DNS hiccup /
+        // brief connection drop) and the force refresh cannot recover the
+        // banner. Lock in retries=3 by asserting the probe is attempted 4 times
+        // (1 + 3 retries) when the server stays unhealthy. A regression back to
+        // retries=0 collapses this to a single attempt.
+        coEvery { repository.checkHealth() } returns Result.success(
+            cn.vectory.ocdroid.data.model.HealthResponse(healthy = false, version = "1.0"))
+        coEvery { repository.getMessagesPagedUnanchored(any(), any(), any()) } returns
+            Result.success(MessagesPage(emptyList(), null))
+        coEvery { repository.getSessionTodos(any()) } returns Result.success(emptyList())
+        val core = wire()
+        core.writeChat { it.copy(currentSessionId = "s1") }
+
+        core.performForceRefresh("s1")
+        advanceUntilIdle()
+
+        // retries=3 ⇒ 1 initial + 3 retries = 4 probes. A regression back to
+        // retries=0 (the pre-fix default) would be exactly 1.
+        coVerify(exactly = 4) { repository.checkHealth() }
+    }
+
+    @Test
     fun `explicit force-refresh surfaces feedback instead of silently swallowing when a load is in flight`() = runTest {
         // §force-refresh-guard: a user-triggered force-refresh must NOT be
         // silently swallowed when a load is already in flight. ColdStartChatReset

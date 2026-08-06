@@ -556,7 +556,10 @@ class ChatViewModel @Inject constructor(
         )
         if (!refreshed) return
         core.effectBus.tryEmitEffect(ControllerEffect.LoadSessions)
-        core.connectionCoordinator.testConnection(force = true, onSettled = { ok ->
+        // 与 performForceRefresh / coldStartReconnect 对齐 retries=3：banner Refresh 走本入口，
+        // 单次探测（retries=0）在网络抖动（DNS/连接中断）下必败，导致 banner 无法靠 banner
+        // 刷新清除。retries=3 扛过抖动期（engine 退避 2s/5s/15s）。
+        core.connectionCoordinator.testConnection(force = true, retries = 3, onSettled = { ok ->
             if (ok && !core.store.chatFlow.value.isLoadingMessages && !core.store.chatFlow.value.isLoadingMoreMessages) {
                 core.effectBus.tryEmitUiEvent(UiEvent.Success(R.string.success_refreshed))
             }

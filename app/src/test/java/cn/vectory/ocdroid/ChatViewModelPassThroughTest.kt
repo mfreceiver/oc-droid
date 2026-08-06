@@ -593,6 +593,37 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
         coVerify(atLeast = 1) { repository.checkHealth() }
     }
 
+    @Test
+    fun `refreshCurrentSession banner-entry path passes retries=3 so a flaky probe survives transient network jitter`() = runTest {
+        // rev-ogpt MAJOR 1 regression guard: the connection banner's Refresh
+        // button routes through refreshCurrentSession (NOT performForceRefresh).
+        // A single-shot probe (retries=0) fails under transient network jitter
+        // (DNS hiccup / brief connection drop), so the banner could not be
+        // cleared by its own Refresh — the user's core pain point. Lock in
+        // retries=3 by asserting the probe is attempted 4 times (1 + 3 retries)
+        // when the server stays unhealthy. A regression back to retries=0
+        // collapses this to a single attempt.
+        coEvery { repository.checkHealth() } returns Result.success(
+            cn.vectory.ocdroid.data.model.HealthResponse(healthy = false, version = "1.0"))
+        // §sse-rest-fallback (TODO 2): refreshCurrentSession re-fetches
+        // UNANCHORED (forceInitialWindow=true → getMessagesPagedUnanchored).
+        coEvery { repository.getMessagesPagedUnanchored(any(), any(), any()) } returns Result.success(
+            MessagesPage(emptyList(), null))
+        coEvery { repository.getSessionTodos(any()) } returns Result.success(emptyList())
+        every { repository.connectSSE(any()) } returns kotlinx.coroutines.flow.emptyFlow()
+        coEvery { repository.getCommands() } returns Result.success(emptyList())
+        val core = createCore()
+        val vm = ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
+        core.writeChat { it.copy(currentSessionId = "s1") }
+
+        vm.refreshCurrentSession()
+        advanceUntilIdle()
+
+        // retries=3 ⇒ 1 initial + 3 retries = 4 probes. The pre-fix bug
+        // (retries defaulted to 0 at this entry point) would be exactly 1.
+        coVerify(exactly = 4) { repository.checkHealth() }
+    }
+
     // ── togglePartExpand / clearExpandedParts ───────────────────────────────
 
     @Test
