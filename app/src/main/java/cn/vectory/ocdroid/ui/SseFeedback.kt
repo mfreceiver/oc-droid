@@ -98,10 +98,58 @@ internal fun deriveSseConnectionFeedback(
     ConnectionPhase.Reconnecting -> SseConnectionFeedback.Reconnecting(attempt = null, maxAttempts = null)
     is ConnectionPhase.ReconnectingAttempt -> SseConnectionFeedback.Reconnecting(attempt = phase.attempt, maxAttempts = phase.maxAttempts)
     ConnectionPhase.AwaitingTofuTrust -> SseConnectionFeedback.AwaitingTofuTrust
+    // §banner-stuck-on-recover fix: a live SSE frame is STRICTLY stronger
+    // evidence that the server is reachable than a REST probe, so when
+    // sseConnected=true it overrides the terminal REST-axis phases.
+    // Background: connectionPhase is written ONLY by the REST health probe
+    // (ConnectionHealthProbe — the sole writer of ConnectionPhase.Connected,
+    // confirmed by ServiceSseConnectionOwnerTest "SSE owner does NOT write
+    // Connected"). When the server drops and SSE self-heals via SSEClient's
+    // internal retryWhen (which writes ONLY sseConnected, never the phase),
+    // the phase stays pinned at Disconnected / SseBootstrapFailed even though
+    // the transport has recovered → the banner's category input never becomes
+    // null → the hysteresis state machine never reaches Hidden → the banner
+    // is stuck. Without this guard the manual refresh cannot clear it either:
+    // testConnection re-probes, but if SSE bootstrap races and Refuses at
+    // that instant the phase is re-stamped terminal (§degraded-connected-fix).
+    // Treating sseConnected=true as Live here lets BannerHysteresisOwner's
+    // combine(connectionFlow, sseConnectedFlow) re-derive category=null the
+    // moment the transport recovers, regardless of how it recovered.
+    //
+    // SseDisabled is INTENTIONALLY excluded: it is a user-driven debug toggle
+    // (REST-only by choice); user intent wins even if sseConnected is true.
+    //
+    // AUTH_GATE (rev-ogpt #1): the Live override is GATED on
+    // authFailureReason == null && mtlsDegradedError == null. A live SSE frame
+    // proves reachability but does NOT prove the credentials/cert are valid —
+    // an existing SSE connection can keep delivering heartbeats AFTER REST has
+    // started returning 401/403 (ConnectionHealthProbe stamps Disconnected +
+    // authFailureReason while the SSE transport is still up). Without this gate
+    // the override would swallow AUTH_FAILURE (Live.bannerCategory() is null
+    // unconditionally), violating the AUTH_FAILURE > REST_OUTAGE priority
+    // contract and hiding an actionable auth/cert problem. Auth failures stay
+    // surfaced until a fresh testConnection clears authFailureReason on REST
+    // success.
+    //
+    // Trade-off (accepted, pre-existing transport limitation — NOT introduced
+    // by this change): sseConnected is a liveness flag, not a freshness token.
+    // During SSEClient's internal retryWhen window no code flips it false
+    // (markRetrying exists but is unused), so after a REAL outage begins it can
+    // stay true for the retry budget (nominally ~3 min, worst-case longer if an
+    // attempt establishes TCP but delivers no events). In that window a genuine
+    // REST_OUTAGE banner is delayed until the budget exhausts → terminal drop →
+    // sseConnected=false. This is bounded in practice and self-healing; per-op
+    // REST failures still surface their own error feedback meanwhile. The AUTH
+    // GATE above ensures the high-priority AUTH_FAILURE case is never masked by
+    // a stale SSE flag. A proper fix (flip the shared transport axis to false
+    // on retry + add a first-frame/readiness timeout) is tracked as a separate
+    // follow-up — out of scope for this targeted banner-stuck patch.
     ConnectionPhase.Disconnected ->
-        SseConnectionFeedback.Disconnected(sinceMs = disconnectedSince ?: now, now = now)
+        if (sseConnected && authFailureReason == null && mtlsDegradedError == null) SseConnectionFeedback.Live
+        else SseConnectionFeedback.Disconnected(sinceMs = disconnectedSince ?: now, now = now)
     ConnectionPhase.SseBootstrapFailed ->
-        SseConnectionFeedback.SseBootstrapFailed(sinceMs = disconnectedSince ?: now)
+        if (sseConnected && authFailureReason == null && mtlsDegradedError == null) SseConnectionFeedback.Live
+        else SseConnectionFeedback.SseBootstrapFailed(sinceMs = disconnectedSince ?: now)
     ConnectionPhase.SseDisabled -> SseConnectionFeedback.Disabled
 }
 

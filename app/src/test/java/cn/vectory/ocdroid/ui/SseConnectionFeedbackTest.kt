@@ -84,6 +84,109 @@ class SseConnectionFeedbackTest {
         )
     }
 
+    // ── §banner-stuck-on-recover: sseConnected overrides terminal REST phases ──
+
+    @Test
+    fun `Disconnected with sseConnected true recovers to Live so the banner can clear`() {
+        // The fix: a live SSE frame is stronger reachability evidence than the
+        // REST probe. When SSE self-heals (SSEClient retryWhen) it writes ONLY
+        // sseConnected, never connectionPhase — so the phase stays Disconnected
+        // while the transport has recovered. Without this override the banner's
+        // category input never becomes null → stuck.
+        assertEquals(
+            SseConnectionFeedback.Live,
+            deriveSseConnectionFeedback(ConnectionPhase.Disconnected, disconnectedSince = 1_000L, sseConnected = true, now = 5_000L),
+        )
+    }
+
+    @Test
+    fun `SseBootstrapFailed with sseConnected true recovers to Live so the banner can clear`() {
+        // REST ok + SSE bootstrap Refused stamps SseBootstrapFailed; when SSE
+        // later delivers a frame the banner must clear (same override).
+        assertEquals(
+            SseConnectionFeedback.Live,
+            deriveSseConnectionFeedback(ConnectionPhase.SseBootstrapFailed, disconnectedSince = 1_000L, sseConnected = true, now = 5_000L),
+        )
+    }
+
+    @Test
+    fun `SseBootstrapFailed with sseConnected false stays SseBootstrapFailed`() {
+        // Pin the default (pre-fix) mapping — SseBootstrapFailed was previously
+        // uncovered by the exhaustive test.
+        assertEquals(
+            SseConnectionFeedback.SseBootstrapFailed(sinceMs = 1_000L),
+            deriveSseConnectionFeedback(ConnectionPhase.SseBootstrapFailed, disconnectedSince = 1_000L, sseConnected = false, now = 5_000L),
+        )
+    }
+
+    @Test
+    fun `SseDisabled is NOT overridden by sseConnected — user intent wins`() {
+        // Negative guard: SseDisabled is a user-driven debug toggle (REST-only
+        // by choice). It must remain Disabled even if sseConnected is true, so
+        // a user who deliberately turned live updates off still sees the
+        // "live updates are off" banner instead of it being silently cleared.
+        assertEquals(
+            SseConnectionFeedback.Disabled,
+            deriveSseConnectionFeedback(ConnectionPhase.SseDisabled, disconnectedSince = null, sseConnected = true, now = 5_000L),
+        )
+    }
+
+    // ── AUTH_GATE (rev-ogpt #1): sseConnected override must NOT swallow AUTH_FAILURE ──
+
+    @Test
+    fun `Disconnected with sseConnected true AND authFailureReason stays Disconnected not Live`() {
+        // A live SSE frame proves reachability but NOT credential validity. An
+        // existing SSE connection can keep delivering heartbeats AFTER REST has
+        // started returning 401/403 (ConnectionHealthProbe stamps Disconnected
+        // + authFailureReason while the SSE transport is still up). The override
+        // MUST be gated so AUTH_FAILURE stays surfaced (AUTH_FAILURE > REST_OUTAGE
+        // priority contract). Live would make bannerCategory() return null and
+        // hide an actionable auth/cert problem.
+        assertEquals(
+            SseConnectionFeedback.Disconnected(sinceMs = 1_000L, now = 5_000L),
+            deriveSseConnectionFeedback(
+                ConnectionPhase.Disconnected,
+                disconnectedSince = 1_000L,
+                sseConnected = true,
+                now = 5_000L,
+                authFailureReason = AuthFailureReason.HttpAuth(401, null),
+            ),
+        )
+    }
+
+    @Test
+    fun `Disconnected with sseConnected true AND mtlsDegradedError stays Disconnected not Live`() {
+        // Same AUTH_GATE, triggered by the config-driven mTLS cert degradation
+        // signal instead of a network auth failure.
+        assertEquals(
+            SseConnectionFeedback.Disconnected(sinceMs = 1_000L, now = 5_000L),
+            deriveSseConnectionFeedback(
+                ConnectionPhase.Disconnected,
+                disconnectedSince = 1_000L,
+                sseConnected = true,
+                now = 5_000L,
+                mtlsDegradedError = "cert missing",
+            ),
+        )
+    }
+
+    @Test
+    fun `SseBootstrapFailed with sseConnected true AND mtlsDegradedError stays SseBootstrapFailed not Live`() {
+        // Defensive: SseBootstrapFailed clears authFailureReason on REST success,
+        // but mtlsDegradedError is a separate config signal — the AUTH_GATE must
+        // still hold it surface-side.
+        assertEquals(
+            SseConnectionFeedback.SseBootstrapFailed(sinceMs = 1_000L),
+            deriveSseConnectionFeedback(
+                ConnectionPhase.SseBootstrapFailed,
+                disconnectedSince = 1_000L,
+                sseConnected = true,
+                now = 5_000L,
+                mtlsDegradedError = "cert missing",
+            ),
+        )
+    }
+
     @Test
     fun `showBanner is true for Disconnected Disabled and WaitingForStream`() {
         // §1.1 漏报 fix: WaitingForStream now returns true.
