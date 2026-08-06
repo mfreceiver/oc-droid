@@ -53,9 +53,18 @@ import kotlinx.coroutines.withTimeoutOrNull
  *
  * **Zero-regression gate**: [ConnectionCoordinator] only constructs this when
  * BOTH `appLifecycleMonitor` AND `identityStore` are non-null (production
- * wiring). The legacy [ConnectionCoordinatorTest] fixture leaves both null →
- * this controller is never started → existing tests are untouched (invariant
- * verified by the full test suite).
+ * wiring). The legacy [ConnectionCoordinatorTest] fixture leaves
+ * `appLifecycleMonitor` null → this controller is never started → existing
+ * tests are untouched (invariant verified by the full test suite).
+ *
+ * **Known limitation (rev-3 MAJOR 1, accepted)**: the probe runs via
+ * [ConnectionHealthProbe.testConnection] which launches on the shared app
+ * scope — cancelling this controller's episode does NOT cancel an in-flight
+ * probe. If the app backgrounds while a probe is running, the probe may
+ * complete and write Connected / connect SSE. This is the same design as all
+ * other testConnection callers (manual refresh, cold start, foreground
+ * reconnect). The proper fix (testConnection as suspend / returning a
+ * cancellable Job) is deferred to a future API refactor.
  */
 internal class ConnectionReprobeController(
     private val scope: CoroutineScope,
@@ -121,8 +130,9 @@ internal class ConnectionReprobeController(
                 DebugLog.i(TAG, "reprobe episode exiting: phase recovered (${conn.connectionPhase})")
                 return
             }
-            if (conn.authFailureReason != null || conn.mtlsDegradedError != null) {
-                DebugLog.i(TAG, "reprobe episode exiting: permanent failure signal (auth=${conn.authFailureReason != null}, mtls=${conn.mtlsDegradedError != null})")
+            if (conn.authFailureReason != null || conn.mtlsDegradedError != null ||
+                conn.slimapiVersionIncompatible != null) {
+                DebugLog.i(TAG, "reprobe episode exiting: permanent failure signal (auth=${conn.authFailureReason != null}, mtls=${conn.mtlsDegradedError != null}, version=${conn.slimapiVersionIncompatible != null})")
                 return
             }
             if (!isInForeground.value) {

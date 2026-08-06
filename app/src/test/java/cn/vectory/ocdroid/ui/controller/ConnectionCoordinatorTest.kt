@@ -1314,6 +1314,56 @@ class ConnectionCoordinatorTest {
         assertEquals(ConnectionPhase.Connected, connectionFlow.value.connectionPhase)
     }
 
+    @Test
+    fun `engine failure skips Disconnected when epoch advances during bootstrap`() {
+        // §rev-3 MAJOR 2: stale identity guard on failure. When engine.bootstrap()
+        // returns Failed but the epoch has advanced (host switch happened during
+        // the bootstrap), the probe must NOT write Disconnected — the new
+        // generation's connect flow is in progress.
+        val engine = mockk<ConnectionBootstrapEngine>()
+        val bootstrapBarrier = CompletableDeferred<ConnectionBootstrapOutcome>()
+        coEvery { engine.bootstrap() } coAnswers { bootstrapBarrier.await() }
+
+        val cc = ConnectionCoordinator(
+            scope = scope,
+            slices = slices,
+            repository = repository,
+            settingsManager = settingsManager,
+            effects = effects,
+            serverCompatProfile = cn.vectory.ocdroid.data.repository.ServerCompatProfile(),
+            clock = { now },
+            identityStore = identityStore,
+            connectionBootstrapEngine = engine,
+            bootstrapRetryPolicy = BootstrapRetryPolicy(),
+            sseOwner = sseOwner,
+            ownershipGate = ownershipGate,
+        )
+
+        // Set up an identity so currentEpoch() is known.
+        val originalIdentity = identityStore.bind("test-fp", "/work", "http://host:1234")
+        assertEquals(0L, originalIdentity.epoch)
+
+        val settled = mutableListOf<Boolean>()
+        cc.testConnection(force = true, onSettled = settled::add)
+
+        // Probe coroutine is parked inside engine.bootstrap() (awaiting
+        // bootstrapBarrier). Simulate a host switch by bumping the epoch.
+        identityStore.beginReconfigure() // epoch → 1
+
+        // Now let the bootstrap complete with a failure.
+        bootstrapBarrier.complete(ConnectionBootstrapOutcome.Failed(IOException("network timeout")))
+        runPending()
+
+        // The stale identity guard must prevent Disconnected from being written.
+        // Phase stays at Connecting (set by the probe start) — the guard returns
+        // without touching the connection state.
+        assertEquals(
+            "connectionPhase must NOT be Disconnected — guard skipped write",
+            ConnectionPhase.Connecting, slices.connection.value.connectionPhase,
+        )
+        assertEquals(listOf(false), settled)
+    }
+
     @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     @Test
     fun `engine retries=3 consumes delays in BootstrapRetryPolicy order 2s 5s 15s`() {

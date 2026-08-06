@@ -222,6 +222,22 @@ class ConnectionReprobeControllerTest {
     }
 
     @Test
+    fun `slimapi version cancels episode mid-flight`() {
+        settleResults.add(false)
+        store.slices.mutateConnection { it.copy(connectionPhase = ConnectionPhase.Disconnected) }
+        ctrl()
+        advance(5_000); assertEquals(1, probeCount)
+
+        store.slices.mutateConnection {
+            it.copy(slimapiVersionIncompatible = Triple(5, 3, 7))
+        }
+        advance()
+        val after = probeCount
+        advance(600_000)
+        assertEquals("version-incompatible signal should stop episode", after, probeCount)
+    }
+
+    @Test
     fun `no episode when connected`() {
         ctrl(); advance(600_000)
         assertEquals(0, probeCount)

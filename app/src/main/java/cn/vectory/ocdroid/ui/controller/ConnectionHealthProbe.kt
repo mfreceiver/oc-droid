@@ -175,8 +175,9 @@ internal class ConnectionHealthProbe(
      * (preserves the pre-extraction guard verbatim). On a healthy response:
      * mark connected, run [loadInitialData], and [startSSE]. On failure (or
      * healthy=false past the retry budget): surface the error and mark
-     * disconnected. [retries] extra attempts follow on failure with exponential
-     * backoff (1s, 2s, 4s, ...); default callers pass retries=0 (one-shot).
+     * disconnected. [retries] extra attempts follow on failure with backoff
+     * (legacy path: exponential 1s/2s/4s/...; engine path: BootstrapRetryPolicy
+     * [2s/5s/15s/...]); default callers pass retries=0 (one-shot).
      * Cold-start and explicit refresh callers ([coldStartReconnect],
      * [cn.vectory.ocdroid.ui.ChatViewModel.refreshCurrentSession],
      * performForceRefresh) opt into retries.
@@ -499,6 +500,14 @@ internal class ConnectionHealthProbe(
                 val delays = bootstrapRetryPolicy.delaysMs.take(retries.coerceAtLeast(0))
                 var attempt = 0
                 while (true) {
+                    // §rev-3 MAJOR 2: capture the epoch BEFORE engine.bootstrap()
+                    // so the terminal failure path can detect a host switch (epoch
+                    // advance) that happened during the bootstrap. Mirrors the
+                    // success-path stale-identity check (~L525) which uses
+                    // isCurrent(outcome.identity) — that approach only works when
+                    // the engine returns a ConnectionIdentity (Success); Failed
+                    // carries no identity, so we fall back to epoch comparison.
+                    val probeEpoch = identityStore?.currentEpoch()
                     when (val outcome = engine.bootstrap()) {
                         is ConnectionBootstrapOutcome.Success -> {
                             loadInitialData()
@@ -614,6 +623,21 @@ internal class ConnectionHealthProbe(
                         }
                         is ConnectionBootstrapOutcome.Failed -> {
                             if (attempt >= delays.size) {
+                                // §rev-3 MAJOR 2: stale identity guard on failure.
+                                // If the epoch advanced during engine.bootstrap()
+                                // (a host switch reconfigured the identity), do NOT
+                                // write Disconnected — the new generation's connect
+                                // flow (coldStart / probe under the new identity) is
+                                // in progress. Mirrors the success-path guard at ~L525
+                                // which uses isCurrent(outcome.identity).
+                                if (identityStore != null && probeEpoch != null &&
+                                    identityStore.currentEpoch() != probeEpoch
+                                ) {
+                                    DebugLog.i(TAG, "testConnectionWithEngine: stale identity on failure — skipping Disconnected write (new generation in progress)")
+                                    settled = true
+                                    onSettled?.invoke(false)
+                                    return@launch
+                                }
                                 effects.tryEmitUiEvent(
                                     UiEvent.Error(
                                         R.string.error_connection_failed,

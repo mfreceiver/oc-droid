@@ -324,8 +324,8 @@ class ConnectionCoordinator(
      * the connection banner's REST_OUTAGE dead-lock after transient network
      * blips. Only constructed when BOTH [appLifecycleMonitor] AND
      * [identityStore] are non-null (production wiring). The legacy test fixture
-     * leaves both null → this field is null → no reprobe logic runs → existing
-     * tests are untouched (zero-regression gate).
+     * leaves `appLifecycleMonitor` null → this field is null → no reprobe logic
+     * runs → existing tests are untouched (zero-regression gate).
      */
     private val reprobeController: ConnectionReprobeController? =
         if (appLifecycleMonitor != null && identityStore != null) {
