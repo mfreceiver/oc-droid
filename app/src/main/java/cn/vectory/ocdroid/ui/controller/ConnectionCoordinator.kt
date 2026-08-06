@@ -320,6 +320,27 @@ class ConnectionCoordinator(
     )
 
     /**
+     * rev-ogpt B (Disconnected 周期重探): resident supervisor that self-heals
+     * the connection banner's REST_OUTAGE dead-lock after transient network
+     * blips. Only constructed when BOTH [appLifecycleMonitor] AND
+     * [identityStore] are non-null (production wiring). The legacy test fixture
+     * leaves both null → this field is null → no reprobe logic runs → existing
+     * tests are untouched (zero-regression gate).
+     */
+    private val reprobeController: ConnectionReprobeController? =
+        if (appLifecycleMonitor != null && identityStore != null) {
+            ConnectionReprobeController(
+                scope = scope,
+                connectionFlow = slices.connection,
+                isInForeground = appLifecycleMonitor!!.isInForeground,
+                currentEpoch = { identityStore!!.currentEpoch() },
+                probe = { onSettled ->
+                    healthProbe.testConnection(force = true, retries = 0, onSettled = onSettled)
+                },
+            ).also { it.start() }
+        } else null
+
+    /**
      * fg/bg source switch. When the app goes to background, disconnect the SSE
      * transport (the foreground-return path re-probes and re-connects via the
      * health probe). Launched on the init scope — never runs during construction.
