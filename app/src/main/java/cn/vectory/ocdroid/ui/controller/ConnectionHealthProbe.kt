@@ -616,6 +616,17 @@ internal class ConnectionHealthProbe(
                                         listOf(errorMessageOrFallback(outcome.error, "unknown error")),
                                     ),
                                 )
+                                // §engine-path-diag (rev-2 MINOR 3): mirror legacy
+                                // testConnection's :428 diagnostic. The engine terminal-
+                                // failure path emitted only a transient UiEvent.Error
+                                // snackbar with NO DebugLog, so production engine-path
+                                // network failures (DNS / connection drop) left zero trace
+                                // in the in-app DebugLog viewer (设置→Debug).
+                                DebugLog.e(
+                                    TAG,
+                                    "testConnectionWithEngine: retry exhausted (budget=${delays.size}) -> Disconnected",
+                                    outcome.error,
+                                )
                                 // §F2: classify the terminal exception for
                                 // AUTH_FAILURE vs REST_OUTAGE banner
                                 // disambiguation (upstream 401/403 → HttpAuth).
