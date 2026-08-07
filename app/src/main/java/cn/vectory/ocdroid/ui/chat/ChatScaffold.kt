@@ -14,34 +14,20 @@ package cn.vectory.ocdroid.ui.chat
 
 import android.content.res.Configuration
 import androidx.activity.compose.BackHandler
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.text.selection.SelectionContainer
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SnackbarHost
-import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.VerticalDivider
-import androidx.compose.material3.rememberDrawerState
 import androidx.compose.material3.windowsizeclass.WindowSizeClass
 import androidx.compose.material3.windowsizeclass.WindowWidthSizeClass
 import androidx.compose.runtime.Composable
@@ -333,49 +319,14 @@ fun ChatScaffold(
             }
         }
 
-    // ── Chrome-only state (new for Phase 1B) ─────────────────────────────
-    // §0.8.2 P2: showContextSelector / showOverflow are
-    // GONE — the nav-icon workdir initial is non-clickable (P2.1), the
-    // ContextCueChip + server-status IconButton are removed (P2.2), and the
-    // overflow DropdownMenu is co-located with its ContextUsageRing trigger
-    // inside ChatTopBar (P2.3 — the fix for the top-left popup bug). The
-    // AgentPickerSheet + ModelPickerSheet triggers also moved into the
-    // overflow menu (the Composer's Agent/Model chips were deleted in P2.5);
-    // their sheet state lives HERE (ChatScaffold) because ChatTopBar only
-    // fires the open-callback, and the sheets need slice reads (settingsFlow
-    // for agents/providers; chatFlow for currentModel) that ChatScaffold
-    // already subscribes to. The picker composables themselves are defined in
-    // PickerSheets.kt (now `internal` so this file can call them).
-    var showAgentPicker by rememberSaveable { mutableStateOf(false) }
-    var showModelPicker by rememberSaveable { mutableStateOf(false) }
-    var showSessionPicker by rememberSaveable { mutableStateOf(false) }
-    var errorDetail by remember { mutableStateOf<String?>(null) }
-    // §1B-FIX (I6): dialog-state for the parity overflow entries (Todo +
-    // Context-usage). Owned here in ChatScaffold so the conversation
-    // overflow menu can open them. The dialogs themselves render the
-    // same body the old ChatTopBar used (TodoListPanel / ContextUsageDialog
-    // from this package).
-    var showTodoDialog by remember { mutableStateOf(false) }
-    var showContextDialog by remember { mutableStateOf(false) }
-    // §B: 强制中止确认弹窗
-    var showForceAbortConfirm by remember { mutableStateOf(false) }
-    // §drawer-new-session: workdir picker for the drawer header "new session"
-    // button when ≥2 workdirs are connected (mirrors SessionsScreen's flow).
-    // §L5a: owned HERE (ChatScaffold) because ChatOverlayHost reads it
-    // directly (the AppBottomSheet is gated on it). The drawer's
-    // `onStartNewSessionInDrawer` ≥2-workdir branch SETS it via the
-    // `onShowWorkdirPicker` callback passed to ChatDrawerHost; the workdir
-    // picker AppBottomSheet itself is rendered by ChatOverlayHost.
-    var pendingWorkdirPick by rememberSaveable { mutableStateOf(false) }
-    // §L5a (UI god-file split): `drawerInteractionLocked` MOVED into
-    // ChatDrawerHost (every read/write of it lives in the drawer tree — the
-    // two write sites in `onStartNewSessionInDrawer` and the one read site in
-    // RecentSessionsDrawer's `interactionsEnabled`). No reference to it
-    // remains in ChatScaffold.
-
+    // §Item15b: chrome/overlay state (picker flags, drawer, snackbar, image
+    // picker) extracted to `rememberChatChromeState` (ChatChromeState.kt).
+    val chromeState = rememberChatChromeState(
+        composerVM = composerVM,
+        onOpenDrawer = onOpenDrawer,
+    )
+    // Keep context for the snackbar effect blocks (still in this file).
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    val snackbarHostState = remember { SnackbarHostState() }
 
     // §home-hub T4: responsive top-left affordance + tablet drawer gating.
     // Hoisted here (formerly computed deep inside the chat Surface at §B3
@@ -399,43 +350,6 @@ fun ChatScaffold(
         Dimens.sessionSidebarWidthExpanded
     } else {
         Dimens.sessionSidebarWidthMedium
-    }
-
-    // §home-hub T4: drawerState owned here. The Menu button (tablet,
-    // ChatTopBar navigationIcon) opens it via [openDrawerAction]; a
-    // dedicated BackHandler (below, higher priority than root/parent) closes
-    // it when open. Edge-swipe-to-open is disabled via
-    // `gesturesEnabled = drawerState.isOpen` (false when closed) so the
-    // HorizontalPager tab-switcher never fights the drawer open gesture;
-    // when open, gestures re-enable so M3 Scrim tap-to-dismiss works.
-    val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
-    // §home-hub T4 (IMPORTANT-3 fix): the hamburger (Menu) button TOGGLES the
-    // drawer — open when closed, close when open (C2: "tap Menu again closes").
-    // The previous implementation always called drawerState.open(), so a
-    // second tap on an already-open drawer was a no-op instead of closing.
-    val openDrawerAction: () -> Unit = {
-        scope.launch {
-            if (drawerState.isOpen) drawerState.close() else drawerState.open()
-        }
-        // Fire the external hook AFTER kickiing the toggle so a T7 caller's
-        // telemetry / focus logic does not block the drawer animation.
-        onOpenDrawer()
-    }
-    val closeDrawerAction: () -> Unit = remember(scope, drawerState) {
-        { scope.launch { drawerState.close() } }
-    }
-
-    // Image picker (Photos Add-menu entry). Phase 1B ships only Photos;
-    // "Reference workspace file" and "Commands" are Phase 2/2b.
-    val imagePicker = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.GetMultipleContents()
-    ) { uris ->
-        scope.launch {
-            composerVM.addImageAttachments(loadImageAttachments(context, uris))
-        }
-    }
-    val onAddImages: () -> Unit = remember(imagePicker) {
-        { imagePicker.launch("image/*") }
     }
 
     // §Item15b: cross-slice derived views extracted to `rememberChatDerivedState`
@@ -549,8 +463,8 @@ fun ChatScaffold(
     // the root handler). `enabled = drawerState.isOpen` keeps it inert when
     // the drawer is closed, so phone (drawer never opens) and tablet (drawer
     // closed) back still flow to the root/parent handlers above.
-    BackHandler(enabled = drawerState.isOpen) {
-        closeDrawerAction()
+    BackHandler(enabled = chromeState.drawerState.isOpen) {
+        chromeState.closeDrawerAction()
     }
 
     // §PARITY: UiEvent error / success / info / debug collection. Slice-
@@ -560,21 +474,21 @@ fun ChatScaffold(
             val message = event.resolveMessage(context)
             when (event) {
                 is UiEvent.Error -> {
-                    snackbarHostState.showTimed(
+                    chromeState.snackbarHostState.showTimed(
                         message = errorMessage,
                         durationMillis = 3_000L,
                         actionLabel = errorActionLabel,
-                        onAction = { errorDetail = message }
+                        onAction = { chromeState.errorDetail = message }
                     )
                 }
                 is UiEvent.Success -> {
-                    snackbarHostState.showTimed(
+                    chromeState.snackbarHostState.showTimed(
                         message = message,
                         durationMillis = 2_500L
                     )
                 }
                 is UiEvent.Info -> {
-                    snackbarHostState.showTimed(
+                    chromeState.snackbarHostState.showTimed(
                         message = message,
                         durationMillis = 2_500L
                     )
@@ -590,7 +504,7 @@ fun ChatScaffold(
     // chromeSessionId val.
     LaunchedEffect(chat.staleNotice, chromeSessionId) {
         if (chat.staleNotice && chromeSessionId != null) {
-            snackbarHostState.showTimed(
+            chromeState.snackbarHostState.showTimed(
                 message = staleNoticeMessage,
                 actionLabel = staleNoticeActionLabel,
                 onAction = { chatVM.refreshCurrentSession(chromeSessionId) }
@@ -671,10 +585,10 @@ fun ChatScaffold(
             // its SavedStateHandle. The parent's LaunchedEffect replays the
             // Restore checkpoint.
             onNavigateParent = { sessionVM.returnToParent { pid -> orchestratorVM.navigateToChat(pid) } },
-            onOpenContextDialog = { showContextDialog = true },
-            onOpenTodoDialog = { showTodoDialog = true },
-            onOpenAgentPicker = { showAgentPicker = true },
-            onOpenModelPicker = { showModelPicker = true },
+            onOpenContextDialog = { chromeState.showContextDialog = true },
+            onOpenTodoDialog = { chromeState.showTodoDialog = true },
+            onOpenAgentPicker = { chromeState.showAgentPicker = true },
+            onOpenModelPicker = { chromeState.showModelPicker = true },
             // §sse-rest-fallback (强制刷新 = SSE-disconnect REST 兜底): the
             // user's explicit "Force refresh" — clear the current session
             // window, wipe messages/parts, full UNANCHORED re-fetch (bypass a
@@ -685,7 +599,7 @@ fun ChatScaffold(
             // testConnection + LoadSessions) so the logic is shared + unit-
             // tested at the orchestration layer. When no session is open, only
             // the session-list resync applies.
-            onForceAbort = { showForceAbortConfirm = true },
+            onForceAbort = { chromeState.showForceAbortConfirm = true },
             onForceRefresh = {
                 val sid = chromeSessionId
                 if (sid != null) {
@@ -728,12 +642,10 @@ fun ChatScaffold(
     // drawer-local state (drawerInteractionLocked + onStartNewSessionInDrawer)
     // MOVED into ChatDrawerHost (ChatDrawerHost.kt). The chat body Column
     // below is the trailing `content` lambda — verbatim, every local
-    // ChatScaffold read inside it is still in scope. The `closeDrawerAction`
-    // + `drawerState` STAY owned here (the drawer-close BackHandler @455-457
-    // composes AFTER the parent/root handlers and reads drawerState.isOpen;
-    // `onShowWorkdirPicker = { pendingWorkdirPick = true }` keeps
-    // pendingWorkdirPick owned+consumed in ChatScaffold (ChatOverlayHost
-    // reads it directly).
+    // ChatScaffold read inside it is still in scope. `closeDrawerAction`
+    // + `drawerState` are now on `chromeState` (ChatChromeState.kt).
+    // `onShowWorkdirPicker = { chromeState.pendingWorkdirPick = true }`
+    // keeps pendingWorkdirPick owned+consumed in ChatScaffold.
     // §P2-item2: new-session handler for the persistent sidebar
     // (mirrors ChatDrawerHost's onStartNewSessionInDrawer but without
     // drawer close animation — the sidebar is always visible).
@@ -745,7 +657,7 @@ fun ChatScaffold(
                     sessionVM.createSessionInWorkdir(recentWorkdirs.single())
                 }
                 else -> {
-                    pendingWorkdirPick = true
+                    chromeState.pendingWorkdirPick = true
                 }
             }
         }
@@ -758,11 +670,11 @@ fun ChatScaffold(
             ChatTopBar(
                 state = topBarState,
                 actions = topBarActions,
-                onTitleClick = { showSessionPicker = true },
+                onTitleClick = { chromeState.showSessionPicker = true },
                 // §home-hub T4 (C1/C3): responsive top-left affordance. ChatTopBar
                 // branches on width internally (phone ArrowBack / tablet Menu).
                 onBackToHome = onBackToHome,
-                onOpenDrawer = openDrawerAction,
+                onOpenDrawer = chromeState.openDrawerAction,
             )
 
             // §persistent-restart-required (Medium-1): show a persistent error
@@ -911,7 +823,7 @@ fun ChatScaffold(
                         // text is ignored when Retry wins, exactly what the
                         // scheme specifies).
                         SnackbarHost(
-                            hostState = snackbarHostState,
+                            hostState = chromeState.snackbarHostState,
                             modifier = Modifier.align(Alignment.BottomCenter)
                         )
                         StatusSlot(
@@ -1022,7 +934,7 @@ fun ChatScaffold(
                     isAborting = chromeSessionId != null && chromeSessionId in sessionList.abortPendingSessionIds,
                     questionPending = pendingQuestion != null,
                     isSubagent = isSubagentSession,
-                    onAddImages = onAddImages,
+                    onAddImages = chromeState.onAddImages,
                     onAbort = { chatVM.abortSession(chromeSessionId) },
                 )
             }
@@ -1087,17 +999,17 @@ fun ChatScaffold(
         }
     } else {
         ChatDrawerHost(
-            drawerState = drawerState,
+            drawerState = chromeState.drawerState,
             sessions = recentSessionsForDrawer,
             recentWorkdirs = recentWorkdirs,
             sessionErrorsById = sessionList.sessionErrorsById,
             sessionVM = sessionVM,
-            closeDrawerAction = closeDrawerAction,
+            closeDrawerAction = chromeState.closeDrawerAction,
             onBackToHome = onBackToHome,
             onRefreshSessions = {
                 chatVM.core.effectBus.tryEmitEffect(ControllerEffect.LoadSessions)
             },
-            onShowWorkdirPicker = { pendingWorkdirPick = true },
+            onShowWorkdirPicker = { chromeState.pendingWorkdirPick = true },
                 // §P2-3 (rev-glm): guard against re-navigating to the current
                 // session (idempotent freshness-token renewal, but wasteful);
                 // mirrors the sidebar path's `if (sid != chromeSessionId)`.
@@ -1115,7 +1027,7 @@ fun ChatScaffold(
     }
 
     // ── §B: 强制中止确认弹窗 ────────────────────────────────────────────────
-    if (showForceAbortConfirm) {
+    if (chromeState.showForceAbortConfirm) {
         AppConfirmDialog(
             title = stringResource(R.string.chat_force_abort_confirm_title),
             bodyContent = {
@@ -1124,34 +1036,34 @@ fun ChatScaffold(
             confirmText = stringResource(R.string.chat_force_abort),
             onConfirm = {
                 chatVM.abortSessionRecursive(chromeSessionId)
-                showForceAbortConfirm = false
+                chromeState.showForceAbortConfirm = false
             },
             dismissText = stringResource(R.string.common_cancel),
-            onDismiss = { showForceAbortConfirm = false },
+            onDismiss = { chromeState.showForceAbortConfirm = false },
         )
     }
 
     // ── Phase 1B sheets / overflows / dialogs (new) ──────────────────────
     ChatOverlayHost(
-        showAgentPicker = showAgentPicker,
-        showModelPicker = showModelPicker,
-        showSessionPicker = showSessionPicker,
-        showTodoDialog = showTodoDialog,
-        showContextDialog = showContextDialog,
-        pendingWorkdirPick = pendingWorkdirPick,
-        errorDetail = errorDetail,
-        onDismissAgentPicker = { showAgentPicker = false },
-        onPickAgent = { name -> composerVM.selectAgent(name); showAgentPicker = false },
-        onDismissModelPicker = { showModelPicker = false },
+        showAgentPicker = chromeState.showAgentPicker,
+        showModelPicker = chromeState.showModelPicker,
+        showSessionPicker = chromeState.showSessionPicker,
+        showTodoDialog = chromeState.showTodoDialog,
+        showContextDialog = chromeState.showContextDialog,
+        pendingWorkdirPick = chromeState.pendingWorkdirPick,
+        errorDetail = chromeState.errorDetail,
+        onDismissAgentPicker = { chromeState.showAgentPicker = false },
+        onPickAgent = { name -> composerVM.selectAgent(name); chromeState.showAgentPicker = false },
+        onDismissModelPicker = { chromeState.showModelPicker = false },
         onSwitchModel = { providerId, modelId ->
             composerVM.switchSessionModel(providerId, modelId)
-            showModelPicker = false
+            chromeState.showModelPicker = false
         },
         onClearModel = {
             composerVM.clearSessionModel()
-            showModelPicker = false
+            chromeState.showModelPicker = false
         },
-        onDismissSessionPicker = { showSessionPicker = false },
+        onDismissSessionPicker = { chromeState.showSessionPicker = false },
         // §B3: the SessionPickerSheet selection is a session-OPENING entry
         // point — route it through navigateToChat (route-aware pipeline) so it
         // mints the freshness token + dispatches openForRoute, matching the
@@ -1160,24 +1072,24 @@ fun ChatScaffold(
         // open a chat.
         onSelectSession = { sessionId ->
             orchestratorVM.navigateToChat(sessionId)
-            showSessionPicker = false
+            chromeState.showSessionPicker = false
         },
         onNewSession = {
             sessionVM.createSession()
-            showSessionPicker = false
+            chromeState.showSessionPicker = false
         },
-        onDismissTodo = { showTodoDialog = false },
-        onDismissContext = { showContextDialog = false },
+        onDismissTodo = { chromeState.showTodoDialog = false },
+        onDismissContext = { chromeState.showContextDialog = false },
         onCompactContext = {
-            showContextDialog = false
+            chromeState.showContextDialog = false
             chatVM.compactSession()
         },
-        onDismissWorkdirPick = { pendingWorkdirPick = false },
+        onDismissWorkdirPick = { chromeState.pendingWorkdirPick = false },
         onPickWorkdir = { workdir ->
-            pendingWorkdirPick = false
+            chromeState.pendingWorkdirPick = false
             sessionVM.createSessionInWorkdir(workdir)
         },
-        onDismissError = { errorDetail = null },
+        onDismissError = { chromeState.errorDetail = null },
         // Derived slice values
         agents = settings.agents.filter { it.isVisible },
         currentAgentName = effectiveAgent,
