@@ -114,8 +114,8 @@ sealed interface AppAction {
      * entry): clears chat (currentSessionId / messages / partsByMessage /
      * streaming overlays / currentModel — the prior session's inferred model
      * must NOT leak into the draft picker), clears sessionList.sessionTodos,
-     * and resets composer (inputText / imageAttachments / fileReferences
-     * cleared, draftWorkdir set to [workdir]).
+     * and resets composer (inputText / imageAttachments cleared,
+     * draftWorkdir set to [workdir]).
      *
      * Carries only the [workdir] string — every other field is a constant
      * reset, so no need to parameterize.

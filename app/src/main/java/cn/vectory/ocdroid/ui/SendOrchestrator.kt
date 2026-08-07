@@ -74,7 +74,7 @@ internal class SendOrchestrator @Inject constructor(
         val fp = currentProfileId()
         settingsManager.setDraftText(fp, sessionId, "")
         settingsManager.flushDraftText()
-        store.mutateComposer { it.copy(inputText = "", imageAttachments = emptyList(), fileReferences = emptyList()) }
+        store.mutateComposer { it.copy(inputText = "", imageAttachments = emptyList()) }
 
         sessionSwitcher.requestLatestScroll(sessionId)
 
@@ -103,7 +103,7 @@ internal class SendOrchestrator @Inject constructor(
                 onSuccess = {
                     settingsManager.setDraftText(fp, sessionId, "")
                     settingsManager.flushDraftText()
-                    store.mutateComposer { it.copy(inputText = "", imageAttachments = emptyList(), fileReferences = emptyList()) }
+                    store.mutateComposer { it.copy(inputText = "", imageAttachments = emptyList()) }
                 },
                 onComplete = {
                     store.mutateComposer { state -> state.copy(sendingSessionIds = state.sendingSessionIds - sessionId) }
@@ -167,12 +167,10 @@ internal class SendOrchestrator @Inject constructor(
         val currentComposer = store.composerFlow.value
         val textMatches = currentComposer.inputText.trim() == payload.text
         val attachmentsMatch = currentComposer.imageAttachments == payload.attachments
-        val fileRefsMatch = currentComposer.fileReferences == payload.fileReferences
         store.mutateComposer { c ->
             c.copy(
                 inputText = if (textMatches) "" else c.inputText,
                 imageAttachments = if (attachmentsMatch) emptyList() else c.imageAttachments,
-                fileReferences = if (fileRefsMatch) emptyList() else c.fileReferences,
             )
         }
         if (textMatches) {

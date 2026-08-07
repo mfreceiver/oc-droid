@@ -156,7 +156,6 @@ class ForegroundCatchUpControllerTest {
                 draftWorkdir = "/tmp/proj",
                 inputText = "half-typed draft",
                 imageAttachments = emptyList(),
-                fileReferences = emptyList(),
             )
         }
         store.mutateChat { it.copy(currentSessionId = null) }

@@ -59,7 +59,6 @@ internal class DraftSessionOrchestrator @Inject constructor(
             attachments = store.composerFlow.value.imageAttachments.toList(),
             agent = chatState.pendingAgent ?: inferCurrentAgent(chatState.messages, visibleAgents),
             model = chatState.pendingModel ?: inferCurrentModel(chatState.messages, visibleAgents),
-            fileReferences = store.composerFlow.value.fileReferences.toList(),
         )
         materializeDraftSession(capturedPayload = payload)
     }

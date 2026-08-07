@@ -58,14 +58,8 @@ class RevertConversation(private val core: AppCore) {
                     revertCutoffs = core.store.chatFlow.value.revertCutoffs
                 )
             }.onFailure { DebugLog.w("RevertConversation", "persist cutoff failed: ${it.message}") }
-            // §1B-FIX (I4): also clear fileReferences on revert-success
-            // — the message text being restored is the original pre-revert
-            // text, but the file-reference chip set was attached to the
-            // later state (after the message being reverted was sent).
-            // The user has no semantic link between the old draft text and
-            // the chip set, so the chips must be cleared.
             core.writeComposer {
-                it.copy(inputText = draft, imageAttachments = emptyList(), fileReferences = emptyList())
+                it.copy(inputText = draft, imageAttachments = emptyList())
             }
             runCatching {
                 core.settingsManager.setDraftText(core.currentProfileId(), sessionId, draft)

@@ -290,7 +290,6 @@ class SessionViewModel @Inject constructor(
                 it.copy(
                     inputText = "",
                     imageAttachments = emptyList(),
-                    fileReferences = emptyList(),
                 )
             }
             // §B4 / §10: force popToSessions (navEpoch bump covers Files/Git
@@ -346,7 +345,7 @@ class SessionViewModel @Inject constructor(
         // §A5-3 Phase B2 (release-gate fix A): the pre-B2 sequence — mutateChat
         // (clear chat + streaming), mutateSessionList (clear sessionTodos),
         // mutateChat (clear currentModel), mutateComposer (clear inputText +
-        // attachments + fileReferences, set draftWorkdir) — is collapsed into
+        // attachments, set draftWorkdir) — is collapsed into
         // ONE atomic dispatch, mirroring the effect path
         // (AppCoreOrchestration.createSessionInWorkdirForEffect). The reducer
         // ([AppAction.WorkdirDraftStarted]) performs exactly these writes

@@ -338,10 +338,9 @@ class SessionSwitcherTest {
     }
 
     @Test
-    fun `switchTo clears fileReferences and imageAttachments (I4 parity)`() {
-        // §1B-FIX (I4): file-reference chips must NOT leak across
-        // sessions. The restored draft text is preserved, but the
-        // chip set + image attachments are wiped on every switch.
+    fun `switchTo clears imageAttachments (I4 parity)`() {
+        // image attachments must NOT leak across sessions.
+        // The restored draft text is preserved, but attachments are wiped.
         callbacks.drafts["s2"] = "draft-for-s2"
         seed {
             it.copy(
@@ -358,9 +357,6 @@ class SessionSwitcherTest {
                         dataUrl = "data:,",
                         thumbnailData = ByteArray(0),
                         byteSize = 0)
-                ),
-                fileReferences = listOf(
-                    cn.vectory.ocdroid.ui.ComposerFileReference(path = "/leaked.kt")
                 ))
         }
 
@@ -368,8 +364,7 @@ class SessionSwitcherTest {
 
         // Restored new draft (text preserved from settings).
         assertEquals("draft-for-s2", composerFlow.value.inputText)
-        // fileReferences + imageAttachments wiped on switch.
-        assertTrue(composerFlow.value.fileReferences.isEmpty())
+        // imageAttachments wiped on switch.
         assertTrue(composerFlow.value.imageAttachments.isEmpty())
     }
 

@@ -28,10 +28,6 @@ internal fun reduceWorkdirDraftStarted(state: StoreState, action: AppAction.Work
     composer = state.composer.copy(
         inputText = "",
         imageAttachments = emptyList(),
-        // §1B-FIX (I4): also clear fileReferences on draft-create so a
-        // chip from the previous session's draft does not survive the
-        // workdir switch.
-        fileReferences = emptyList(),
         draftWorkdir = action.workdir,
     ),
 )

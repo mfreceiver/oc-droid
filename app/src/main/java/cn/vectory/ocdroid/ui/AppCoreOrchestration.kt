@@ -35,17 +35,12 @@ import cn.vectory.ocdroid.util.runSuspendCatching
  * [agent] / [model] are the RESOLVED values (pendingAgent ?: infer ?: null)
  * at send-click, NOT a re-inference after the route flip.
  *
- * §blocker1: [fileReferences] is captured so the compare-and-clear in
- * [dispatchCapturedSend] can decide whether the chips still match the click-
- * time set (only clear if unchanged; preserve if the user edited during the
- * createSession await).
  */
 data class CapturedSendPayload(
     val text: String,
     val attachments: List<ComposerImageAttachment>,
     val agent: String?,
     val model: Message.ModelInfo?,
-    val fileReferences: List<ComposerFileReference> = emptyList(),
 )
 
 /**

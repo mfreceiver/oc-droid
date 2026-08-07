@@ -684,13 +684,9 @@ class AppActionReducerTest {
                 sessions = listOf(Session(id = "keep", directory = "/k")),  // sessions NOT cleared
             ),
             composer = ComposerState(
-                inputText = "stale text",
-                // imageAttachments omitted — the complex ComposerImageAttachment
-                // ctor is irrelevant to this assertion; inputText + fileReferences
-                // + draftWorkdir are the fields the reducer resets + asserts.
-                imageAttachments = emptyList(),
-                fileReferences = listOf(ComposerFileReference(path = "/old.kt")),
-                draftWorkdir = null))
+                    inputText = "stale text",
+                    imageAttachments = emptyList(),
+                    draftWorkdir = null))
 
         val out = reduce(prior, AppAction.WorkdirDraftStarted(workdir = "/new"))
 
@@ -700,7 +696,6 @@ class AppActionReducerTest {
         // composer fully reset + draftWorkdir set.
         assertEquals("", out.composer.inputText)
         assertTrue(out.composer.imageAttachments.isEmpty())
-        assertTrue(out.composer.fileReferences.isEmpty())
         assertEquals("/new", out.composer.draftWorkdir)
     }
 
@@ -830,7 +825,7 @@ class AppActionReducerTest {
         val store = SharedStateStore()
         store.mutateChat { it.copy(currentSessionId = "old", currentModel = Message.ModelInfo("p", "m")) }
         store.mutateSessionList { it.copy(sessionTodos = mapOf("old" to listOf(TodoItem(content = "t", status = "pending", priority = "normal", id = "t1")))) }
-        store.mutateComposer { it.copy(inputText = "stale", fileReferences = listOf(ComposerFileReference(path = "/x"))) }
+        store.mutateComposer { it.copy(inputText = "stale") }
 
         val seen = mutableListOf<StoreState>()
         val job = launch {
@@ -849,7 +844,6 @@ class AppActionReducerTest {
         assertNull(finalState.chat.currentModel)
         assertTrue(finalState.sessionList.sessionTodos.isEmpty())
         assertEquals("", finalState.composer.inputText)
-        assertTrue(finalState.composer.fileReferences.isEmpty())
         assertEquals("/proj", finalState.composer.draftWorkdir)
         job.cancel()
     }

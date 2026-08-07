@@ -8,7 +8,7 @@
 // list, streaming overlay, gap-paging, scroll anchoring, draft lifecycle,
 // metadata-marker injection, and unread clearing are delegated to
 // ChatMessageList without re-implementing any of it. New state slice fields
-// (ComposerState.fileReferences) are additive only.
+// New state slice fields are additive only.
 
 package cn.vectory.ocdroid.ui.chat
 
