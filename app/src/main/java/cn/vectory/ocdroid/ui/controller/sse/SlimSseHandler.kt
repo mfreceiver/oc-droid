@@ -10,6 +10,8 @@ import cn.vectory.ocdroid.util.DebugLog
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
 
 /**
  * T2 §3.1: handler for slim-wire [cn.vectory.ocdroid.service.slimapi] events:
@@ -42,8 +44,8 @@ class SlimSseHandler(private val host: SseDispatchHost) : SseEventHandler {
         val props = event.payload.properties
         val errObj = props?.get("error") as? JsonObject
         // name: top-level first, fall back to nested error.name.
-        val name = (props?.get("name") as? kotlinx.serialization.json.JsonPrimitive)?.content
-            ?: (errObj?.get("name") as? kotlinx.serialization.json.JsonPrimitive)?.content
+        val name = (props?.get("name") as? JsonPrimitive)?.content
+            ?: (errObj?.get("name") as? JsonPrimitive)?.content
         // V2 §3:95: abort (MessageAbortedError) is silently discarded by the
         // sidecar. Defensive client-side guard: if it leaks through, do NOT
         // produce an error surface (no SessionError effect, no
@@ -52,23 +54,36 @@ class SlimSseHandler(private val host: SseDispatchHost) : SseEventHandler {
 
         // data: nested-only
         val data = errObj?.get("data") as? JsonObject
-        // message: top-level first, then nested, then fallback
-        val rawMsg = (props?.get("message") as? kotlinx.serialization.json.JsonPrimitive)?.content
-            ?: (data?.get("message") as? kotlinx.serialization.json.JsonPrimitive)?.content
-            ?: (data?.get("error") as? kotlinx.serialization.json.JsonPrimitive)?.content
-            ?: (errObj?.get("message") as? kotlinx.serialization.json.JsonPrimitive)?.content
-            ?: (errObj?.get("error") as? kotlinx.serialization.json.JsonPrimitive)?.content
-            ?: "Server session error"
+        // realMsg: fallback chain WITHOUT the final "Server session error"
+        // — used for injecting into LastAssistantErrorAttached so the
+        // MessageError.message getter can resolve it.
+        val realMsg = (props?.get("message") as? JsonPrimitive)?.content?.takeIf { it.isNotBlank() }
+            ?: (data?.get("message") as? JsonPrimitive)?.content?.takeIf { it.isNotBlank() }
+            ?: (data?.get("error") as? JsonPrimitive)?.content?.takeIf { it.isNotBlank() }
+            ?: (errObj?.get("message") as? JsonPrimitive)?.content?.takeIf { it.isNotBlank() }
+            ?: (errObj?.get("error") as? JsonPrimitive)?.content?.takeIf { it.isNotBlank() }
+        // rawMsg: same chain with final fallback, for snackbar/banner display
+        val rawMsg = realMsg ?: "Server session error"
         // at: top-level first, fall back to nested error.at.
-        val at = (props?.get("at") as? kotlinx.serialization.json.JsonPrimitive)?.content?.toLongOrNull()
-            ?: (errObj?.get("at") as? kotlinx.serialization.json.JsonPrimitive)?.content?.toLongOrNull()
+        val at = (props?.get("at") as? JsonPrimitive)?.content?.toLongOrNull()
+            ?: (errObj?.get("at") as? JsonPrimitive)?.content?.toLongOrNull()
+        // Inject realMsg into error data so MessageError.message getter can
+        // resolve it, without polluting with the "Server session error" fallback.
+        val mergedData = if (realMsg != null) {
+            buildJsonObject {
+                data?.forEach { (k, v) -> put(k, v) }
+                put("message", JsonPrimitive(realMsg))
+            }
+        } else {
+            data
+        }
         host.applySseSideEffects(listOf(SseSideEffect.SessionError(name = name, rawMsg = rawMsg)))
         val sid = event.payload.getString("sessionID")
-            ?: (props?.get("sessionID") as? kotlinx.serialization.json.JsonPrimitive)?.content
+            ?: (props?.get("sessionID") as? JsonPrimitive)?.content
         if (sid != null && sid == host.slices.chat.value.currentSessionId) {
             host.slices.store.dispatch(
                 AppAction.LastAssistantErrorAttached(
-                    error = Message.MessageError(name = name, data = data),
+                    error = Message.MessageError(name = name, data = mergedData),
                     expectedRouteInstance = host.slices.routeInstanceFor(sid),
                     sessionId = sid,
                 )

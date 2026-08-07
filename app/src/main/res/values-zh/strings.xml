@@ -7,6 +7,7 @@
     <string name="nav_git">Git</string>
     <string name="nav_sessions">会话</string>
     <string name="nav_settings">设置</string>
+    <string name="common_clear">清除</string>
     <string name="settings_title">设置</string>
     <string name="settings_appearance">外观</string>
     <string name="settings_theme">主题</string>
@@ -162,6 +163,9 @@
     <string name="todo_empty">暂无待办</string>
     <string name="todo_completed_count">%1$d/%2$d 已完成</string>
     <string name="chat_force_refresh">强制刷新</string>
+    <string name="chat_force_abort">强制中止</string>
+    <string name="chat_force_abort_confirm_title">强制中止？</string>
+    <string name="chat_force_abort_confirm_message">强制中止将递归中止当前会话及其全部子任务，已生成的内容无法撤回。</string>
     <string name="chat_context">上下文</string>
     <string name="chat_compact_session">压缩</string>
     <string name="chat_no_host_fallback">无主机</string>
@@ -183,10 +187,12 @@
     <string name="chat_remove_image">移除图片</string>
     <string name="chat_send">发送</string>
     <string name="chat_type_message">输入消息...</string>
+    <string name="chat_input_disabled_subagent">此会话为只读</string>
     <string name="chat_interrupt_agent">中断 agent</string>
     <string name="chat_stop">停止</string>
     <string name="chat_stop_confirm_title">停止运行？</string>
     <string name="chat_stop_confirm_message">当前任务将被中断，已发送的内容无法撤回。</string>
+    <string name="chat_abort_request_sent">中止请求已发送，等待服务端响应</string>
     <string name="chat_agent_running">Agent 运行中</string>
     <string name="chat_more_options">更多操作</string>
     <string name="chat_edit_from_here">从这里编辑</string>

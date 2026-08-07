@@ -245,7 +245,6 @@ internal fun statusSlotPlacement(contentHeightPx: Int, gapPx: Int = Dimens.spaci
  * @param questionQueuePosition 1-based position of the active question
  *                    (Question branch header).
  * @param questionQueueTotal total questions in the queue (Question branch header).
- * @param onAbort abort the current session (Running branch stop button).
  * @param compactStartedAt epoch-ms when compaction started (Compacting
  *                    branch timer).
  */
@@ -277,7 +276,6 @@ internal fun BoxScope.StatusSlot(
     onRejectQuestion: (questionId: String, onError: () -> Unit) -> Unit,
     questionQueuePosition: Int,
     questionQueueTotal: Int,
-    onAbort: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val priority = StatusSlotPriority.pick(
@@ -368,7 +366,7 @@ internal fun BoxScope.StatusSlot(
             // grows; the card's own scroll area handles long content.
             .layout { measurable, constraints ->
                 val placeable = measurable.measure(constraints)
-                val (_, gap) = statusSlotPlacement(placeable.height, with(density) { Dimens.spacing2.roundToPx() })
+                val (_, gap) = statusSlotPlacement(placeable.height, with(density) { Dimens.spacing7.roundToPx() })
                 layout(placeable.width, placeable.height + gap) {
                     placeable.placeRelative(0, gap)
                 }
@@ -431,8 +429,6 @@ internal fun BoxScope.StatusSlot(
                 ThinkingCapsule(
                     text = compactingText,
                     startedAtMillis = compactStartedAt.takeIf { it > 0L },
-                    onAbort = {},
-                    showAbort = false,
                 )
             }
             StatusSlotContent.Running -> {
@@ -441,8 +437,6 @@ internal fun BoxScope.StatusSlot(
                 ThinkingCapsule(
                     text = currentActivityText.orEmpty(),
                     startedAtMillis = currentActivityStartedAtMillis,
-                    onAbort = onAbort,
-                    showAbort = true,
                 )
             }
             StatusSlotContent.Connecting -> {
@@ -450,8 +444,6 @@ internal fun BoxScope.StatusSlot(
                 ThinkingCapsule(
                     text = connectingText,
                     startedAtMillis = null,
-                    onAbort = {},
-                    showAbort = false,
                 )
             }
             StatusSlotContent.None -> {

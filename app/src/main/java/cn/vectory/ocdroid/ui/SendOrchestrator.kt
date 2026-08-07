@@ -9,6 +9,7 @@ import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.SettingsManager
 import cn.vectory.ocdroid.ui.controller.ConnectionCoordinator
 import cn.vectory.ocdroid.ui.controller.SessionSwitcher
+import cn.vectory.ocdroid.ui.controller.allSessionsById
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import javax.inject.Inject
@@ -49,6 +50,15 @@ internal class SendOrchestrator @Inject constructor(
         val text = composer.inputText.trim()
         val attachments = composer.imageAttachments
         if (text.isEmpty() && attachments.isEmpty()) return
+
+        // §B2 rev-gpt: subagent 只读——禁止向子会话发消息
+        val sl = store.sessionListFlow.value
+        val sessionsById = allSessionsById(sl.sessions, sl.directorySessions, sl.childSessions)
+        val targetSession = sessionId.let { sessionsById[it] }
+        if (targetSession?.parentId != null) {
+            DebugLog.i("Send", "dispatchSendMessage blocked — subagent session sid=$sessionId")
+            return
+        }
 
         if (cn.vectory.ocdroid.util.DebugLog.verboseDiagEnabled) {
             DebugLog.i(
@@ -142,6 +152,15 @@ internal class SendOrchestrator @Inject constructor(
     ) {
         if (payload.text.isEmpty() && payload.attachments.isEmpty()) return
         if (store.composerFlow.value.sendingSessionIds.contains(sessionId)) return
+
+        // §B2 rev-gpt: subagent 只读——禁止向子会话发消息
+        val sl = store.sessionListFlow.value
+        val sessionsById = allSessionsById(sl.sessions, sl.directorySessions, sl.childSessions)
+        val targetSession = sessionId.let { sessionsById[it] }
+        if (targetSession?.parentId != null) {
+            DebugLog.i("Send", "dispatchCapturedSend blocked — subagent session sid=$sessionId")
+            return
+        }
 
         store.mutateComposer { state -> state.copy(sendingSessionIds = state.sendingSessionIds + sessionId) }
 

@@ -13,6 +13,7 @@ import androidx.compose.material.icons.filled.AccountTree
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AddComment
 import androidx.compose.material.icons.filled.CreateNewFolder
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Refresh
@@ -25,6 +26,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.DpOffset
@@ -681,9 +683,15 @@ fun SessionsScreen(
             bodyContent = {
                 Text(stringResource(R.string.sessions_archive_confirm))
                 Spacer(modifier = Modifier.height(Dimens.spacing2))
+                val primary = MaterialTheme.colorScheme.primary
                 Text(
-                    text = session.displayName,
+                    text = buildAnnotatedString {
+                        append("\u201C")
+                        append(session.displayName.ifBlank { stringResource(R.string.chat_no_messages) })
+                        append("\u201D")
+                    },
                     fontWeight = FontWeight.Bold,
+                    color = primary,
                 )
             },
             confirmText = stringResource(R.string.sessions_archive),
@@ -722,6 +730,18 @@ fun SessionsScreen(
                 placeholder = { Text(session.displayName) },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
+                trailingIcon = {
+                    if (renameText.isNotEmpty()) {
+                        IconButton(
+                            onClick = { renameText = "" },
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = stringResource(R.string.common_clear),
+                            )
+                        }
+                    }
+                },
             )
             Spacer(modifier = Modifier.height(Dimens.spacing2))
             Text(

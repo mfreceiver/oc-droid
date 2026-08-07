@@ -90,9 +90,9 @@ data class Message(
     ) {
         val message: String?
             get() = data?.let { obj ->
-                (obj["message"] as? JsonPrimitive)?.content
-                    ?: (obj["error"] as? JsonPrimitive)?.content
-            }
+                (obj["message"] as? JsonPrimitive)?.content?.takeIf { it.isNotBlank() }
+                    ?: (obj["error"] as? JsonPrimitive)?.content?.takeIf { it.isNotBlank() }
+            } ?: name?.takeIf { it.isNotBlank() }
     }
 
     val isUser: Boolean get() = role.equals("user", ignoreCase = true)
@@ -165,7 +165,9 @@ fun isEffectivelyRenderableEmpty(partsForMessage: List<Part>): Boolean {
             // 无扩展名但带 inputSummary 的 patch 被判空、在 message 级被过滤而到不了 PatchCard。
             part.isPatch -> part.filePathsForNavigation.isEmpty() &&
                 part.toolOutput.isNullOrBlank() &&
-                part.toolInputSummary.isNullOrBlank()
+                part.toolInputSummary.isNullOrBlank() &&
+                part.state?.oldPreview.isNullOrBlank() &&
+                part.state?.newPreview.isNullOrBlank()
             part.isFile -> part.filename.isNullOrBlank()
             else -> true
         }
@@ -401,7 +403,24 @@ data class PartState(
      * metadata carries a `sessionID` pointing at the spawned sub-agent session,
      * plus a human-readable `description`.
      */
-    val metadata: JsonObject? = null
+    val metadata: JsonObject? = null,
+    /**
+     * Preview of the old content (deletion/pattern side) extracted from
+     * tool input for edit/write/ast_grep_replace patches. Rendered with
+     * strikethrough/error styling in PatchCard.
+     */
+    val oldPreview: String? = null,
+    /**
+     * Preview of the new content (insertion/rewrite side) extracted from
+     * tool input for edit/write/ast_grep_replace patches. Rendered with
+     * primary styling in PatchCard.
+     */
+    val newPreview: String? = null,
+    /**
+     * True when [oldPreview] or [newPreview] was truncated to the preview
+     * character limit. Rendered as trailing " …" in PatchCard.
+     */
+    val previewTruncated: Boolean = false,
 ) {
     /** Best-effort lookup of a string metadata field, accepting both casing variants. */
     fun metadataString(key: String): String? {
@@ -452,6 +471,9 @@ object PartStateSerializer : kotlinx.serialization.KSerializer<PartState> {
                 var inputSummary: String? = null
                 var pathFromInput: String? = null
                 var todos: List<TodoItem>? = null
+                var oldPreview: String? = null
+                var newPreview: String? = null
+                var previewTruncated: Boolean = false
 
                 val inputObj = element["input"]
                 if (inputObj is JsonPrimitive) {
@@ -483,6 +505,25 @@ object PartStateSerializer : kotlinx.serialization.KSerializer<PartState> {
                         }
                     }
                     pathFromInput = pathVal
+
+                    // old→new preview for PatchCard rendering
+                    val PREVIEW_LIMIT = 500
+                    fun boundPreview(s: String?): Pair<String?, Boolean> =
+                        if (s == null) null to false
+                        else if (s.length <= PREVIEW_LIMIT) s to false
+                        else s.take(PREVIEW_LIMIT) to true
+
+                    val oldStr = (inputObj["oldString"] as? JsonPrimitive)?.content
+                    val newStr = (inputObj["newString"] as? JsonPrimitive)?.content
+                    val patternStr = (inputObj["pattern"] as? JsonPrimitive)?.content
+                    val rewriteStr = (inputObj["rewrite"] as? JsonPrimitive)?.content
+                    val contentStr = (inputObj["content"] as? JsonPrimitive)?.content
+
+                    val (boundedOld, truncOld) = boundPreview(oldStr ?: patternStr)
+                    val (boundedNew, truncNew) = boundPreview(newStr ?: rewriteStr ?: contentStr)
+                    oldPreview = boundedOld
+                    newPreview = boundedNew
+                    previewTruncated = truncOld || truncNew
                 }
 
                 if (todos == null && metadata != null) {
@@ -542,7 +583,10 @@ object PartStateSerializer : kotlinx.serialization.KSerializer<PartState> {
                     output = output,
                     pathFromInput = pathFromInput,
                     todos = todos,
-                    metadata = metadata
+                    metadata = metadata,
+                    oldPreview = oldPreview,
+                    newPreview = newPreview,
+                    previewTruncated = previewTruncated,
                 )
             }
             else -> PartState("…")

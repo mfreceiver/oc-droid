@@ -5,10 +5,15 @@ import androidx.lifecycle.viewModelScope
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.ui.controller.ControllerEffect
+import cn.vectory.ocdroid.ui.controller.allSessionsById
+import cn.vectory.ocdroid.ui.controller.subtreeIds
 import cn.vectory.ocdroid.util.DebugLog
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
@@ -196,6 +201,11 @@ class ChatViewModel @Inject constructor(
             core.effectBus.tryEmitUiEvent(UiEvent.Error(R.string.error_compact_no_session))
             return
         }
+        // §B2 rev-gpt: subagent 只读——禁止 compact 子会话
+        val sl = core.sessionListFlow.value
+        val sessionsById = allSessionsById(sl.sessions, sl.directorySessions, sl.childSessions)
+        val targetSession = sessionId.let { sessionsById[it] }
+        if (targetSession?.parentId != null) return
         val model = chatFlow.value.currentModel ?: run {
             core.effectBus.tryEmitUiEvent(UiEvent.Error(R.string.error_compact_no_model))
             return
@@ -351,6 +361,11 @@ class ChatViewModel @Inject constructor(
         val sessionId = routeChatSessionId(core.store.navFlow.value.lastRoute)
             ?: chatFlow.value.currentSessionId
             ?: return
+        // §B2 rev-gpt: subagent 只读——禁止编辑子会话消息
+        val sl = core.sessionListFlow.value
+        val sessionsById = allSessionsById(sl.sessions, sl.directorySessions, sl.childSessions)
+        val targetSession = sessionId.let { sessionsById[it] }
+        if (targetSession?.parentId != null) return
         val message = chatFlow.value.messages.firstOrNull { it.id == messageId && it.isUser } ?: return
         val draft = (chatFlow.value.partsByMessage[messageId] ?: emptyList()).firstOrNull { it.isText }?.text?.trim().orEmpty()
         if (draft.isBlank()) return
@@ -383,6 +398,11 @@ class ChatViewModel @Inject constructor(
         val sessionId = routeChatSessionId(core.store.navFlow.value.lastRoute)
             ?: core.store.chatFlow.value.currentSessionId
             ?: return
+        // §B2 rev-gpt: subagent 只读——禁止在子会话重试 revert
+        val sl = core.sessionListFlow.value
+        val sessionsById = allSessionsById(sl.sessions, sl.directorySessions, sl.childSessions)
+        val targetSession = sessionId.let { sessionsById[it] }
+        if (targetSession?.parentId != null) return
         val messageId = core.store.sessionListFlow.value.sessions.firstOrNull { it.id == sessionId }
             ?.revert?.messageId
             ?: core.store.chatFlow.value.revertCutoffs[sessionId]?.messageId
@@ -446,6 +466,13 @@ class ChatViewModel @Inject constructor(
         // returned, so a hanging POST disabled recovery entirely.
         core.appScope.launch {
             core.repository.abortSession(sid)
+                .onSuccess {
+                    // 方案A：不清锁，watchdog 全权管理锁生命周期
+                    // 只发轻量 UI 提示让用户知道请求已发出
+                    core.effectBus.tryEmitUiEvent(
+                        UiEvent.Info(R.string.chat_abort_request_sent)
+                    )
+                }
                 .onFailure { error ->
                     core.effectBus.tryEmitUiEvent(
                         UiEvent.Error(R.string.error_abort_session_failed, listOf(errorMessageOrFallback(error, "unknown error")))
@@ -527,6 +554,137 @@ class ChatViewModel @Inject constructor(
             // 用户可重试（不永久锁）。
             core.effectBus.tryEmitUiEvent(UiEvent.Error(R.string.error_abort_pending_stuck))
         }
+    }
+
+    /**
+     * 递归强制中止：深度优先 post-order——先中止全部子会话，最后中止父会话。
+     * 使用本地 subtreeIds 枚举全树（O(N)，带环检测），冷启动时 fallback 到
+     * 递归 getChildren 补全。单一 appScope.launch orchestration，不挂逐节点 watchdog。
+     */
+    fun abortSessionRecursive(sessionId: String? = null) {
+        val sid = sessionId ?: core.store.chatFlow.value.currentSessionId ?: return
+
+        // operation-level 幂等守卫：防止连点
+        if (sid in core.sessionListFlow.value.abortPendingSessionIds) {
+            DebugLog.i("Abort", "abortSessionRecursive ignored — already pending sid=$sid")
+            return
+        }
+
+        // 捕获连接身份（BundleStamp）
+        val bundle = captureAbortBundle()
+        val token = abortTokenSeq.incrementAndGet()
+        val maxNodes = 50
+
+        // 登记锁（root-only）
+        core.store.mutateSessionList { s ->
+            s.copy(abortPendingSessionIds = s.abortPendingSessionIds + (sid to token))
+        }
+
+        core.appScope.launch {
+            abortSessionRecursiveInternal(sid, token, bundle, maxNodes)
+        }
+        // 单个 operation-level watchdog：超时覆盖 fetch(10s/node) + abort(15s/node) 预算。
+        // 递归完成时已主动清锁，watchdog 仅作兜底。
+        core.appScope.launch {
+            delay(ABORT_WATCHDOG_TIMEOUT_MS + maxNodes * (15_000L + 10_000L))
+            reconcileStaleAbort(sid, token, bundle)
+        }
+    }
+
+    private suspend fun abortSessionRecursiveInternal(
+        rootId: String,
+        token: Long,
+        bundle: BundleStamp,
+        maxNodes: Int,
+    ) {
+        // 1. 本地枚举子树
+        val sl = core.sessionListFlow.value
+        var subtreeIds = subtreeIds(rootId, sl.sessions, sl.directorySessions, sl.childSessions).toList()
+
+        // 2. 冷启动 fallback：如果本地子树只有 root 自己，尝试 getChildren 补全。
+        //    fetchSubtreeRecursive 使用独立的 visited 集合，不与主循环共享。
+        if (subtreeIds.size <= 1) {
+            val fetched = fetchSubtreeRecursive(rootId, maxNodes)
+            subtreeIds = (subtreeIds + fetched).distinct()
+        }
+
+        // 3. 确认连接身份（suspend 前校验）
+        if (captureAbortBundle() != bundle) {
+            clearAbortPendingIfToken(rootId, token)
+            return
+        }
+
+        // 4. post-order：treeIds 是前序 DFS（父先于子），reversed 保证子孙先于祖先
+        //    （rootId 在最后）。按 maxNodes 截断迭代上限（含失败节点），确保 root 必达。
+        val allOrdered = subtreeIds.reversed().filter { it != rootId } + listOf(rootId)
+        val ordered = if (allOrdered.size > maxNodes) allOrdered.take(maxNodes - 1) + listOf(rootId) else allOrdered
+
+        for (id in ordered) {
+            // 每次迭代前验证 token 仍属于当前递归操作——锁被清除/替换后立即停止，
+            // 防止旧协程继续 abort 新启动的运行。
+            if (core.sessionListFlow.value.abortPendingSessionIds[rootId] != token) {
+                DebugLog.w("Abort", "abortSessionRecursive: token superseded, stopping")
+                break
+            }
+            try {
+                withTimeout(15_000L) {
+                    core.repository.abortSession(id)
+                }
+            } catch (e: TimeoutCancellationException) {
+                DebugLog.w("Abort", "abortSessionRecursive: timeout for $id")
+            } catch (e: CancellationException) {
+                throw e  // 不吞 scope 取消
+            } catch (e: Exception) {
+                // best-effort：子失败不阻断后续
+                DebugLog.w("Abort", "abortSessionRecursive: failed for $id: ${e.message}")
+            }
+
+            // suspend 后校验连接身份
+            if (captureAbortBundle() != bundle) {
+                DebugLog.w("Abort", "abortSessionRecursive: bundle changed, aborting remaining")
+                break
+            }
+        }
+
+        // 5. 递归完成后主动清锁（不依赖 watchdog）
+        clearAbortPendingIfToken(rootId, token)
+    }
+
+    /**
+     * 递归 getChildren 补全深层子节点（冷启动 fallback）。
+     * 带环检测和最大深度。
+     */
+    private suspend fun fetchSubtreeRecursive(
+        rootId: String,
+        maxNodes: Int,
+    ): List<String> {
+        val result = mutableListOf<String>()
+        val visited = HashSet<String>()  // 独立的环检测集合，不与主循环共享
+        val queue = ArrayDeque<String>()
+        queue.add(rootId)
+
+        while (queue.isNotEmpty() && result.size < maxNodes) {
+            val current = queue.removeFirst()
+            if (!visited.add(current)) continue  // 环检测
+            if (current != rootId) result.add(current)
+
+            try {
+                withTimeout(10_000L) {
+                    val children = core.repository.getChildren(current).getOrDefault(emptyList())
+                    children.forEach { child ->
+                        if (child.id !in visited) queue.add(child.id)
+                    }
+                }
+            } catch (e: TimeoutCancellationException) {
+                DebugLog.w("Abort", "fetchSubtreeRecursive: timeout for $current")
+            } catch (e: CancellationException) {
+                throw e  // 不吞 scope 取消
+            } catch (e: Exception) {
+                DebugLog.w("Abort", "fetchSubtreeRecursive: getChildren failed for $current: ${e.message}")
+            }
+        }
+
+        return result
     }
 
     /**

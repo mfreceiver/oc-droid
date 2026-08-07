@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -36,6 +37,7 @@ import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.Part
 import cn.vectory.ocdroid.ui.theme.SemanticColors
 import cn.vectory.ocdroid.ui.theme.AppMotion
+import cn.vectory.ocdroid.ui.theme.Dimens
 
 // ── Patch card + merged context tool group ───────────────────────────────
 // PatchCard is the collapsible diff-stats card for a single file-edit part
@@ -237,6 +239,31 @@ internal fun PatchCard(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 softWrap = true,
                                 overflow = TextOverflow.Visible
+                            )
+                        }
+                    }
+                    // old→new preview for edit/write/ast_grep_replace patches
+                    val oldP = part.state?.oldPreview
+                    val newP = part.state?.newPreview
+                    val trunc = part.state?.previewTruncated == true
+                    if (oldP != null || newP != null) {
+                        Spacer(Modifier.height(Dimens.spacing2))
+                        if (oldP != null) {
+                            Text(
+                                text = "- $oldP" + if (trunc) " …" else "",
+                                style = MaterialTheme.typography.bodySmall,
+                                fontFamily = BundledMonoFamily,
+                                color = MaterialTheme.colorScheme.error.copy(alpha = 0.8f),
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        }
+                        if (newP != null) {
+                            Text(
+                                text = "+ $newP" + if (trunc) " …" else "",
+                                style = MaterialTheme.typography.bodySmall,
+                                fontFamily = BundledMonoFamily,
+                                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.8f),
+                                modifier = Modifier.fillMaxWidth(),
                             )
                         }
                     }

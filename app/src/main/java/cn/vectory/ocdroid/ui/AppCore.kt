@@ -20,6 +20,7 @@ import cn.vectory.ocdroid.ui.controller.ControllerEffect
 import cn.vectory.ocdroid.ui.controller.ErrorRecoveryCoordinator
 import cn.vectory.ocdroid.ui.controller.ForegroundCatchUpController
 import cn.vectory.ocdroid.ui.controller.HostProfileController
+import cn.vectory.ocdroid.ui.controller.allSessionsById
 import cn.vectory.ocdroid.ui.controller.subtreeIds
 import cn.vectory.ocdroid.ui.controller.SessionSyncCoordinator
 import cn.vectory.ocdroid.ui.controller.SessionSwitcher
@@ -377,12 +378,27 @@ class AppCore @Inject constructor(
         } else {
             val sessionId = existingSessionId ?: return
             if (store.composerFlow.value.sendingSessionIds.contains(sessionId)) return
+            // §B2 rev-gpt: subagent 只读——禁止向子会话发消息
+            val sl = store.sessionListFlow.value
+            val sessionsById = allSessionsById(sl.sessions, sl.directorySessions, sl.childSessions)
+            val curSession = sessionId.let { sessionsById[it] }
+            if (curSession?.parentId != null) return
             sendOrchestrator.dispatchSendMessage(sessionId)
         }
     }
 
     /** `/clear` and other slash commands. */
-    internal fun executeCommand(command: String, arguments: String) = commandOrchestrator.executeCommand(command, arguments)
+    internal fun executeCommand(command: String, arguments: String) {
+        // §B2 rev-gpt: subagent 只读——禁止在子会话执行命令
+        val existingSessionId = store.chatFlow.value.currentSessionId
+        if (existingSessionId != null) {
+            val sl = store.sessionListFlow.value
+            val sessionsById = allSessionsById(sl.sessions, sl.directorySessions, sl.childSessions)
+            val curSession = existingSessionId.let { sessionsById[it] }
+            if (curSession?.parentId != null) return
+        }
+        commandOrchestrator.executeCommand(command, arguments)
+    }
 
     /** nav → session-list → chat (deep-link path). */
     internal fun openSessionFromDeepLink(sessionId: String) = sessionOpener.openSessionFromDeepLink(sessionId)

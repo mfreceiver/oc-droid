@@ -371,6 +371,11 @@ class SessionViewModel @Inject constructor(
     }
 
     fun forkSession(sessionId: String, messageId: String?) {
+        // §B2 rev-gpt: subagent 只读——禁止 fork 子会话
+        val sl = store.sessionListFlow.value
+        val sessionsById = allSessionsById(sl.sessions, sl.directorySessions, sl.childSessions)
+        val targetSession = sessionId.let { sessionsById[it] }
+        if (targetSession?.parentId != null) return
         launchForkSession(
             appScope, repository, store.slices, sessionId, messageId, ::selectSession,
             EventEmitter { event -> effectBus.tryEmitUiEvent(event) }

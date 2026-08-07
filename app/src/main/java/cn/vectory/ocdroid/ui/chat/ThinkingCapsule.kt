@@ -1,20 +1,13 @@
 package cn.vectory.ocdroid.ui.chat
 
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -26,12 +19,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.res.stringResource
 import cn.vectory.ocdroid.ui.theme.BundledMonoFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import cn.vectory.ocdroid.R
-import cn.vectory.ocdroid.ui.theme.StopRed
 import kotlinx.coroutines.delay
 
 /**
@@ -43,11 +34,7 @@ import kotlinx.coroutines.delay
 internal fun ThinkingCapsule(
     text: String,
     startedAtMillis: Long?,
-    onAbort: () -> Unit,
     modifier: Modifier = Modifier,
-    /** §compact: when false, the abort button is omitted (used by the
-     * compacting capsule — compaction cannot be interrupted). */
-    showAbort: Boolean = true
 ) {
     var nowMillis by remember(startedAtMillis) { mutableStateOf(System.currentTimeMillis()) }
 
@@ -105,25 +92,6 @@ internal fun ThinkingCapsule(
                 )
             }
 
-            if (showAbort) {
-                // §a11y: this deliberately uses a compact 28dp touch target so the
-                // abort affordance is the same height as the compacting capsule.
-                // It trades the standard 48dp target for visual parity in this
-                // transient, compressed status surface.
-                Box(
-                    modifier = Modifier
-                        .size(28.dp)
-                        .clickable(onClick = onAbort),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Stop,
-                        contentDescription = stringResource(R.string.chat_interrupt_agent),
-                        tint = StopRed,
-                        modifier = Modifier.size(14.dp),
-                    )
-                }
-            }
         }
     }
 }

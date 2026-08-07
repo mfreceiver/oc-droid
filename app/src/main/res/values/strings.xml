@@ -92,6 +92,7 @@
     <string name="host_profile_test_failed">Connection failed</string>
     <string name="common_back">Back</string>
     <string name="common_cancel">Cancel</string>
+    <string name="common_clear">Clear</string>
     <string name="common_close">Close</string>
     <string name="common_done">Done</string>
     <string name="common_dismiss">Dismiss</string>
@@ -156,6 +157,9 @@
     <string name="todo_empty">No todos yet</string>
     <string name="todo_completed_count">%1$d/%2$d completed</string>
     <string name="chat_force_refresh">Force refresh</string>
+    <string name="chat_force_abort">Force abort</string>
+    <string name="chat_force_abort_confirm_title">Force abort?</string>
+    <string name="chat_force_abort_confirm_message">This will recursively abort the current session and all its child tasks. Generated content cannot be undone.</string>
     <string name="chat_context">Context</string>
     <string name="chat_compact_session">Compact</string>
     <string name="chat_no_host_fallback">No host</string>
@@ -190,10 +194,12 @@
     <string name="permission_card_metadata_target">Target: %1$s</string>
     <string name="permission_card_metadata_no_target">(no target)</string>
     <string name="chat_type_message">Type a message...</string>
+    <string name="chat_input_disabled_subagent">This session is read-only</string>
     <string name="chat_interrupt_agent">Interrupt agent</string>
     <string name="chat_stop">Stop</string>
     <string name="chat_stop_confirm_title">Stop running?</string>
     <string name="chat_stop_confirm_message">The current task will be interrupted. Sent content cannot be undone.</string>
+    <string name="chat_abort_request_sent">Abort request sent, waiting for server response</string>
     <string name="chat_agent_running">Agent running</string>
     <string name="chat_more_options">More options</string>
     <string name="chat_edit_from_here">Edit from here</string>

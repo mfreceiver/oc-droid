@@ -115,6 +115,8 @@ fun Composer(
     /** §P0-F: abort POST 当前在途（abortPendingSessionIds 含本会话）→ 显「停止中」禁二次 abort。 */
     isAborting: Boolean,
     questionPending: Boolean,
+    /** §B: subagent 会话为只读——输入框和发送按钮禁用，stop 按钮保留。 */
+    isSubagent: Boolean = false,
     onAddImages: () -> Unit,
     // §B2 rev-gpt MAJOR 2: the abort target is caller-supplied so the
     // parameterized chat/{sessionId} route can pass its route identity
@@ -163,7 +165,7 @@ fun Composer(
         }
     }
 
-    val canSend = (text.isNotBlank() || imageAttachments.isNotEmpty()) && !questionPending
+    val canSend = (text.isNotBlank() || imageAttachments.isNotEmpty()) && !questionPending && !isSubagent
     val canStop = isBusy && !canSend
     // §P0-F/R6: abort 在途时按钮整体禁用（既禁二次 abort，也避免 abort 窗口内误发新消息）。
     val stopping = isAborting
@@ -259,14 +261,14 @@ fun Composer(
             ) {
                 IconButton(
                     onClick = { showAdd = true },
-                    enabled = !questionPending,
+                    enabled = !questionPending && !isSubagent,
                     modifier = Modifier.size(48.dp),
                 ) {
                     Icon(
                         Icons.Default.Add,
                         contentDescription = stringResource(R.string.chat_add_menu_title),
                         tint = MaterialTheme.colorScheme.onSurfaceVariant
-                            .copy(alpha = if (questionPending) 0.5f else 1f),
+                            .copy(alpha = if (questionPending || isSubagent) 0.5f else 1f),
                     )
                 }
                 Spacer(Modifier.width(8.dp))
@@ -277,8 +279,11 @@ fun Composer(
                     if (text.isEmpty()) {
                         Text(
                             text = stringResource(
-                                if (questionPending) R.string.chat_input_disabled_question
-                                else R.string.chat_type_message
+                                when {
+                                    isSubagent -> R.string.chat_input_disabled_subagent
+                                    questionPending -> R.string.chat_input_disabled_question
+                                    else -> R.string.chat_type_message
+                                }
                             ),
                             style = MaterialTheme.typography.bodyLarge,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -322,7 +327,7 @@ fun Composer(
                                     false
                                 }
                             },
-                        enabled = !questionPending,
+                        enabled = !questionPending && !isSubagent,
                         textStyle = LocalTextStyle.current.copy(
                             color = MaterialTheme.colorScheme.onSurface
                                 .copy(alpha = if (questionPending) 0.5f else 1f),

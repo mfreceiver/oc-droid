@@ -17,6 +17,7 @@ import androidx.compose.material.icons.filled.Checklist
 import androidx.compose.material.icons.filled.DonutLarge
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.SmartToy
+import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.outlined.Memory
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -371,6 +372,10 @@ internal data class ChatTopBarActions(
      * FROZENs while a TOFU trust dialog is pending).
      */
     val onForceRefresh: () -> Unit = {},
+    /**
+     * §B 强制中止：递归中止当前会话及其全部子任务。通过确认弹窗触发。
+     */
+    val onForceAbort: () -> Unit = {},
 )
 
 /**
@@ -619,6 +624,10 @@ internal fun ChatTopBar(
                         overflowExpanded = false
                         actions.onOpenModelPicker()
                     },
+                    onForceAbort = {
+                        overflowExpanded = false
+                        actions.onForceAbort()
+                    },
                     onForceRefresh = {
                         overflowExpanded = false
                         actions.onForceRefresh()
@@ -686,6 +695,10 @@ private fun ContextMenuCluster(
      * §6 (强制刷新): clear session-window cache + cold-start reconnect.
      */
     onForceRefresh: () -> Unit,
+    /**
+     * §B 强制中止：递归中止当前会话及其全部子任务。
+     */
+    onForceAbort: () -> Unit,
 ) {
     Box {
         // §v0.7-pattern (ChatSessionTabStrip.kt deleted in B6): the ring is the
@@ -759,7 +772,16 @@ private fun ContextMenuCluster(
                 icon = Icons.Outlined.Memory,
                 onClick = onOpenModel,
             )
-            // 5. §6 (强制刷新): clear session-window cache + cold-start
+            // 5. 强制中止：递归中止当前会话及其全部子任务
+            MenuItem(
+                text = {
+                    Text(stringResource(R.string.chat_force_abort))
+                },
+                icon = Icons.Default.Stop,
+                enabled = enableSessionScopedItems,
+                onClick = onForceAbort,
+            )
+            // 6. §6 (强制刷新): clear session-window cache + cold-start
             //    reconnect. User-triggered destructive-ish recovery action
             //    (NOT the §3 non-destructive tail refresh) — drops the
             //    memory LRU window cache across all sessions then forces a

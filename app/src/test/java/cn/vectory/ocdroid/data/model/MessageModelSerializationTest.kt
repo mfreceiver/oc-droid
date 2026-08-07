@@ -164,9 +164,16 @@ class MessageModelSerializationTest {
     }
 
     @Test
-    fun `MessageError message null when data null or message missing`() {
-        assertNull(Message.MessageError(name = "x").message)
-        assertNull(Message.MessageError(name = "x", data = buildJsonObject { put("foo", "bar") }).message)
+    fun `MessageError message falls back to name when data null or message missing`() {
+        // When data is null, name is returned as fallback
+        assertEquals("x", Message.MessageError(name = "x").message)
+        // When data has no message/error key, name is returned as fallback
+        assertEquals("x", Message.MessageError(name = "x", data = buildJsonObject { put("foo", "bar") }).message)
+        // When name is null/blank and data is null, message is null
+        assertNull(Message.MessageError(name = null).message)
+        assertNull(Message.MessageError(name = "").message)
+        assertNull(Message.MessageError(name = "  ").message)
+        assertNull(Message.MessageError(name = null, data = buildJsonObject { put("foo", "bar") }).message)
     }
 
     @Test

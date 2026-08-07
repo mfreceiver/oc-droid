@@ -92,6 +92,7 @@ import cn.vectory.ocdroid.ui.resolveMessage
 import cn.vectory.ocdroid.ui.showTimed
 import cn.vectory.ocdroid.ui.visibleMessages
 import cn.vectory.ocdroid.ui.theme.AppBottomSheet
+import cn.vectory.ocdroid.ui.theme.AppConfirmDialog
 import cn.vectory.ocdroid.ui.theme.Dimens
 import cn.vectory.ocdroid.ui.theme.StatusBanner
 import kotlinx.coroutines.launch
@@ -352,6 +353,8 @@ fun ChatScaffold(
     // from this package).
     var showTodoDialog by remember { mutableStateOf(false) }
     var showContextDialog by remember { mutableStateOf(false) }
+    // §B: 强制中止确认弹窗
+    var showForceAbortConfirm by remember { mutableStateOf(false) }
     // §drawer-new-session: workdir picker for the drawer header "new session"
     // button when ≥2 workdirs are connected (mirrors SessionsScreen's flow).
     // §L5a: owned HERE (ChatScaffold) because ChatOverlayHost reads it
@@ -842,6 +845,7 @@ fun ChatScaffold(
             // testConnection + LoadSessions) so the logic is shared + unit-
             // tested at the orchestration layer. When no session is open, only
             // the session-list resync applies.
+            onForceAbort = { showForceAbortConfirm = true },
             onForceRefresh = {
                 val sid = chromeSessionId
                 if (sid != null) {
@@ -1163,7 +1167,6 @@ fun ChatScaffold(
                                 matchingQuestions.indexOfFirst { it.id == q.id } + 1
                             } ?: 1,
                             questionQueueTotal = matchingQuestions.size,
-                            onAbort = { chatVM.abortSession(chromeSessionId) },
                         )
                     }
                 }
@@ -1180,6 +1183,7 @@ fun ChatScaffold(
                 // stays on composerFlow + settingsFlow + a narrow
                 // currentModelFlow projection). Removing the dead injections
                 // enforces "Composer must NOT subscribe to unrelated slices".
+                val isSubagentSession = curSession?.parentId != null
                 Composer(
                     chatVM = chatVM,
                     composerVM = composerVM,
@@ -1187,6 +1191,7 @@ fun ChatScaffold(
                     isBusy = currentSessionIsRunning || chat.isCompacting,
                     isAborting = chromeSessionId != null && chromeSessionId in sessionList.abortPendingSessionIds,
                     questionPending = pendingQuestion != null,
+                    isSubagent = isSubagentSession,
                     onAddImages = onAddImages,
                     onAbort = { chatVM.abortSession(chromeSessionId) },
                 )
@@ -1277,6 +1282,23 @@ fun ChatScaffold(
                 chatBodyContent()
             }
         }
+    }
+
+    // ── §B: 强制中止确认弹窗 ────────────────────────────────────────────────
+    if (showForceAbortConfirm) {
+        AppConfirmDialog(
+            title = stringResource(R.string.chat_force_abort_confirm_title),
+            bodyContent = {
+                Text(stringResource(R.string.chat_force_abort_confirm_message))
+            },
+            confirmText = stringResource(R.string.chat_force_abort),
+            onConfirm = {
+                chatVM.abortSessionRecursive(chromeSessionId)
+                showForceAbortConfirm = false
+            },
+            dismissText = stringResource(R.string.common_cancel),
+            onDismiss = { showForceAbortConfirm = false },
+        )
     }
 
     // ── Phase 1B sheets / overflows / dialogs (new) ──────────────────────
