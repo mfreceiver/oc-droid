@@ -13,7 +13,6 @@
 package cn.vectory.ocdroid.ui.chat
 
 import android.content.res.Configuration
-import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -31,14 +30,9 @@ import androidx.compose.material3.VerticalDivider
 import androidx.compose.material3.windowsizeclass.WindowSizeClass
 import androidx.compose.material3.windowsizeclass.WindowWidthSizeClass
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.RectangleShape
@@ -48,9 +42,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.SavedStateHandle
-import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.lifecycle.compose.LifecycleEventEffect
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.ui.ChatViewModel
 import cn.vectory.ocdroid.ui.ComposerViewModel
@@ -59,13 +51,7 @@ import cn.vectory.ocdroid.ui.HostViewModel
 import cn.vectory.ocdroid.ui.OrchestratorViewModel
 import cn.vectory.ocdroid.ui.SessionViewModel
 import cn.vectory.ocdroid.ui.SettingsViewModel
-import cn.vectory.ocdroid.ui.ScrollCheckpoint
-import cn.vectory.ocdroid.ui.UiEvent
-import cn.vectory.ocdroid.ui.checkpointKeyForChild
-import cn.vectory.ocdroid.ui.consumeAnySubAgentCheckpoint
 import cn.vectory.ocdroid.ui.controller.ControllerEffect
-import cn.vectory.ocdroid.ui.resolveMessage
-import cn.vectory.ocdroid.ui.showTimed
 import cn.vectory.ocdroid.ui.controller.questionRootIds
 import cn.vectory.ocdroid.ui.theme.AppBottomSheet
 import cn.vectory.ocdroid.ui.theme.AppConfirmDialog
@@ -268,56 +254,14 @@ fun ChatScaffold(
     // exactly this one place. The dispatch goes through the unified
     // [AppAction.ScrollRequested] slot — the consumer in ChatMessageList sees
     // `behavior=Restore` and applies it.
-    LaunchedEffect(chromeSessionId, routeSavedStateHandle) {
-        val handle = routeSavedStateHandle ?: return@LaunchedEffect
-        val sid = chromeSessionId ?: return@LaunchedEffect
-        val cp = consumeAnySubAgentCheckpoint(handle, sid)
-        if (cp != null) {
-            chatVM.requestScrollRestore(sid, cp)
-        }
-    }
-
-    /**
-     * §chat-list-detail §11 / G6 (B5) + §scroll-guard-fix: the openSubAgent-side
-     * callback passed down to ChatMessageList. The listState live-capture stays
-     * in ChatMessageContent (where the LazyListState reference is owned); this
-     * callback is invoked AFTER the synchronous capture, with the resulting
-     * [ScrollCheckpoint].
-     *
-     * §scroll-guard-fix: stamps `capturedFromSessionId = chromeSessionId`
-     * (the CURRENT parent) onto the checkpoint before persisting, so the
-     * consume guard can later tell return-to-parent (capturedFrom == current)
-     * from enter-child / nested / unrelated-jump. Without this stamp the guard
-     * could not distinguish "the user came back to me" from "the user jumped
-     * to a different session while my checkpoint was still pending".
-     *
-     * §B5 BLOCK-fix (rev-gpt MAJOR 1): the checkpoint write + nav call are
-     * INSIDE the SessionViewModel.openSubAgent success callback — NOT before
-     * the call. This avoids leaving a stale checkpoint on the shared handle
-     * when the child fetch fails or the route changed mid-fetch.
-     *
-     * The handle is THIS slot's (parent and child share one chat back-stack
-     * slot under `launchSingleTop` — see ScrollCheckpoint.kt §scroll-guard-fix),
-     * so the persisted checkpoint is readable when the slot later re-enters
-     * composition as the parent.
-     */
-    val onOpenSubAgentNavigate: (childSessionId: String, checkpoint: ScrollCheckpoint) -> Unit =
-        { childSessionId, checkpoint ->
-            // The capturing parent is the session currently in the chrome at
-            // click time. Captured into a local so the lambda stamps the SAME
-            // id even if chromeSessionId recomposes mid-openSubAgent-fetch.
-            val capturedFromParentId = chromeSessionId
-            sessionVM.openSubAgent(childSessionId, checkpoint) { resolvedId, cp ->
-                // §B5 BLOCK-fix MAJOR 1: checkpoint write + nav fire ONLY on
-                // the success path. Stamp capturedFromSessionId so the consume
-                // guard recognizes this checkpoint on return-to-parent.
-                routeSavedStateHandle?.set(
-                    checkpointKeyForChild(resolvedId),
-                    cp.copy(capturedFromSessionId = capturedFromParentId),
-                )
-                orchestratorVM.navigateToChat(resolvedId)
-            }
-        }
+    // §Item15b: checkpoint consume + onOpenSubAgentNavigate extracted to
+    // ChatNavigationEffects.kt.
+    val onOpenSubAgentNavigate = rememberOnOpenSubAgentNavigate(
+        chromeSessionId = chromeSessionId,
+        routeSavedStateHandle = routeSavedStateHandle,
+        sessionVM = sessionVM,
+        orchestratorVM = orchestratorVM,
+    )
 
     // §Item15b: chrome/overlay state (picker flags, drawer, snackbar, image
     // picker) extracted to `rememberChatChromeState` (ChatChromeState.kt).
@@ -325,7 +269,6 @@ fun ChatScaffold(
         composerVM = composerVM,
         onOpenDrawer = onOpenDrawer,
     )
-    // Keep context for the snackbar effect blocks (still in this file).
     val context = LocalContext.current
 
     // §home-hub T4: responsive top-left affordance + tablet drawer gating.
@@ -352,174 +295,21 @@ fun ChatScaffold(
         Dimens.sessionSidebarWidthMedium
     }
 
-    // §Item15b: cross-slice derived views extracted to `rememberChatDerivedState`
-    // (ChatDerivedState.kt). The `by` delegates above unwrap the State fields.
-    // The comment block below is preserved as a reference to the extracted code
-    // locations — see ChatDerivedState.kt for the full derivation logic.
-    //
-    // ── §P0 rev-3: unified reconcile state machine ───────────────────────
-    // SSE question resolution can be missed while this process is paused. A
-    // session activation (first entry or switch) and each genuine foreground
-    // return perform one authoritative reconcile; the loader's race-safe merge
-    // preserves live question.asked arrivals.
-    //
-    // The previous approach (rev-2) had a behaviour regression: it deferred
-    // the actual reconcile decision to LifecycleEventEffect(ON_RESUME), but a
-    // foreground session switch (App already RESUMED, user switches A→B) does
-    // NOT produce a new ON_RESUME — so the reconcile was postponed until the
-    // next lifecycle pause→resume. This weakened the P0-B window-closure goal.
-    //
-    // Rev-3 fix: [onSessionChange] returns `(shouldReconcile, nextState)`
-    // directly, and LaunchedEffect calls reconcilePendingQuestions() itself
-    // when the return signals `true`. ON_RESUME handles genuine pause→resume
-    // independently. Initial `wasPaused = false` prevents the catch-up
-    // ON_RESUME (on first composition) from double-firing when LaunchedEffect
-    // already reconciled the session.
-    var reconcileState by remember { mutableStateOf(ReconcileTriggerState()) }
-
-    // Session switch or first composition: reconcile directly if this is a
-    // new session (different from last reconciled). Does NOT wait for ON_RESUME.
-    LaunchedEffect(chromeSessionId) {
-        val sid = chromeSessionId
-        if (sid != null) {
-            val (shouldReconcile, nextState) = reconcileState.onSessionChange(sid)
-            reconcileState = nextState
-            if (shouldReconcile) {
-                chatVM.reconcilePendingQuestions()
-            }
-        }
-    }
-
-    // Genuine background → mark pause for the next ON_RESUME.
-    LifecycleEventEffect(Lifecycle.Event.ON_PAUSE) {
-        reconcileState = reconcileState.onPause()
-    }
-
-    // Foreground return: only reconcile for genuine pause→resume.
-    // First-composition catch-up is race-free because LaunchedEffect already
-    // handled it (wasPaused starts as false, so the catch-up is a no-op).
-    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
-        val (shouldReconcile, nextState) = reconcileState.onResume(chromeSessionId)
-        reconcileState = nextState
-        if (shouldReconcile && chromeSessionId != null) {
-            chatVM.reconcilePendingQuestions()
-        }
-    }
-    // §Item15b: cachedContextUsage (write-during-composition smell) moved to
-    // ChatDerivedState.kt. `cachedContextUsage by derivedState.cachedContextUsageState`
-    // is the by-delegate above.
-    // §Item15b: visibleAgents / effectiveAgent / effectiveModel extracted to
-    // ChatDerivedState.kt. `by` delegates above unwrap the State fields.
-    // §Item15b: currentSessionIsRunning / isCurrentSessionSending / currentActivity /
-    // matchingQuestions / pendingQuestion / pendingPermission extracted to
-    // ChatDerivedState.kt. `by` delegates above unwrap the State fields.
-
-    // §PARITY: parent-session BackHandler (#14) + root-session back-to-home
-    // (§home-hub T4 — replaces the legacy "press again to exit" double-tap
-    // confirm) + UiEvent error/success snackbar collection (R-17 batch2) +
-    // stale-notice snackbar + compacting auto-clear (Phase 0) are all moved
-    // verbatim — the chrome swap does not affect any of these.
-    val parent = curSession?.parentId
-    var lastParent by remember { mutableStateOf<String?>(null) }
-    if (parent != null) lastParent = parent
-    BackHandler(enabled = parent != null) {
-        // §chat-list-detail §11 / G6 (B5 BLOCK-fix): 子→父 via Android Back.
-        // navigateToChat writes navState.lastRoute; the AppShell synchronizer
-        // detects previousBackStackEntry.sessionId == parentId and executes
-        // popBackStack() (NOT navigate) — preserving the parent entry's
-        // SavedStateHandle + openSubAgent checkpoint. The parent's
-        // ChatScaffold LaunchedEffect then consumes the checkpoint → Restore.
-        sessionVM.returnToParent { pid -> orchestratorVM.navigateToChat(pid) }
-    }
-
-    val errorMessage = stringResource(R.string.chat_error_occurred)
-    val errorActionLabel = stringResource(R.string.chat_view)
-    val staleNoticeMessage = stringResource(R.string.chat_stale_notice)
-    val staleNoticeActionLabel = stringResource(R.string.common_refresh)
-
-    // §predictive-back-fix (2026-07-26): the root-session BackHandler was
-    // REMOVED. Previously this intercepted the system back gesture with a
-    // custom BackHandler → onBackToHome(), which registered an
-    // OnBackInvokedCallback that the system treated as generic (no
-    // destination preview) — predictive back animation didn't fire for
-    // Chat → Sessions (while Git → Sessions worked because AppShell's
-    // BackHandler is composed outside the NavHost).
-    //
-    // Now: when no narrower handler is active (drawer closed, root session),
-    // NO BackHandler is enabled → the NavHost's native predictive back
-    // handler fires → popBackStack with the system's "shrink + reveal"
-    // animation. The parent-session (line 584) and drawer (line 619)
-    // BackHandlers stay — they have narrower `enabled` conditions and
-    // preempt the NavHost handler when active (LIFO: ChatScaffold handlers
-    // are composed inside NavHost → registered after NavController's own
-    // callback → higher priority when enabled).
-
-    // §home-hub T4 (IMPORTANT-2 fix): drawer-open BackHandler MUST be composed
-    // AFTER the parent/root handlers. Compose dispatches back in REVERSE
-    // registration order (the most-recently-composed enabled BackHandler
-    // wins), so registering this LAST guarantees that an OPEN drawer's back
-    // closes the drawer FIRST and never propagates to the root handler above
-    // (which would call onBackToHome — the bug when this was composed before
-    // the root handler). `enabled = drawerState.isOpen` keeps it inert when
-    // the drawer is closed, so phone (drawer never opens) and tablet (drawer
-    // closed) back still flow to the root/parent handlers above.
-    BackHandler(enabled = chromeState.drawerState.isOpen) {
-        chromeState.closeDrawerAction()
-    }
-
-    // §PARITY: UiEvent error / success / info / debug collection. Slice-
-    // only reads, SharedFlow is one-shot. Verbatim from ChatScreen.
-    LaunchedEffect(Unit) {
-        orchestratorVM.uiEvents.collect { event ->
-            val message = event.resolveMessage(context)
-            when (event) {
-                is UiEvent.Error -> {
-                    chromeState.snackbarHostState.showTimed(
-                        message = errorMessage,
-                        durationMillis = 3_000L,
-                        actionLabel = errorActionLabel,
-                        onAction = { chromeState.errorDetail = message }
-                    )
-                }
-                is UiEvent.Success -> {
-                    chromeState.snackbarHostState.showTimed(
-                        message = message,
-                        durationMillis = 2_500L
-                    )
-                }
-                is UiEvent.Info -> {
-                    chromeState.snackbarHostState.showTimed(
-                        message = message,
-                        durationMillis = 2_500L
-                    )
-                }
-                is UiEvent.Debug -> Unit
-            }
-        }
-    }
-    // §B2 rev-gpt MAJOR 2: gate the stale-notice snackbar on the route-owned
-    // identity (chromeSessionId) so the transition window (route flipped, flat
-    // currentSessionId lagging) cannot surface the PRIOR session's stale
-    // notice. Legacy bare-chat passes flat currentSessionId via the same
-    // chromeSessionId val.
-    LaunchedEffect(chat.staleNotice, chromeSessionId) {
-        if (chat.staleNotice && chromeSessionId != null) {
-            chromeState.snackbarHostState.showTimed(
-                message = staleNoticeMessage,
-                actionLabel = staleNoticeActionLabel,
-                onAction = { chatVM.refreshCurrentSession(chromeSessionId) }
-            )
-        }
-    }
-    LaunchedEffect(currentSessionIsRunning, chat.isCompacting) {
-        if (chat.isCompacting && !currentSessionIsRunning) {
-            if (System.currentTimeMillis() - chat.compactStartedAt > 3000) {
-                chatVM.clearCompacting()
-            }
-        }
-    }
-
-
+    // §Item15b: all side-effect blocks extracted to ChatNavigationEffects.kt.
+    ChatNavigationEffects(
+        chromeSessionId = chromeSessionId,
+        curSession = curSession,
+        chatState = chatState,
+        routeSavedStateHandle = routeSavedStateHandle,
+        chatVM = chatVM,
+        sessionVM = sessionVM,
+        orchestratorVM = orchestratorVM,
+        drawerState = chromeState.drawerState,
+        closeDrawerAction = chromeState.closeDrawerAction,
+        snackbarHostState = chromeState.snackbarHostState,
+        currentSessionIsRunning = currentSessionIsRunning,
+        onSnackbarErrorShowDetail = { chromeState.errorDetail = it },
+    )
 
     // §1B / §nav-redesign: derive ChatTopBarState inside a remembered
     // derivedStateOf so the TopAppBar recomposes only when its slice inputs
