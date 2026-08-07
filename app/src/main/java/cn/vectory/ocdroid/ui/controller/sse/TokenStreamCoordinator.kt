@@ -22,7 +22,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 
@@ -250,6 +249,13 @@ class TokenStreamCoordinator(
     // discipline future-proofs against dispatcher changes and makes the
     // generation-guard CAS semantics explicit.
 
+    // ── Split components ───────────────────────────────────────────────────
+
+    /** Exponential backoff ladder + per-sid attempt counters. */
+    private val reconnectPolicy = ReconnectPolicy(
+        initialBackoffMs, maxBackoffMs, backoffMultiplier, bundleCommitLock,
+    )
+
     /** The sid of the currently-open (or pending-debounce) stream. Null = idle. */
     private val currentSid = AtomicReference<String?>(null)
     /** The directory captured for the current stream (for reconnect). */
@@ -305,9 +311,6 @@ class TokenStreamCoordinator(
     private val ownerByPartId = ConcurrentHashMap<String, OwnerTag>()
     /** Per-sid reducer working state (single active stream, but per-sid for safety). */
     private val reducerStateBySid = ConcurrentHashMap<String, TokenStreamReducerState>()
-    /** Per-sid consecutive reconnect attempts (drives backoff growth). */
-    private val attemptBySid = ConcurrentHashMap<String, AtomicInteger>()
-
     private fun dispatchBound(boundBundle: ClientBundle, action: AppAction) {
         synchronized(bundleCommitLock) {
             // Entry fence: boundBundle must be the currently-published bundle.
@@ -575,7 +578,7 @@ class TokenStreamCoordinator(
         // (stream teardown, session switch, background — prevents unbounded
         // growth + provides epoch isolation).
         clearSessionRevisions(sid)
-        attemptBySid.remove(sid)
+        reconnectPolicy.clearSid(sid)
         }
     }
 
@@ -736,7 +739,7 @@ class TokenStreamCoordinator(
         lastFrameAt.set(clock())
         // Reset reconnect-attempt counter on any successful frame — the link
         // is alive, the next failure should start a fresh backoff ladder.
-        attemptBySid[sid]?.set(0)
+        reconnectPolicy.resetAttempts(sid)
 
         // §Stage-B C3 (CRITICAL): capture the route + bundle context ONCE
         // inside the epoch+bundle critical section (after both guards have
@@ -1162,7 +1165,7 @@ class TokenStreamCoordinator(
                     // Flow completed normally → server closed cleanly.
                     DebugLog.i(TAG, "stream completed (server closed) sid=$sid")
                     if (isBundleCurrentForCommit(boundBundle)) {
-                        attemptBySid[sid]?.set(0)
+                        reconnectPolicy.resetAttempts(sid)
                     }
                 } finally {
                     // Always cancel the watchdog when collect returns (normally
@@ -1276,9 +1279,8 @@ class TokenStreamCoordinator(
      * sole tracked lifecycle job.
      */
     private fun scheduleReconnect(sid: String, directory: String?) {
-        val attempt = attemptBySid.computeIfAbsent(sid) { AtomicInteger(0) }.getAndIncrement()
-        val backoff = nextBackoffMs(attempt)
-        DebugLog.i(TAG, "scheduleReconnect sid=$sid attempt=$attempt backoff=${backoff}ms")
+        val backoff = reconnectPolicy.nextDelayMs(sid)
+        DebugLog.i(TAG, "scheduleReconnect sid=$sid backoff=${backoff}ms")
         // §B4 lifecycle capture at reconnect: snapshot the route token NOW and
         // thread it verbatim through runStream → dispatchEpochFrame (rev-gpt C2
         // — no shared field). The reconnected stream carries the token valid
@@ -1306,11 +1308,6 @@ class TokenStreamCoordinator(
                 throw ce
             }
         }
-    }
-
-    private fun nextBackoffMs(attempt: Int): Long {
-        val raw = (initialBackoffMs * Math.pow(backoffMultiplier, attempt.toDouble())).toLong()
-        return raw.coerceAtMost(maxBackoffMs)
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────
