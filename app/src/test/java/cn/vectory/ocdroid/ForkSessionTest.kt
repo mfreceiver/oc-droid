@@ -186,6 +186,39 @@ class ForkSessionTest {
             store = store,
             repository = repository,
         )
+        val testFpProvider: () -> String = { hostProfileStore.currentProfile().id }
+        // §Wave2.2 (item 13): build the 5 orchestrators inline from the same
+        // singletons the production injector uses. See archdebt-batch2-design §3.2.
+        val testServerCompatProfile = cn.vectory.ocdroid.data.repository.ServerCompatProfile()
+        val testTokenStreamCoordinator = cn.vectory.ocdroid.ui.controller.sse.TokenStreamCoordinator(
+            scope = appScope,
+            slices = store.slices,
+            streamProvider = { _, _ -> kotlinx.coroutines.flow.emptyFlow() },
+            triggerSinceFetch = { _, _ -> },
+        )
+        val sessionOpener = cn.vectory.ocdroid.ui.SessionOpener(
+            store, repository, appScope, sessionSwitcher,
+        )
+        val refreshOrchestrator = cn.vectory.ocdroid.ui.RefreshOrchestrator(
+            store, repository, settingsManager, effectBus, appScope,
+            testFpProvider, sessionSwitcher, connectionCoordinator,
+            sessionSyncCoordinator, foregroundCatchUpController, hostProfileStore,
+            testServerCompatProfile, testTokenStreamCoordinator,
+        )
+        val sendOrchestrator = cn.vectory.ocdroid.ui.SendOrchestrator(
+            store, repository, settingsManager, effectBus, appScope,
+            testFpProvider, sessionSwitcher, connectionCoordinator,
+        )
+        val draftSessionOrchestrator = cn.vectory.ocdroid.ui.DraftSessionOrchestrator(
+            store, repository, settingsManager, effectBus, appScope,
+            testFpProvider, composerController, sessionSwitcher,
+            sendOrchestrator, refreshOrchestrator,
+        )
+        val commandOrchestrator = cn.vectory.ocdroid.ui.CommandOrchestrator(
+            store, repository, repository, settingsManager, effectBus, appScope,
+            testFpProvider, composerController,
+            draftSessionOrchestrator, sessionOpener,
+        )
         return AppCore(
             store,
             repository,
@@ -193,7 +226,7 @@ class ForkSessionTest {
             hostProfileStore,
             trafficTracker,
             appLifecycleMonitor,
-            cn.vectory.ocdroid.data.repository.ServerCompatProfile(),
+            testServerCompatProfile,
             effectBus,
             mockk<Context>(relaxed = true),
             foregroundCatchUpController,
@@ -202,18 +235,11 @@ class ForkSessionTest {
             hostProfileController,
             sessionSyncCoordinator,
             connectionCoordinator,
-            // §Stage-D2: token-stream coordinator (not exercised by ForkSessionTest).
-            cn.vectory.ocdroid.ui.controller.sse.TokenStreamCoordinator(
-                scope = appScope,
-                slices = store.slices,
-                streamProvider = { _, _ -> kotlinx.coroutines.flow.emptyFlow() },
-                triggerSinceFetch = { _, _ -> },
-            ),
+            testTokenStreamCoordinator,
             unreadSoakController,
             // §P0-E(b)(c): durable-error GET drain coordinator.
             errorRecoveryCoordinator,
-            // §review-fix #1: fp provider (same as MainViewModelTestBase).
-            { hostProfileStore.currentProfile().id },
+            testFpProvider,
             appScope,
             // CP1 (notify Phase-0): single connection-identity store.
             identityStore,
@@ -223,6 +249,12 @@ class ForkSessionTest {
             // T13 (round-2 review fix): SlimFanOutRetryScheduler (relaxed mock —
             // ForkSessionTest does not exercise backoff wiring).
             mockk<cn.vectory.ocdroid.service.streaming.SlimFanOutRetryScheduler>(relaxed = true),
+            // §Wave2.2 (item 13): 5 orchestrators (Hilt-provided in production).
+            sessionOpener,
+            refreshOrchestrator,
+            sendOrchestrator,
+            draftSessionOrchestrator,
+            commandOrchestrator,
         )
     }
 

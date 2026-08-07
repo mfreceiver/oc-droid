@@ -1,58 +1,58 @@
-// ChatScaffold.kt — Phase 1B chat shell. Replaces the chrome of ChatScreen
-// (the alert-dialog popups for agent/model pickers) with the new M3-native
-// surface (D.2/D.5): single TopAppBar + session-history icon + context chip,
-// ModalBottomSheet SessionPicker (D.4), Agent/Model AssistChips (D.3).
+// ChatScaffold.kt — Phase 1B chat shell (facade). The ~930-line god-composable
+// was split into 4 internal components following the existing
+// `rememberChatTopBarState` precedent (ChatTopBar.kt:195):
 //
-// PARITY (mandatory): ChatScaffold preserves the existing slice reads and
-// effects from ChatScreen verbatim. It only changes the chrome — the message
-// list, streaming overlay, gap-paging, scroll anchoring, draft lifecycle,
-// metadata-marker injection, and unread clearing are delegated to
-// ChatMessageList without re-implementing any of it. New state slice fields
-// New state slice fields are additive only.
+// Component map (all in `ui/chat/`):
+//
+//   ChatDerivedState.kt        — `rememberChatDerivedState(...)`
+//     ~20 cross-slice derived values as per-field `State<T>` properties.
+//     Route identity, session identity, context-usage, agent/model,
+//     activity/matching, host profile, drawer session list.
+//
+//   ChatChromeState.kt         — `rememberChatChromeState(...)`
+//     Chrome/overlay state: 4 rememberSaveable flags (slot-positionality
+//     preserved), 4 remember dialog flags, drawer state + actions,
+//     snackbar host, image picker.
+//
+//   ChatNavigationEffects.kt   — `ChatNavigationEffects(...)`
+//     Pure-effect host: checkpoint consume, reconcile state machine,
+//     parent/drawer BackHandlers (LIFO order), UiEvent snackbar,
+//     stale-notice snackbar, compacting auto-clear.
+//
+// Stays in ChatScaffold (~690 lines after split):
+//   - 11 collectAsStateWithLifecycle subscriptions
+//   - isWide/showSessionSidebar (tablet-responsive layout)
+//   - rememberChatTopBarState + topBarActions wiring
+//   - chatBodyContent lambda (composable tree)
+//   - SaveableStateHolder for sidebar / drawer branch
+//   - ChatDrawerHost / RecentSessionsPane / ChatOverlayHost wiring
+//   - Force-abort AppConfirmDialog
+//
+// §Item15b (archdebt-batch2): extraction completed 2026-08-08.
 
 package cn.vectory.ocdroid.ui.chat
 
 import android.content.res.Configuration
-import androidx.activity.compose.BackHandler
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.text.selection.SelectionContainer
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.DrawerValue
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SnackbarHost
-import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.material3.VerticalDivider
-import androidx.compose.material3.rememberDrawerState
 import androidx.compose.material3.windowsizeclass.WindowSizeClass
 import androidx.compose.material3.windowsizeclass.WindowWidthSizeClass
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.RectangleShape
@@ -62,9 +62,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.SavedStateHandle
-import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.lifecycle.compose.LifecycleEventEffect
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.ui.ChatViewModel
 import cn.vectory.ocdroid.ui.ComposerViewModel
@@ -73,24 +71,8 @@ import cn.vectory.ocdroid.ui.HostViewModel
 import cn.vectory.ocdroid.ui.OrchestratorViewModel
 import cn.vectory.ocdroid.ui.SessionViewModel
 import cn.vectory.ocdroid.ui.SettingsViewModel
-import cn.vectory.ocdroid.ui.ScrollCheckpoint
-import cn.vectory.ocdroid.ui.UiEvent
-import cn.vectory.ocdroid.ui.checkpointKeyForChild
-import cn.vectory.ocdroid.ui.computeContextUsage
-import cn.vectory.ocdroid.ui.consumeAnySubAgentCheckpoint
-import cn.vectory.ocdroid.ui.currentHostProfile
-import cn.vectory.ocdroid.ui.currentSessionStatus
-import cn.vectory.ocdroid.ui.effectiveBusySessionIds
 import cn.vectory.ocdroid.ui.controller.ControllerEffect
-import cn.vectory.ocdroid.ui.controller.allSessionsById
 import cn.vectory.ocdroid.ui.controller.questionRootIds
-import cn.vectory.ocdroid.ui.controller.questionsInTree
-import cn.vectory.ocdroid.ui.controller.rootIdOf
-import cn.vectory.ocdroid.ui.inferCurrentAgent
-import cn.vectory.ocdroid.ui.inferCurrentModel
-import cn.vectory.ocdroid.ui.resolveMessage
-import cn.vectory.ocdroid.ui.showTimed
-import cn.vectory.ocdroid.ui.visibleMessages
 import cn.vectory.ocdroid.ui.theme.AppBottomSheet
 import cn.vectory.ocdroid.ui.theme.AppConfirmDialog
 import cn.vectory.ocdroid.ui.theme.Dimens
@@ -226,36 +208,50 @@ fun ChatScaffold(
     val host by hostState
     val recentWorkdirs by settingsVM.recentWorkdirs.collectAsStateWithLifecycle()
     val routeInstance by orchestratorVM.chatRouteInstanceFlow.collectAsStateWithLifecycle()
-    // Once a parameterized route has accepted content, use that immutable
-    // payload for transcript-adjacent chrome as well as the message list.
-    val routeOwnedContent = routeSessionId
-        ?.takeIf { isRouteContentRenderable(it, chat.content, routeInstance) }
-        ?.let { chat.content }
-    // §B2 rev-gpt #4: the parameterized chat/{sessionId} route MUST NOT fall
-    // back to flat fields when route-owned content is unavailable — flat
-    // reads would surface a stale session's transcript-adjacent chrome (agent /
-    // model inference, context-usage) while the detail pane shows Loading. The
-    // legacy bare-chat branch (routeSessionId == null) keeps flat reads. Empty
-    // values are harmless for chrome inference and never reach the message
-    // list (the list is chosen by the routeSessionId branch below, which
-    // already routes to ChatDetailSlice when content is non-renderable).
-    val onParameterizedRoute = routeSessionId != null
-    val renderedMessages =
-        if (onParameterizedRoute) routeOwnedContent?.messages ?: emptyList() else chat.messages
-    val renderedPartsByMessage =
-        if (onParameterizedRoute) routeOwnedContent?.partsByMessage ?: emptyMap() else chat.partsByMessage
-    val renderedStreamingTexts =
-        if (onParameterizedRoute) routeOwnedContent?.streamingPartTexts ?: emptyMap() else chat.streamingPartTexts
-    val renderedStreamingReasoning =
-        if (onParameterizedRoute) routeOwnedContent?.streamingReasoningPart else chat.streamingReasoningPart
-    // §B2 rev-gpt MAJOR 1: the authoritative session id for transcript-
-    // adjacent chrome (agent / model / status / revert cutoff). On the
-    // parameterized route the route id governs — flat currentSessionId can
-    // lag the route flip (navigateToChat commits nav.lastRoute + token in one
-    // dispatch; SessionSelected follows in a separate dispatch), so reading
-    // currentSessionId during the loading window would surface the PRIOR
-    // session's chrome. The legacy bare-chat branch keeps flat currentSessionId.
-    val chromeSessionId = chromeSessionIdFor(routeSessionId, chat.currentSessionId)
+    // §Item15b: cross-slice derived state extracted into a dedicated
+    // remember-factory. Every field is an individual State<T> (not one bundled
+    // derivedStateOf) preserving the pre-extraction per-field recompose
+    // granularity. All remember/derivedStateOf key lists are verbatim from the
+    // pre-extraction code.
+    val derivedState = rememberChatDerivedState(
+        routeSessionId = routeSessionId,
+        routeInstance = routeInstance,
+        chatState = chatState,
+        sessionListState = sessionListState,
+        settingsState = settingsState,
+        composerState = composerState,
+        hostState = hostState,
+        onOpenChatFilePreview = onOpenChatFilePreview,
+    )
+    // §Item15b: unwrap derived state fields for direct use in the scaffold
+    // body — each `by` delegate reads `.value` on the individual State<T>,
+    // preserving snapshot-tracking.
+    val chromeSessionId by derivedState.chromeSessionId
+    val onParameterizedRoute by derivedState.onParameterizedRoute
+    val routeOwnedContent by derivedState.routeOwnedContent
+    val renderedMessages by derivedState.renderedMessages
+    val renderedPartsByMessage by derivedState.renderedPartsByMessage
+    val renderedStreamingTexts by derivedState.renderedStreamingTexts
+    val renderedStreamingReasoning by derivedState.renderedStreamingReasoning
+    val sessionsById by derivedState.sessionsById
+    val curSession by derivedState.curSession
+    val effectiveBusy by derivedState.effectiveBusy
+    val curCutoff by derivedState.curCutoff
+    val curRevertMessageId by derivedState.curRevertMessageId
+    val curSessionStatus by derivedState.curSessionStatus
+    val cachedContextUsage by derivedState.cachedContextUsageState
+    val visibleAgents by derivedState.visibleAgents
+    val effectiveAgent by derivedState.effectiveAgent
+    val effectiveModel by derivedState.effectiveModel
+    val currentSessionIsRunning by derivedState.currentSessionIsRunning
+    val isCurrentSessionSending by derivedState.isCurrentSessionSending
+    val currentActivity by derivedState.currentActivity
+    val matchingQuestions by derivedState.matchingQuestions
+    val pendingQuestion by derivedState.pendingQuestion
+    val pendingPermission by derivedState.pendingPermission
+    val curHostProfile by derivedState.curHostProfile
+    val recentSessionsForDrawer by derivedState.recentSessionsForDrawer
+    val onChatFileClick = derivedState.onChatFileClick
 
     // §chat-list-detail §11 / G6 (B5) + §scroll-guard-fix: checkpoint consume
     // with a DIRECTION GUARD. Because chat→chat navigation uses `launchSingleTop`
@@ -278,100 +274,22 @@ fun ChatScaffold(
     // exactly this one place. The dispatch goes through the unified
     // [AppAction.ScrollRequested] slot — the consumer in ChatMessageList sees
     // `behavior=Restore` and applies it.
-    LaunchedEffect(chromeSessionId, routeSavedStateHandle) {
-        val handle = routeSavedStateHandle ?: return@LaunchedEffect
-        val sid = chromeSessionId ?: return@LaunchedEffect
-        val cp = consumeAnySubAgentCheckpoint(handle, sid)
-        if (cp != null) {
-            chatVM.requestScrollRestore(sid, cp)
-        }
-    }
+    // §Item15b: checkpoint consume + onOpenSubAgentNavigate extracted to
+    // ChatNavigationEffects.kt.
+    val onOpenSubAgentNavigate = rememberOnOpenSubAgentNavigate(
+        chromeSessionId = chromeSessionId,
+        routeSavedStateHandle = routeSavedStateHandle,
+        sessionVM = sessionVM,
+        orchestratorVM = orchestratorVM,
+    )
 
-    /**
-     * §chat-list-detail §11 / G6 (B5) + §scroll-guard-fix: the openSubAgent-side
-     * callback passed down to ChatMessageList. The listState live-capture stays
-     * in ChatMessageContent (where the LazyListState reference is owned); this
-     * callback is invoked AFTER the synchronous capture, with the resulting
-     * [ScrollCheckpoint].
-     *
-     * §scroll-guard-fix: stamps `capturedFromSessionId = chromeSessionId`
-     * (the CURRENT parent) onto the checkpoint before persisting, so the
-     * consume guard can later tell return-to-parent (capturedFrom == current)
-     * from enter-child / nested / unrelated-jump. Without this stamp the guard
-     * could not distinguish "the user came back to me" from "the user jumped
-     * to a different session while my checkpoint was still pending".
-     *
-     * §B5 BLOCK-fix (rev-gpt MAJOR 1): the checkpoint write + nav call are
-     * INSIDE the SessionViewModel.openSubAgent success callback — NOT before
-     * the call. This avoids leaving a stale checkpoint on the shared handle
-     * when the child fetch fails or the route changed mid-fetch.
-     *
-     * The handle is THIS slot's (parent and child share one chat back-stack
-     * slot under `launchSingleTop` — see ScrollCheckpoint.kt §scroll-guard-fix),
-     * so the persisted checkpoint is readable when the slot later re-enters
-     * composition as the parent.
-     */
-    val onOpenSubAgentNavigate: (childSessionId: String, checkpoint: ScrollCheckpoint) -> Unit =
-        { childSessionId, checkpoint ->
-            // The capturing parent is the session currently in the chrome at
-            // click time. Captured into a local so the lambda stamps the SAME
-            // id even if chromeSessionId recomposes mid-openSubAgent-fetch.
-            val capturedFromParentId = chromeSessionId
-            sessionVM.openSubAgent(childSessionId, checkpoint) { resolvedId, cp ->
-                // §B5 BLOCK-fix MAJOR 1: checkpoint write + nav fire ONLY on
-                // the success path. Stamp capturedFromSessionId so the consume
-                // guard recognizes this checkpoint on return-to-parent.
-                routeSavedStateHandle?.set(
-                    checkpointKeyForChild(resolvedId),
-                    cp.copy(capturedFromSessionId = capturedFromParentId),
-                )
-                orchestratorVM.navigateToChat(resolvedId)
-            }
-        }
-
-    // ── Chrome-only state (new for Phase 1B) ─────────────────────────────
-    // §0.8.2 P2: showContextSelector / showOverflow are
-    // GONE — the nav-icon workdir initial is non-clickable (P2.1), the
-    // ContextCueChip + server-status IconButton are removed (P2.2), and the
-    // overflow DropdownMenu is co-located with its ContextUsageRing trigger
-    // inside ChatTopBar (P2.3 — the fix for the top-left popup bug). The
-    // AgentPickerSheet + ModelPickerSheet triggers also moved into the
-    // overflow menu (the Composer's Agent/Model chips were deleted in P2.5);
-    // their sheet state lives HERE (ChatScaffold) because ChatTopBar only
-    // fires the open-callback, and the sheets need slice reads (settingsFlow
-    // for agents/providers; chatFlow for currentModel) that ChatScaffold
-    // already subscribes to. The picker composables themselves are defined in
-    // PickerSheets.kt (now `internal` so this file can call them).
-    var showAgentPicker by rememberSaveable { mutableStateOf(false) }
-    var showModelPicker by rememberSaveable { mutableStateOf(false) }
-    var showSessionPicker by rememberSaveable { mutableStateOf(false) }
-    var errorDetail by remember { mutableStateOf<String?>(null) }
-    // §1B-FIX (I6): dialog-state for the parity overflow entries (Todo +
-    // Context-usage). Owned here in ChatScaffold so the conversation
-    // overflow menu can open them. The dialogs themselves render the
-    // same body the old ChatTopBar used (TodoListPanel / ContextUsageDialog
-    // from this package).
-    var showTodoDialog by remember { mutableStateOf(false) }
-    var showContextDialog by remember { mutableStateOf(false) }
-    // §B: 强制中止确认弹窗
-    var showForceAbortConfirm by remember { mutableStateOf(false) }
-    // §drawer-new-session: workdir picker for the drawer header "new session"
-    // button when ≥2 workdirs are connected (mirrors SessionsScreen's flow).
-    // §L5a: owned HERE (ChatScaffold) because ChatOverlayHost reads it
-    // directly (the AppBottomSheet is gated on it). The drawer's
-    // `onStartNewSessionInDrawer` ≥2-workdir branch SETS it via the
-    // `onShowWorkdirPicker` callback passed to ChatDrawerHost; the workdir
-    // picker AppBottomSheet itself is rendered by ChatOverlayHost.
-    var pendingWorkdirPick by rememberSaveable { mutableStateOf(false) }
-    // §L5a (UI god-file split): `drawerInteractionLocked` MOVED into
-    // ChatDrawerHost (every read/write of it lives in the drawer tree — the
-    // two write sites in `onStartNewSessionInDrawer` and the one read site in
-    // RecentSessionsDrawer's `interactionsEnabled`). No reference to it
-    // remains in ChatScaffold.
-
+    // §Item15b: chrome/overlay state (picker flags, drawer, snackbar, image
+    // picker) extracted to `rememberChatChromeState` (ChatChromeState.kt).
+    val chromeState = rememberChatChromeState(
+        composerVM = composerVM,
+        onOpenDrawer = onOpenDrawer,
+    )
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    val snackbarHostState = remember { SnackbarHostState() }
 
     // §home-hub T4: responsive top-left affordance + tablet drawer gating.
     // Hoisted here (formerly computed deep inside the chat Surface at §B3
@@ -397,375 +315,21 @@ fun ChatScaffold(
         Dimens.sessionSidebarWidthMedium
     }
 
-    // §home-hub T4: drawerState owned here. The Menu button (tablet,
-    // ChatTopBar navigationIcon) opens it via [openDrawerAction]; a
-    // dedicated BackHandler (below, higher priority than root/parent) closes
-    // it when open. Edge-swipe-to-open is disabled via
-    // `gesturesEnabled = drawerState.isOpen` (false when closed) so the
-    // HorizontalPager tab-switcher never fights the drawer open gesture;
-    // when open, gestures re-enable so M3 Scrim tap-to-dismiss works.
-    val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
-    // §home-hub T4 (IMPORTANT-3 fix): the hamburger (Menu) button TOGGLES the
-    // drawer — open when closed, close when open (C2: "tap Menu again closes").
-    // The previous implementation always called drawerState.open(), so a
-    // second tap on an already-open drawer was a no-op instead of closing.
-    val openDrawerAction: () -> Unit = {
-        scope.launch {
-            if (drawerState.isOpen) drawerState.close() else drawerState.open()
-        }
-        // Fire the external hook AFTER kickiing the toggle so a T7 caller's
-        // telemetry / focus logic does not block the drawer animation.
-        onOpenDrawer()
-    }
-    val closeDrawerAction: () -> Unit = remember(scope, drawerState) {
-        { scope.launch { drawerState.close() } }
-    }
-
-    // Image picker (Photos Add-menu entry). Phase 1B ships only Photos;
-    // "Reference workspace file" and "Commands" are Phase 2/2b.
-    val imagePicker = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.GetMultipleContents()
-    ) { uris ->
-        scope.launch {
-            composerVM.addImageAttachments(loadImageAttachments(context, uris))
-        }
-    }
-    val onAddImages: () -> Unit = remember(imagePicker) {
-        { imagePicker.launch("image/*") }
-    }
-
-    // §PARITY: cross-slice derived views moved verbatim from ChatScreen —
-    // currentSession, currentSessionStatus, cachedContextUsage, isRunning,
-    // currentActivity, matchingQuestions, questionCardHeightDp — none are
-    // re-implemented; they read the same slices and the same pure helpers
-    // (`currentSession` / `currentSessionStatus` / `computeContextUsage` /
-    // `visibleMessages` / `currentSessionActivity`).
-    //
-    // §Q14 (title union): resolve curSession through the UNION store
-    // (root + directorySessions + childSessions) so a sub-agent / cross-
-    // workdir current session is found for the file-preview workdir, the
-    // effective agent/model fallback (§Q2) and the matching-questions /
-    // revert derivations below. The previous `currentSession(sessionList.
-    // sessions, …)` only inspected root sessions, returning null for any
-    // child id — which then degraded the top-bar title to the app name and
-    // broke the file-preview workdir. `sessionsById` is hoisted here so the
-    // downstream matchingQuestions / questionRootIds reuses it instead of
-    // recomputing the map.
-    val sessionsById = remember(
-        sessionList.sessions,
-        sessionList.directorySessions,
-        sessionList.childSessions,
-    ) {
-        allSessionsById(
-            sessionList.sessions,
-            sessionList.directorySessions,
-            sessionList.childSessions,
-        )
-    }
-    val curSession = chromeSessionId?.let { sessionsById[it] }
-    val effectiveBusy = remember(
-        sessionList.activeSessionIds,
-        sessionList.sessionStatuses,
-    ) {
-        effectiveBusySessionIds(
-            sessionList.activeSessionIds,
-            sessionList.sessionStatuses,
-        )
-    }
-    // A file-path tap passes the actual tapped path through to the Chat-stack
-    // preview. The prior route dropped that path, so the preview could not
-    // locate the selected file. AppShell receives both route fields.
-    val onChatFileClick: (String) -> Unit = remember(curSession, onOpenChatFilePreview) {
-        { path -> onOpenChatFilePreview(curSession?.directory, path) }
-    }
-    val curCutoff = chromeSessionId?.let(chat.revertCutoffs::get)
-    val curRevertMessageId = if (curSession != null) curSession.revert?.messageId else curCutoff?.messageId
-    val curSessionStatus = currentSessionStatus(sessionList.sessionStatuses, chromeSessionId)
-    // ── §P0 rev-3: unified reconcile state machine ───────────────────────
-    // SSE question resolution can be missed while this process is paused. A
-    // session activation (first entry or switch) and each genuine foreground
-    // return perform one authoritative reconcile; the loader's race-safe merge
-    // preserves live question.asked arrivals.
-    //
-    // The previous approach (rev-2) had a behaviour regression: it deferred
-    // the actual reconcile decision to LifecycleEventEffect(ON_RESUME), but a
-    // foreground session switch (App already RESUMED, user switches A→B) does
-    // NOT produce a new ON_RESUME — so the reconcile was postponed until the
-    // next lifecycle pause→resume. This weakened the P0-B window-closure goal.
-    //
-    // Rev-3 fix: [onSessionChange] returns `(shouldReconcile, nextState)`
-    // directly, and LaunchedEffect calls reconcilePendingQuestions() itself
-    // when the return signals `true`. ON_RESUME handles genuine pause→resume
-    // independently. Initial `wasPaused = false` prevents the catch-up
-    // ON_RESUME (on first composition) from double-firing when LaunchedEffect
-    // already reconciled the session.
-    var reconcileState by remember { mutableStateOf(ReconcileTriggerState()) }
-
-    // Session switch or first composition: reconcile directly if this is a
-    // new session (different from last reconciled). Does NOT wait for ON_RESUME.
-    LaunchedEffect(chromeSessionId) {
-        if (chromeSessionId != null) {
-            val (shouldReconcile, nextState) = reconcileState.onSessionChange(chromeSessionId)
-            reconcileState = nextState
-            if (shouldReconcile) {
-                chatVM.reconcilePendingQuestions()
-            }
-        }
-    }
-
-    // Genuine background → mark pause for the next ON_RESUME.
-    LifecycleEventEffect(Lifecycle.Event.ON_PAUSE) {
-        reconcileState = reconcileState.onPause()
-    }
-
-    // Foreground return: only reconcile for genuine pause→resume.
-    // First-composition catch-up is race-free because LaunchedEffect already
-    // handled it (wasPaused starts as false, so the catch-up is a no-op).
-    LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
-        val (shouldReconcile, nextState) = reconcileState.onResume(chromeSessionId)
-        reconcileState = nextState
-        if (shouldReconcile && chromeSessionId != null) {
-            chatVM.reconcilePendingQuestions()
-        }
-    }
-    val computedContextUsage = computeContextUsage(renderedMessages, settings.providers)
-    // §L5a: cache `cachedContextUsage` behind a State handle so the
-    // rememberChatTopBarState lambda can read `.value` on it (snapshot-tracking
-    // contract). The `by` delegate below stays — ChatScaffold's other reads
-    // (the ChatOverlayHost cachedContextUsage = … arg) continue to read the
-    // same snapshot.
-    val cachedContextUsageState = remember { mutableStateOf(computedContextUsage) }
-    var cachedContextUsage by cachedContextUsageState
-    computedContextUsage?.let { cachedContextUsage = it }
-    // §chat-ux-batch T7 (B2): per-session sticky display + selection source.
-    // The pickers and the top-bar BOTH read `pending ?: session ?: infer` so
-    // the UI shows what the NEXT send will actually use. `visibleAgents`
-    // filters out hidden internal agents (compaction / title) — see T6
-    // contract. The effective values live HERE (single source for both
-    // consumers below) so the top-bar overflow label and the picker highlight
-    // never drift apart.
-    //
-    // §Q2: the chain now consults the server-provided session fields first
-    // (after pending, before transcript inference) so the top-bar reflects
-    // the authoritative server view of which agent/model the session is
-    // bound to — useful before any assistant message has streamed. The
-    // session.agent is visible-filtered (same rule as inference); a blank
-    // session agent is treated as absent. session.model is bridged to
-    // Message.ModelInfo (the type the top-bar / picker consume) — only when
-    // both id + providerId are non-blank, else falls back to inference.
-    val visibleAgents = remember(settings.agents) {
-        settings.agents.filter { it.isVisible }.map { it.name }.toSet()
-    }
-    val effectiveAgent: String? = remember(chat.pendingAgent, curSession, renderedMessages, visibleAgents, onParameterizedRoute) {
-        val sessionAgent = curSession?.agent?.takeIf { it.isNotBlank() && it in visibleAgents }
-        val inferred = inferCurrentAgent(renderedMessages, visibleAgents)
-        // §B2 rev-gpt MAJOR 3: for the parameterized chat/{sessionId} route
-        // the route session's stored agent (+ transcript inference) is the
-        // RENDER authority. Flat pendingAgent is a global single-slot with no
-        // session attribution; during the nav-flip → SessionSelected window
-        // it can hold the PRIOR route's pick. pendingAgent stays the legacy
-        // bare-chat source (routeSessionId == null); the pending WRITE path
-        // is unchanged (the pick still applies on send via pendingAgent).
-        if (onParameterizedRoute) {
-            sessionAgent ?: inferred
-        } else {
-            chat.pendingAgent ?: sessionAgent ?: inferred
-        }
-    }
-    val effectiveModel: cn.vectory.ocdroid.data.model.Message.ModelInfo? = remember(chat.pendingModel, curSession, routeOwnedContent, renderedMessages, visibleAgents, onParameterizedRoute) {
-        // §Q2: bridge Session.ModelInfo → Message.ModelInfo (the type the
-        // top-bar / ContextMenuCluster.currentModel consume). Extract to
-        // local vals so Kotlin smart-casts the nullable members to non-null
-        // for the Message.ModelInfo constructor (both params are non-null
-        // String); only convert when BOTH are non-blank, else fall through
-        // to transcript inference.
-        val m = curSession?.model
-        val mid = m?.id
-        val mpid = m?.providerId
-        val converted =
-            if (mid != null && mid.isNotBlank() && mpid != null && mpid.isNotBlank())
-                cn.vectory.ocdroid.data.model.Message.ModelInfo(modelId = mid, providerId = mpid)
-            else null
-        val inferred = inferCurrentModel(renderedMessages, visibleAgents)
-        // §B2 rev-gpt MAJOR 3: for the parameterized route the route-owned
-        // LoadedContent.currentModel (the model under which the loaded
-        // content was produced) + the route session's stored model +
-        // transcript inference form the RENDER authority. Flat pendingModel
-        // (global single-slot) is the legacy bare-chat source only.
-        if (onParameterizedRoute) {
-            routeOwnedContent?.currentModel ?: converted ?: inferred
-        } else {
-            chat.pendingModel ?: converted ?: inferred
-        }
-    }
-    val currentSessionIsRunning = curSessionStatus?.let { it.isBusy || it.isRetry } == true ||
-        chromeSessionId?.let { it in composer.sendingSessionIds } == true
-    // §phase2-parity: narrow projection of composerFlow for the
-    // canEditAndRerun destructive gate. Derived ONCE here (ChatScaffold
-    // already subscribes to composerFlow + chatFlow + sessionListFlow) and
-    // passed as a boolean to ChatMessageList. This keeps ChatMessageList
-    // OFF composerFlow — every keystroke mutates composerFlow (input text),
-    // so a direct subscription there would recompose the whole message
-    // list on every key, breaking the §1B/1C "typing does not recompose
-    // the list" parity contract. The other gate inputs (busy / retry /
-    // streamingPartTexts / streamingReasoningPart) stay inside
-    // ChatMessageList (read from its own chatFlow + sessionListFlow
-    // subscriptions, which fire on legitimate message/stream events, not
-    // keystrokes).
-    val isCurrentSessionSending = chromeSessionId?.let { it in composer.sendingSessionIds } == true
-    val currentActivity = remember(
-        chromeSessionId,
-        curSessionStatus,
-        curRevertMessageId,
-        curCutoff,
-        renderedMessages,
-        renderedPartsByMessage,
-        renderedStreamingReasoning,
-        renderedStreamingTexts,
-    ) {
-        currentSessionActivity(
-            sessionId = chromeSessionId,
-            status = curSessionStatus,
-            messages = visibleMessages(
-                renderedMessages,
-                curSession,
-                curCutoff
-            ),
-            partsByMessage = renderedPartsByMessage,
-            streamingReasoningPart = renderedStreamingReasoning,
-            streamingPartTexts = renderedStreamingTexts,
-        )
-    }
-    val matchingQuestions = remember(
-        sessionList.pendingQuestions,
-        chromeSessionId,
-        sessionsById,
-    ) {
-        val root = chromeSessionId?.let { rootIdOf(it, sessionsById) }
-        if (root != null) questionsInTree(root, sessionList.pendingQuestions, sessionsById)
-        else emptyList()
-    }
-    val pendingQuestion = matchingQuestions.firstOrNull()
-    // §1C: permission session-scope filter (P5-7) — same rule the question
-    // filter already applies. The pre-filtered permission is the input
-    // to StatusSlot, which guarantees the slot is fed only this session's
-    // pending permission (cross-session pending items become a Sessions
-    // nav-bar badge in Phase 1A / scheme D.1).
-    val pendingPermission = remember(sessionList.pendingPermissions, chromeSessionId) {
-        sessionList.pendingPermissions.firstOrNull { it.sessionId == chromeSessionId }
-    }
-    // §1C: compacting + retry card height tracking is no longer needed —
-    // the single status slot is anchored at the top of the chat area (not
-    // bottom-overlaid), so it no longer occludes the snackbar host. The
-    // old animateDpAsState(questionCardHeightDp) — used to push the
-    // snackbar up over a bottom-anchored question card — is removed.
-
-    // §PARITY: parent-session BackHandler (#14) + root-session back-to-home
-    // (§home-hub T4 — replaces the legacy "press again to exit" double-tap
-    // confirm) + UiEvent error/success snackbar collection (R-17 batch2) +
-    // stale-notice snackbar + compacting auto-clear (Phase 0) are all moved
-    // verbatim — the chrome swap does not affect any of these.
-    val parent = curSession?.parentId
-    var lastParent by remember { mutableStateOf<String?>(null) }
-    if (parent != null) lastParent = parent
-    BackHandler(enabled = parent != null) {
-        // §chat-list-detail §11 / G6 (B5 BLOCK-fix): 子→父 via Android Back.
-        // navigateToChat writes navState.lastRoute; the AppShell synchronizer
-        // detects previousBackStackEntry.sessionId == parentId and executes
-        // popBackStack() (NOT navigate) — preserving the parent entry's
-        // SavedStateHandle + openSubAgent checkpoint. The parent's
-        // ChatScaffold LaunchedEffect then consumes the checkpoint → Restore.
-        sessionVM.returnToParent { pid -> orchestratorVM.navigateToChat(pid) }
-    }
-
-    val errorMessage = stringResource(R.string.chat_error_occurred)
-    val errorActionLabel = stringResource(R.string.chat_view)
-    val staleNoticeMessage = stringResource(R.string.chat_stale_notice)
-    val staleNoticeActionLabel = stringResource(R.string.common_refresh)
-
-    // §predictive-back-fix (2026-07-26): the root-session BackHandler was
-    // REMOVED. Previously this intercepted the system back gesture with a
-    // custom BackHandler → onBackToHome(), which registered an
-    // OnBackInvokedCallback that the system treated as generic (no
-    // destination preview) — predictive back animation didn't fire for
-    // Chat → Sessions (while Git → Sessions worked because AppShell's
-    // BackHandler is composed outside the NavHost).
-    //
-    // Now: when no narrower handler is active (drawer closed, root session),
-    // NO BackHandler is enabled → the NavHost's native predictive back
-    // handler fires → popBackStack with the system's "shrink + reveal"
-    // animation. The parent-session (line 584) and drawer (line 619)
-    // BackHandlers stay — they have narrower `enabled` conditions and
-    // preempt the NavHost handler when active (LIFO: ChatScaffold handlers
-    // are composed inside NavHost → registered after NavController's own
-    // callback → higher priority when enabled).
-
-    // §home-hub T4 (IMPORTANT-2 fix): drawer-open BackHandler MUST be composed
-    // AFTER the parent/root handlers. Compose dispatches back in REVERSE
-    // registration order (the most-recently-composed enabled BackHandler
-    // wins), so registering this LAST guarantees that an OPEN drawer's back
-    // closes the drawer FIRST and never propagates to the root handler above
-    // (which would call onBackToHome — the bug when this was composed before
-    // the root handler). `enabled = drawerState.isOpen` keeps it inert when
-    // the drawer is closed, so phone (drawer never opens) and tablet (drawer
-    // closed) back still flow to the root/parent handlers above.
-    BackHandler(enabled = drawerState.isOpen) {
-        closeDrawerAction()
-    }
-
-    // §PARITY: UiEvent error / success / info / debug collection. Slice-
-    // only reads, SharedFlow is one-shot. Verbatim from ChatScreen.
-    LaunchedEffect(Unit) {
-        orchestratorVM.uiEvents.collect { event ->
-            val message = event.resolveMessage(context)
-            when (event) {
-                is UiEvent.Error -> {
-                    snackbarHostState.showTimed(
-                        message = errorMessage,
-                        durationMillis = 3_000L,
-                        actionLabel = errorActionLabel,
-                        onAction = { errorDetail = message }
-                    )
-                }
-                is UiEvent.Success -> {
-                    snackbarHostState.showTimed(
-                        message = message,
-                        durationMillis = 2_500L
-                    )
-                }
-                is UiEvent.Info -> {
-                    snackbarHostState.showTimed(
-                        message = message,
-                        durationMillis = 2_500L
-                    )
-                }
-                is UiEvent.Debug -> Unit
-            }
-        }
-    }
-    // §B2 rev-gpt MAJOR 2: gate the stale-notice snackbar on the route-owned
-    // identity (chromeSessionId) so the transition window (route flipped, flat
-    // currentSessionId lagging) cannot surface the PRIOR session's stale
-    // notice. Legacy bare-chat passes flat currentSessionId via the same
-    // chromeSessionId val.
-    LaunchedEffect(chat.staleNotice, chromeSessionId) {
-        if (chat.staleNotice && chromeSessionId != null) {
-            snackbarHostState.showTimed(
-                message = staleNoticeMessage,
-                actionLabel = staleNoticeActionLabel,
-                onAction = { chatVM.refreshCurrentSession(chromeSessionId) }
-            )
-        }
-    }
-    LaunchedEffect(currentSessionIsRunning, chat.isCompacting) {
-        if (chat.isCompacting && !currentSessionIsRunning) {
-            if (System.currentTimeMillis() - chat.compactStartedAt > 3000) {
-                chatVM.clearCompacting()
-            }
-        }
-    }
-
-
+    // §Item15b: all side-effect blocks extracted to ChatNavigationEffects.kt.
+    ChatNavigationEffects(
+        chromeSessionId = chromeSessionId,
+        curSession = curSession,
+        chatState = chatState,
+        routeSavedStateHandle = routeSavedStateHandle,
+        chatVM = chatVM,
+        sessionVM = sessionVM,
+        orchestratorVM = orchestratorVM,
+        drawerState = chromeState.drawerState,
+        closeDrawerAction = chromeState.closeDrawerAction,
+        snackbarHostState = chromeState.snackbarHostState,
+        currentSessionIsRunning = currentSessionIsRunning,
+        onSnackbarErrorShowDetail = { chromeState.errorDetail = it },
+    )
 
     // §1B / §nav-redesign: derive ChatTopBarState inside a remembered
     // derivedStateOf so the TopAppBar recomposes only when its slice inputs
@@ -773,7 +337,7 @@ fun ChatScaffold(
     // second-row SessionTabStrip was RESTORED under ChatTopBar by the nav
     // redesign (quick switch between open root sessions); session switching is
     // via the strip AND the SessionPickerSheet (title tap = all/search/archive).
-    val curHostProfile = currentHostProfile(host.hostProfiles, host.currentHostProfileId)
+    // §Item15b: curHostProfile extracted to ChatDerivedState.kt.
     // §Nit: hoist the localised "No host" fallback outside the
     // derivedStateOf lambda (Compose forbids @Composable invocations
     // inside non-composable lambdas like derivedStateOf).
@@ -794,7 +358,7 @@ fun ChatScaffold(
         unreadState = unreadState,
         trafficState = trafficState,
         composerState = composerState,
-        cachedContextUsageState = cachedContextUsageState,
+        cachedContextUsageState = derivedState.cachedContextUsageState,
         effectiveAgent = effectiveAgent,
         effectiveModel = effectiveModel,
         noHostFallback = noHostFallback,
@@ -831,10 +395,10 @@ fun ChatScaffold(
             // its SavedStateHandle. The parent's LaunchedEffect replays the
             // Restore checkpoint.
             onNavigateParent = { sessionVM.returnToParent { pid -> orchestratorVM.navigateToChat(pid) } },
-            onOpenContextDialog = { showContextDialog = true },
-            onOpenTodoDialog = { showTodoDialog = true },
-            onOpenAgentPicker = { showAgentPicker = true },
-            onOpenModelPicker = { showModelPicker = true },
+            onOpenContextDialog = { chromeState.showContextDialog = true },
+            onOpenTodoDialog = { chromeState.showTodoDialog = true },
+            onOpenAgentPicker = { chromeState.showAgentPicker = true },
+            onOpenModelPicker = { chromeState.showModelPicker = true },
             // §sse-rest-fallback (强制刷新 = SSE-disconnect REST 兜底): the
             // user's explicit "Force refresh" — clear the current session
             // window, wipe messages/parts, full UNANCHORED re-fetch (bypass a
@@ -845,7 +409,7 @@ fun ChatScaffold(
             // testConnection + LoadSessions) so the logic is shared + unit-
             // tested at the orchestration layer. When no session is open, only
             // the session-list resync applies.
-            onForceAbort = { showForceAbortConfirm = true },
+            onForceAbort = { chromeState.showForceAbortConfirm = true },
             onForceRefresh = {
                 val sid = chromeSessionId
                 if (sid != null) {
@@ -883,28 +447,15 @@ fun ChatScaffold(
     // parentId==null && !isArchived, sorted by time.updated desc, no cap
     // (home §2a applies none; the LazyColumn handles scrolling).
     //
-    // §L5a: this derivation STAYS in ChatScaffold (reads sessionList.sessions
-    // / .directorySessions, which ChatScaffold already subscribes to); the
-    // resulting List<Session> is passed as a plain value to ChatDrawerHost.
-    val recentSessionsForDrawer = remember(
-        sessionList.sessions,
-        sessionList.directorySessions,
-    ) {
-        (sessionList.sessions + sessionList.directorySessions.values.flatten())
-            .distinctBy { it.id }
-            .filter { it.parentId == null && !it.isArchived }
-            .sortedByDescending { it.time?.updated ?: 0L }
-    }
+    // §Item15b: recentSessionsForDrawer extracted to ChatDerivedState.kt.
     // §L5a (UI god-file split): the ModalNavigationDrawer wrapper + its
     // drawer-local state (drawerInteractionLocked + onStartNewSessionInDrawer)
     // MOVED into ChatDrawerHost (ChatDrawerHost.kt). The chat body Column
     // below is the trailing `content` lambda — verbatim, every local
-    // ChatScaffold read inside it is still in scope. The `closeDrawerAction`
-    // + `drawerState` STAY owned here (the drawer-close BackHandler @455-457
-    // composes AFTER the parent/root handlers and reads drawerState.isOpen;
-    // `onShowWorkdirPicker = { pendingWorkdirPick = true }` keeps
-    // pendingWorkdirPick owned+consumed in ChatScaffold (ChatOverlayHost
-    // reads it directly).
+    // ChatScaffold read inside it is still in scope. `closeDrawerAction`
+    // + `drawerState` are now on `chromeState` (ChatChromeState.kt).
+    // `onShowWorkdirPicker = { chromeState.pendingWorkdirPick = true }`
+    // keeps pendingWorkdirPick owned+consumed in ChatScaffold.
     // §P2-item2: new-session handler for the persistent sidebar
     // (mirrors ChatDrawerHost's onStartNewSessionInDrawer but without
     // drawer close animation — the sidebar is always visible).
@@ -916,7 +467,7 @@ fun ChatScaffold(
                     sessionVM.createSessionInWorkdir(recentWorkdirs.single())
                 }
                 else -> {
-                    pendingWorkdirPick = true
+                    chromeState.pendingWorkdirPick = true
                 }
             }
         }
@@ -929,11 +480,11 @@ fun ChatScaffold(
             ChatTopBar(
                 state = topBarState,
                 actions = topBarActions,
-                onTitleClick = { showSessionPicker = true },
+                onTitleClick = { chromeState.showSessionPicker = true },
                 // §home-hub T4 (C1/C3): responsive top-left affordance. ChatTopBar
                 // branches on width internally (phone ArrowBack / tablet Menu).
                 onBackToHome = onBackToHome,
-                onOpenDrawer = openDrawerAction,
+                onOpenDrawer = chromeState.openDrawerAction,
             )
 
             // §persistent-restart-required (Medium-1): show a persistent error
@@ -1082,7 +633,7 @@ fun ChatScaffold(
                         // text is ignored when Retry wins, exactly what the
                         // scheme specifies).
                         SnackbarHost(
-                            hostState = snackbarHostState,
+                            hostState = chromeState.snackbarHostState,
                             modifier = Modifier.align(Alignment.BottomCenter)
                         )
                         StatusSlot(
@@ -1091,7 +642,8 @@ fun ChatScaffold(
                             sessionStatus = curSessionStatus,
                             isCompacting = chat.isCompacting,
                             currentActivityText = if (currentSessionIsRunning && currentActivity != null) {
-                                currentActivity.text
+                                @Suppress("UNNECESSARY_NOT_NULL_ASSERTION")
+                                currentActivity!!.text
                             } else {
                                 null
                             },
@@ -1192,7 +744,7 @@ fun ChatScaffold(
                     isAborting = chromeSessionId != null && chromeSessionId in sessionList.abortPendingSessionIds,
                     questionPending = pendingQuestion != null,
                     isSubagent = isSubagentSession,
-                    onAddImages = onAddImages,
+                    onAddImages = chromeState.onAddImages,
                     onAbort = { chatVM.abortSession(chromeSessionId) },
                 )
             }
@@ -1257,17 +809,17 @@ fun ChatScaffold(
         }
     } else {
         ChatDrawerHost(
-            drawerState = drawerState,
+            drawerState = chromeState.drawerState,
             sessions = recentSessionsForDrawer,
             recentWorkdirs = recentWorkdirs,
             sessionErrorsById = sessionList.sessionErrorsById,
             sessionVM = sessionVM,
-            closeDrawerAction = closeDrawerAction,
+            closeDrawerAction = chromeState.closeDrawerAction,
             onBackToHome = onBackToHome,
             onRefreshSessions = {
                 chatVM.core.effectBus.tryEmitEffect(ControllerEffect.LoadSessions)
             },
-            onShowWorkdirPicker = { pendingWorkdirPick = true },
+            onShowWorkdirPicker = { chromeState.pendingWorkdirPick = true },
                 // §P2-3 (rev-glm): guard against re-navigating to the current
                 // session (idempotent freshness-token renewal, but wasteful);
                 // mirrors the sidebar path's `if (sid != chromeSessionId)`.
@@ -1285,7 +837,7 @@ fun ChatScaffold(
     }
 
     // ── §B: 强制中止确认弹窗 ────────────────────────────────────────────────
-    if (showForceAbortConfirm) {
+    if (chromeState.showForceAbortConfirm) {
         AppConfirmDialog(
             title = stringResource(R.string.chat_force_abort_confirm_title),
             bodyContent = {
@@ -1294,34 +846,34 @@ fun ChatScaffold(
             confirmText = stringResource(R.string.chat_force_abort),
             onConfirm = {
                 chatVM.abortSessionRecursive(chromeSessionId)
-                showForceAbortConfirm = false
+                chromeState.showForceAbortConfirm = false
             },
             dismissText = stringResource(R.string.common_cancel),
-            onDismiss = { showForceAbortConfirm = false },
+            onDismiss = { chromeState.showForceAbortConfirm = false },
         )
     }
 
     // ── Phase 1B sheets / overflows / dialogs (new) ──────────────────────
     ChatOverlayHost(
-        showAgentPicker = showAgentPicker,
-        showModelPicker = showModelPicker,
-        showSessionPicker = showSessionPicker,
-        showTodoDialog = showTodoDialog,
-        showContextDialog = showContextDialog,
-        pendingWorkdirPick = pendingWorkdirPick,
-        errorDetail = errorDetail,
-        onDismissAgentPicker = { showAgentPicker = false },
-        onPickAgent = { name -> composerVM.selectAgent(name); showAgentPicker = false },
-        onDismissModelPicker = { showModelPicker = false },
+        showAgentPicker = chromeState.showAgentPicker,
+        showModelPicker = chromeState.showModelPicker,
+        showSessionPicker = chromeState.showSessionPicker,
+        showTodoDialog = chromeState.showTodoDialog,
+        showContextDialog = chromeState.showContextDialog,
+        pendingWorkdirPick = chromeState.pendingWorkdirPick,
+        errorDetail = chromeState.errorDetail,
+        onDismissAgentPicker = { chromeState.showAgentPicker = false },
+        onPickAgent = { name -> composerVM.selectAgent(name); chromeState.showAgentPicker = false },
+        onDismissModelPicker = { chromeState.showModelPicker = false },
         onSwitchModel = { providerId, modelId ->
             composerVM.switchSessionModel(providerId, modelId)
-            showModelPicker = false
+            chromeState.showModelPicker = false
         },
         onClearModel = {
             composerVM.clearSessionModel()
-            showModelPicker = false
+            chromeState.showModelPicker = false
         },
-        onDismissSessionPicker = { showSessionPicker = false },
+        onDismissSessionPicker = { chromeState.showSessionPicker = false },
         // §B3: the SessionPickerSheet selection is a session-OPENING entry
         // point — route it through navigateToChat (route-aware pipeline) so it
         // mints the freshness token + dispatches openForRoute, matching the
@@ -1330,24 +882,24 @@ fun ChatScaffold(
         // open a chat.
         onSelectSession = { sessionId ->
             orchestratorVM.navigateToChat(sessionId)
-            showSessionPicker = false
+            chromeState.showSessionPicker = false
         },
         onNewSession = {
             sessionVM.createSession()
-            showSessionPicker = false
+            chromeState.showSessionPicker = false
         },
-        onDismissTodo = { showTodoDialog = false },
-        onDismissContext = { showContextDialog = false },
+        onDismissTodo = { chromeState.showTodoDialog = false },
+        onDismissContext = { chromeState.showContextDialog = false },
         onCompactContext = {
-            showContextDialog = false
+            chromeState.showContextDialog = false
             chatVM.compactSession()
         },
-        onDismissWorkdirPick = { pendingWorkdirPick = false },
+        onDismissWorkdirPick = { chromeState.pendingWorkdirPick = false },
         onPickWorkdir = { workdir ->
-            pendingWorkdirPick = false
+            chromeState.pendingWorkdirPick = false
             sessionVM.createSessionInWorkdir(workdir)
         },
-        onDismissError = { errorDetail = null },
+        onDismissError = { chromeState.errorDetail = null },
         // Derived slice values
         agents = settings.agents.filter { it.isVisible },
         currentAgentName = effectiveAgent,

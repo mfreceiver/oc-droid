@@ -23,7 +23,7 @@ import javax.inject.Singleton
  * ~220 LOC extracted from AppCoreOrchestration.kt.
  */
 @Singleton
-internal class CommandOrchestrator @Inject constructor(
+class CommandOrchestrator @Inject constructor(
     private val store: SharedStateStore,
     private val sessionRepository: SessionRepository,
     private val interactionRepository: InteractionRepository,

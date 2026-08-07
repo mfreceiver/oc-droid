@@ -270,6 +270,41 @@ abstract class MainViewModelTestBase {
             ownershipGate = ownershipGate,
         )
         val fpProvider: () -> String = { hostProfileStore.currentProfile().id }
+        // §Wave2.2 (item 13): build the 5 orchestrators inline from the same
+        // singletons the production injector uses (mirrors the controller pattern
+        // at §R-19 P2-5 above). See archdebt-batch2-design §3.2.
+        val testServerCompatProfile = cn.vectory.ocdroid.data.repository.ServerCompatProfile()
+        val testTokenStreamCoordinator = cn.vectory.ocdroid.ui.controller.sse.TokenStreamCoordinator(
+            scope = appScope,
+            slices = store.slices,
+            streamProvider = { _, _ -> kotlinx.coroutines.flow.emptyFlow() },
+            triggerSinceFetch = { _, _ -> },
+            bundleCommitLock = repository,
+            currentBundleProvider = { repository.currentClientBundle() },
+        )
+        val sessionOpener = cn.vectory.ocdroid.ui.SessionOpener(
+            store, repository, appScope, sessionSwitcher,
+        )
+        val refreshOrchestrator = cn.vectory.ocdroid.ui.RefreshOrchestrator(
+            store, repository, settingsManager, effectBus, appScope,
+            fpProvider, sessionSwitcher, connectionCoordinator,
+            sessionSyncCoordinator, foregroundCatchUpController, hostProfileStore,
+            testServerCompatProfile, testTokenStreamCoordinator,
+        )
+        val sendOrchestrator = cn.vectory.ocdroid.ui.SendOrchestrator(
+            store, repository, settingsManager, effectBus, appScope,
+            fpProvider, sessionSwitcher, connectionCoordinator,
+        )
+        val draftSessionOrchestrator = cn.vectory.ocdroid.ui.DraftSessionOrchestrator(
+            store, repository, settingsManager, effectBus, appScope,
+            fpProvider, composerController, sessionSwitcher,
+            sendOrchestrator, refreshOrchestrator,
+        )
+        val commandOrchestrator = cn.vectory.ocdroid.ui.CommandOrchestrator(
+            store, repository, repository, settingsManager, effectBus, appScope,
+            fpProvider, composerController,
+            draftSessionOrchestrator, sessionOpener,
+        )
         val core = AppCore(
             store,
             repository,
@@ -277,7 +312,7 @@ abstract class MainViewModelTestBase {
             hostProfileStore,
             trafficTracker,
             appLifecycleMonitor,
-            cn.vectory.ocdroid.data.repository.ServerCompatProfile(),
+            testServerCompatProfile,
             effectBus,
             appContext,
             foregroundCatchUpController,
@@ -286,15 +321,7 @@ abstract class MainViewModelTestBase {
             hostProfileController,
             sessionSyncCoordinator,
             connectionCoordinator,
-            // §Stage-D2: token-stream coordinator (not exercised by these tests).
-            cn.vectory.ocdroid.ui.controller.sse.TokenStreamCoordinator(
-                scope = appScope,
-                slices = store.slices,
-                streamProvider = { _, _ -> kotlinx.coroutines.flow.emptyFlow() },
-                triggerSinceFetch = { _, _ -> },
-                bundleCommitLock = repository,
-                currentBundleProvider = { repository.currentClientBundle() },
-            ),
+            testTokenStreamCoordinator,
             unreadSoakController,
             // §P0-E(b)(c): durable-error GET drain coordinator.
             errorRecoveryCoordinator,
@@ -313,6 +340,12 @@ abstract class MainViewModelTestBase {
             mockk<cn.vectory.ocdroid.service.streaming.SlimFanOutRetryScheduler>(relaxed = true).also {
                 slimFanOutRetryScheduler = it
             },
+            // §Wave2.2 (item 13): 5 orchestrators (Hilt-provided in production).
+            sessionOpener,
+            refreshOrchestrator,
+            sendOrchestrator,
+            draftSessionOrchestrator,
+            commandOrchestrator,
         )
         // §R-17 batch3e → §R18 Phase 4: side-channel Error/Success UiEvents
         // into a per-core ring buffer so tests can read the most-recent event
