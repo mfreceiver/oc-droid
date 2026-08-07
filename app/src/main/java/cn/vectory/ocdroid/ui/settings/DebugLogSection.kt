@@ -14,11 +14,14 @@ package cn.vectory.ocdroid.ui.settings
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -29,6 +32,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Pause
@@ -59,6 +63,7 @@ import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.ui.theme.AppSectionHeader
 import cn.vectory.ocdroid.ui.theme.BundledMonoFamily
 import cn.vectory.ocdroid.ui.theme.Dimens
+import cn.vectory.ocdroid.ui.theme.SemanticColors
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import cn.vectory.ocdroid.util.DebugLog
@@ -237,10 +242,15 @@ internal fun DebugLogSection(hideHeader: Boolean = false) {
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            // ── Action buttons: 复制 / 暂停 / 清除 ──
+            // ── Action buttons: 复制 / 暂停 / 清除 (icon-only) ──
             // 复制 serializes the currently DISPLAYED + FILTERED list, so when
             // paused+filtered the clipboard matches exactly what the user sees.
+            // 复制按钮点击后变绿+对勾图标，标识成功执行（copied 由 LaunchedEffect 1.5s 后复位）。
             val sdf = remember { SimpleDateFormat("HH:mm:ss.SSS", Locale.US) }
+            val copyColor by animateColorAsState(
+                targetValue = if (copied) SemanticColors.stateSuccessFg() else MaterialTheme.colorScheme.onSurfaceVariant,
+                label = "copyColor"
+            )
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -256,9 +266,12 @@ internal fun DebugLogSection(hideHeader: Boolean = false) {
                     },
                     modifier = Modifier.weight(1f)
                 ) {
-                    Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(if (copied) stringResource(R.string.debug_log_copied) else stringResource(R.string.debug_log_copy))
+                    Icon(
+                        if (copied) Icons.Default.Check else Icons.Default.ContentCopy,
+                        contentDescription = if (copied) stringResource(R.string.debug_log_copied) else stringResource(R.string.debug_log_copy),
+                        tint = copyColor,
+                        modifier = Modifier.size(Dimens.spacing5)
+                    )
                 }
 
                 OutlinedButton(
@@ -274,20 +287,20 @@ internal fun DebugLogSection(hideHeader: Boolean = false) {
                 ) {
                     Icon(
                         if (paused) Icons.Default.PlayArrow else Icons.Default.Pause,
-                        contentDescription = null,
-                        modifier = Modifier.size(16.dp)
+                        contentDescription = if (paused) stringResource(R.string.debug_log_resume) else stringResource(R.string.debug_log_pause),
+                        modifier = Modifier.size(Dimens.spacing5)
                     )
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(if (paused) stringResource(R.string.debug_log_resume) else stringResource(R.string.debug_log_pause))
                 }
 
                 OutlinedButton(
                     onClick = { DebugLog.clear() },
                     modifier = Modifier.weight(1f)
                 ) {
-                    Icon(Icons.Default.Delete, contentDescription = null, modifier = Modifier.size(16.dp))
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text(stringResource(R.string.debug_log_clear))
+                    Icon(
+                        Icons.Default.Delete,
+                        contentDescription = stringResource(R.string.debug_log_clear),
+                        modifier = Modifier.size(Dimens.spacing5)
+                    )
                 }
             }
 
