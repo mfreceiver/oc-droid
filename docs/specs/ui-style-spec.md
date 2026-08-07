@@ -59,6 +59,8 @@ Q2: 是表单 / 阻塞决策 / 破坏性确认?        ── yes ──▶ Tier
 | Host delete confirm | C destructive | `AppConfirmDialog`（已使用，字符串 body） |
 | Settings model-management dialog | **C form** | `AppFormDialog`（已使用；title 钉顶 + content 单独滚动 + Done 按钮钉底） |
 | Host profile editor dialog (mTLS / Advanced) | **C form** | `AppFormDialog`（已使用；title 钉顶 + content 单独滚动 + Test/Delete/Cancel/Save 按钮行钉底） |
+| Chat server-management dialog | **C form** | `AppFormDialog`（已使用；host profile 卡片 + Settings/Refresh action icons，scrim/back dismiss；原裸 `AlertDialog` 已迁移，散落 `dp`/`RectangleShape` 已清） |
+| Chat error-detail dialog | **C form** | `AppFormDialog`（已使用；title 钉顶 + `SelectionContainer` 可选/滚动错误正文 + Done 按钮钉底；原裸 `AlertDialog` 已迁移） |
 | 任何 top-bar overflow `DropdownMenu` | A | ≤6 项的单选 / 动作 |
 
 ---
@@ -97,6 +99,21 @@ Dimens.iconStd = 24dp   IconButton 内容
 Dimens.iconLg  = 28dp
 Dimens.iconXl  = 32dp
 ```
+
+### 2.2 单选选中态约定（收敛方言）
+
+单选 picker 的选中信号**必须**用
+[`PickerTrailingCheck`](../../app/src/main/java/cn/vectory/ocdroid/ui/theme/PickerTrailingCheck.kt)`(selected = ...)`：
+选中 = `Icons.Filled.Check` + `colorScheme.primary` + `Dimens.iconSm`(18dp)；
+未选中 = 同尺寸 `Spacer`（**恒渲染**，防行尾宽度跳动）。**无 per-item 选中底色**。
+
+- **headline primary 染色是可选的附加强调**，不是必选信号。`PickerSheets`（Agent/Model/Session）
+  同时用 trailing Check + primary headline；`WorkdirControl` switcher 用 trailing Check + 默认 headline。
+- **登记的例外**：`SessionPickerSheet` 刻意省略 trailing Check、仅用 headline emphasis 标记当前会话
+  （见其行内注释）——历史遗留，grandfathered；**新增**单选 picker 不得效仿，必须用 `PickerTrailingCheck`。
+
+> 本约定收敛了历史上并存的三种选中态方言（primary headline + Check / 仅 headline / 未染色 Check）；
+> 2026-08-07 评审修复已将 `WorkdirControl` switcher 统一到 `PickerTrailingCheck`。
 
 ---
 

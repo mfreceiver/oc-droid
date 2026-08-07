@@ -76,13 +76,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Edit
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -103,6 +100,7 @@ import androidx.compose.ui.unit.dp
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.Part
+import cn.vectory.ocdroid.ui.theme.AppConfirmDialog
 import cn.vectory.ocdroid.ui.theme.MenuItem
 
 /**
@@ -389,43 +387,30 @@ internal fun MessageCard(
         // button's enabled flag is the visible UX signal; the state
         // machine is the load-bearing guard.
         val confirmButtonEnabled = confirmState == ConfirmState.ConfirmOpen
-        AlertDialog(
-            onDismissRequest = {
+        AppConfirmDialog(
+            title = title,
+            body = body,
+            confirmText = confirmLabel,
+            confirmEnabled = confirmButtonEnabled,
+            onConfirm = {
+                val result = confirmOnConfirmTap(confirmState)
+                confirmState = result.nextState
+                if (result.firesCallback) {
+                    // SOLE fire path. The callback MUST
+                    // route to chatVM.editFromMessage — the
+                    // Phase 0 RevertConversation use case
+                    // intercepts streaming/busy and
+                    // fail-closes the cutoff; the UI does
+                    // not re-implement any of that.
+                    onEditAndRerun(message.id)
+                }
+            },
+            dismissText = cancelLabel,
+            onDismiss = {
                 confirmState = confirmOnCancel(confirmState)
             },
-            title = { Text(title) },
-            text = { Text(body) },
-            confirmButton = {
-                TextButton(
-                    enabled = confirmButtonEnabled,
-                    onClick = {
-                        val result = confirmOnConfirmTap(confirmState)
-                        confirmState = result.nextState
-                        if (result.firesCallback) {
-                            // SOLE fire path. The callback MUST
-                            // route to chatVM.editFromMessage — the
-                            // Phase 0 RevertConversation use case
-                            // intercepts streaming/busy and
-                            // fail-closes the cutoff; the UI does
-                            // not re-implement any of that.
-                            onEditAndRerun(message.id)
-                        }
-                    },
-                ) {
-                    Text(
-                        text = confirmLabel,
-                        color = MaterialTheme.colorScheme.error,
-                    )
-                }
-            },
-            dismissButton = {
-                TextButton(
-                    onClick = {
-                        confirmState = confirmOnCancel(confirmState)
-                    },
-                ) {
-                    Text(cancelLabel)
-                }
+            onDismissRequest = {
+                confirmState = confirmOnCancel(confirmState)
             },
         )
     }

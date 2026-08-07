@@ -21,7 +21,7 @@ import javax.inject.Singleton
  * Owns [dispatchSendMessage] (existing-session send), [dispatchCapturedSend]
  * (materialize→send path), and their private helpers.
  *
- * Depends on: core-five + fp + sessionSwitcher + connectionCoordinator(diagLayer).
+ * Depends on: core-five + fp + sessionSwitcher + connectionCoordinator.
  *
  * NOTE: The draft-vs-existing routing lives in AppCore.sendMessage() (thin
  * router) to avoid a circular dep (DraftSessionOrchestrator depends on us).
@@ -63,7 +63,7 @@ internal class SendOrchestrator @Inject constructor(
         if (cn.vectory.ocdroid.util.DebugLog.verboseDiagEnabled) {
             DebugLog.i(
                 "LayerDiag",
-                "dispatchSendMessage sid=$sessionId layer=${connectionCoordinator.diagLayer} " +
+                "dispatchSendMessage sid=$sessionId " +
                     "status=${store.sessionListFlow.value.sessionStatuses[sessionId]?.type} " +
                     "sending=${store.composerFlow.value.sendingSessionIds}",
             )

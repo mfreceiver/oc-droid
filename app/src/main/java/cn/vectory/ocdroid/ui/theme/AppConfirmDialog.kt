@@ -10,9 +10,9 @@ import androidx.compose.runtime.Composable
 // ─────────────────────────────────────────────────────────────────────────────
 // WT0 共享原语：确认/破坏性对话框（`AppConfirmDialog`）。
 //
-// 项目内有 ~6 处手写的破坏性 `AlertDialog`：
-//  - chat stop-confirm（`Composer.kt:342`）
-//  - message revert confirm（`MessageCard.kt:368`）
+// 项目内原有 ~6 处手写的破坏性 `AlertDialog`，其中 4 处已迁移至本组件：
+//  - ✅ chat stop-confirm（`Composer.kt` → `AppConfirmDialog`）
+//  - ✅ message revert confirm（`MessageCard.kt` → `AppConfirmDialog`）
 //  - archive confirm（`SessionsScreen.kt:358`）
 //  - disconnect-workdir（`FilesScreen.kt:416`）
 //  - clear-data（`SettingsSections.kt:300`）
@@ -91,6 +91,9 @@ import androidx.compose.runtime.Composable
  * @param onDismiss dismiss 按钮回调。
  * @param destructive true（默认）→ confirm 按钮染 `colorScheme.error`；false →
  *   默认 TextButton 色（用于非破坏性确认）。
+ * @param confirmEnabled true（默认）→ confirm 按钮可点击；false → confirm 按钮
+ *   灰色禁用，适用于回调已触发后防止二次提交的场景（如
+ *   [MessageCard] 的 destructive gate 状态机）。
  * @param onDismissRequest scrim / 返回键关闭时的回调，默认与 [onDismiss] 同。
  *   若 confirm 触发后需要不同清理逻辑，调用方可以独立提供。
  */
@@ -103,6 +106,7 @@ fun AppConfirmDialog(
     dismissText: String,
     onDismiss: () -> Unit,
     destructive: Boolean = true,
+    confirmEnabled: Boolean = true,
     onDismissRequest: () -> Unit = onDismiss,
 ) {
     AlertDialog(
@@ -116,7 +120,7 @@ fun AppConfirmDialog(
         // explicit Spacer + Dimens tokens), so no verticalArrangement here.
         text = bodyContent?.let { { Column { it() } } },
         confirmButton = {
-            TextButton(onClick = onConfirm) {
+            TextButton(onClick = onConfirm, enabled = confirmEnabled) {
                 Text(
                     text = confirmText,
                     color = if (destructive) {
@@ -150,6 +154,7 @@ fun AppConfirmDialog(
  * @param dismissText dismiss 按钮文本。
  * @param onDismiss dismiss 按钮回调。
  * @param destructive true（默认）→ confirm 按钮染 `colorScheme.error`。
+ * @param confirmEnabled true（默认）→ confirm 按钮可点击；false → 灰色禁用。
  * @param onDismissRequest scrim / 返回键关闭时的回调，默认与 [onDismiss] 同。
  */
 @Composable
@@ -161,6 +166,7 @@ fun AppConfirmDialog(
     dismissText: String,
     onDismiss: () -> Unit,
     destructive: Boolean = true,
+    confirmEnabled: Boolean = true,
     onDismissRequest: () -> Unit = onDismiss,
 ) = AppConfirmDialog(
     title = title,
@@ -170,5 +176,6 @@ fun AppConfirmDialog(
     dismissText = dismissText,
     onDismiss = onDismiss,
     destructive = destructive,
+    confirmEnabled = confirmEnabled,
     onDismissRequest = onDismissRequest,
 )

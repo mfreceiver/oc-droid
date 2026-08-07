@@ -490,6 +490,7 @@
     <string name="error_edit_message_failed">编辑消息失败：%1$s</string>
     <string name="error_abort_session_failed">中止会话失败：%1$s</string>
     <string name="error_abort_pending_stuck">停止后 Agent 仍在运行。请稍后重试。</string>
+    <string name="error_abort_recursive_partial">部分子会话中止失败，可能仍在运行。</string>
     <string name="success_refreshed">已刷新</string>
     <string name="info_refresh_in_progress">正在刷新，请稍候重试。</string>
     <string name="error_session_sse_named">%1$s：%2$s</string>

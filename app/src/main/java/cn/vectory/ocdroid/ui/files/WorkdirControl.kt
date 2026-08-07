@@ -11,7 +11,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.FolderOff
 import androidx.compose.material.icons.filled.FolderOpen
@@ -38,6 +37,7 @@ import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.ui.chat.workdirTone
 import cn.vectory.ocdroid.ui.theme.AppBottomSheet
 import cn.vectory.ocdroid.ui.theme.Dimens
+import cn.vectory.ocdroid.ui.theme.PickerTrailingCheck
 import cn.vectory.ocdroid.util.WorkdirPaths
 
 /**
@@ -232,15 +232,7 @@ private fun WorkdirSwitcherBody(
                             modifier = Modifier.size(Dimens.iconStd),
                         )
                     },
-                    trailingContent = {
-                        if (isCurrent) {
-                            Icon(
-                                Icons.Default.Check,
-                                contentDescription = null,
-                                modifier = Modifier.size(Dimens.iconSm),
-                            )
-                        }
-                    },
+                    trailingContent = { PickerTrailingCheck(selected = isCurrent) },
                     modifier = Modifier.clickable { onSelect(wd) },
                 )
             }

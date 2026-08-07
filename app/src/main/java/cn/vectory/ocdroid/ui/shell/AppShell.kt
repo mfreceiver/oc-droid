@@ -82,9 +82,9 @@ fun AppShell(orchestratorVM: OrchestratorViewModel) {
     // get a stateful instance scoped to their entry (browse state isolated per
     // destination; viewModelScope cleared on pop, no Activity-level leak);
     // ChatFilePreview/Sessions get an entry-scoped instance for .repository
-    // only (no browse state shared with the Files tab). This closes the
-    // FIXME(P4-features) scope leak: chat preview no longer shares the Files
-    // browse VM. See the per-block hiltViewModel() calls below.
+    // only (no browse state shared with the Files tab). Chat preview no
+    // longer shares the Files browse VM. See the per-block hiltViewModel()
+    // calls below.
 
     val navController = rememberNavController()
     val entry by navController.currentBackStackEntryAsState()
