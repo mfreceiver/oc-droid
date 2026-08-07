@@ -35,7 +35,6 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Stop
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -45,7 +44,6 @@ import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -63,6 +61,7 @@ import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.ui.ChatViewModel
 import cn.vectory.ocdroid.ui.ComposerViewModel
 import cn.vectory.ocdroid.ui.OrchestratorViewModel
+import cn.vectory.ocdroid.ui.theme.AppConfirmDialog
 import cn.vectory.ocdroid.ui.theme.Dimens
 import cn.vectory.ocdroid.util.workdirBasename
 
@@ -343,26 +342,17 @@ fun Composer(
     // invoked from ChatScaffold.kt.
 
     if (showStopConfirm) {
-        AlertDialog(
+        AppConfirmDialog(
+            title = stringResource(R.string.chat_stop_confirm_title),
+            body = stringResource(R.string.chat_stop_confirm_message),
+            confirmText = stringResource(R.string.chat_stop),
+            onConfirm = {
+                onAbort()
+                showStopConfirm = false
+            },
+            dismissText = stringResource(R.string.common_cancel),
+            onDismiss = { showStopConfirm = false },
             onDismissRequest = { showStopConfirm = false },
-            title = { Text(stringResource(R.string.chat_stop_confirm_title)) },
-            text = { Text(stringResource(R.string.chat_stop_confirm_message)) },
-            confirmButton = {
-                TextButton(onClick = {
-                    onAbort()
-                    showStopConfirm = false
-                }) {
-                    Text(
-                        stringResource(R.string.chat_stop),
-                        color = MaterialTheme.colorScheme.error,
-                    )
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showStopConfirm = false }) {
-                    Text(stringResource(R.string.common_cancel))
-                }
-            },
         )
     }
 }

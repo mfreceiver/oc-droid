@@ -189,6 +189,7 @@ private val TEST_UI_EVENT_STRING_TABLE: Map<Int, String> = mapOf(
     R.string.info_compact_timeout_retry to "Compaction timed out with no response; please retry.",
     R.string.error_edit_message_failed to "Failed to edit message: %1\$s",
     R.string.error_abort_session_failed to "Failed to abort session: %1\$s",
+    R.string.error_abort_recursive_partial to "Some sub-sessions could not be stopped and may still be running.",
     R.string.success_refreshed to "Refreshed",
     R.string.error_session_sse_named to "%1\$s: %2\$s",
     R.string.error_session_sse_unnamed to "%1\$s",

@@ -206,16 +206,16 @@ fun markdownTypography(
  * 从 `base` 复制，自动继承 `base` 中已注入的 family（来自 [appTypography]）。
  *
  * B6 决策 4 同步：bodyLarge 与主 [appTypography] 保持 ~0.79 的 compact:main
- * 比例（同 bodyMedium 11/14≈0.79）——主 bodyLarge 16 → compact 13（16×0.79
+ * 比例（同 bodyMedium 12/16=0.75）——主 bodyLarge 16 → compact 13（16×0.79
  * ≈12.6，取 13 保 ≥12sp 可读下限且维持 bodyLarge>bodyMedium 层级）。
  */
 fun compactTypography(base: Typography): Typography = base.copy(
     bodyLarge = base.bodyLarge.copy(fontSize = 13.sp, lineHeight = 20.sp),
-    bodyMedium = base.bodyMedium.copy(fontSize = 11.sp, lineHeight = 16.sp),
-    bodySmall = base.bodySmall.copy(fontSize = 10.sp, lineHeight = 14.sp),
+    bodyMedium = base.bodyMedium.copy(fontSize = 12.sp, lineHeight = 16.sp),
+    bodySmall = base.bodySmall.copy(fontSize = 12.sp, lineHeight = 14.sp),
     labelLarge = base.labelLarge.copy(fontSize = 11.sp, lineHeight = 14.sp),
-    labelMedium = base.labelMedium.copy(fontSize = 10.sp, lineHeight = 12.sp),
-    labelSmall = base.labelSmall.copy(fontSize = 9.sp, lineHeight = 12.sp),
+    labelMedium = base.labelMedium.copy(fontSize = 11.sp, lineHeight = 12.sp),
+    labelSmall = base.labelSmall.copy(fontSize = 11.sp, lineHeight = 12.sp),
     titleLarge = base.titleLarge.copy(fontSize = 16.sp, lineHeight = 22.sp),
     titleMedium = base.titleMedium.copy(fontSize = 14.sp, lineHeight = 20.sp),
     titleSmall = base.titleSmall.copy(fontSize = 12.sp, lineHeight = 18.sp)

@@ -29,7 +29,6 @@ import cn.vectory.ocdroid.ui.util.HttpImageHolder
 import cn.vectory.ocdroid.util.SettingsManager
 import cn.vectory.ocdroid.util.TrafficTracker
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -335,7 +334,7 @@ class HostProfileController(
      * via [hostPortFromUrl]) so the TOFU pin lookup resolves for previously-
      * trusted endpoints — replaces the legacy `allowInsecureConnections` flag.
      */
-    fun configureServer(url: String, username: String? = null, password: String? = null): Job? {
+    fun configureServer(url: String, username: String? = null, password: String? = null) {
         // L3 (barrier + readiness): reconfigure barrier BEFORE repository configure.
         // nudgeCurrentSession() is NOT called here — identity is still null after
         // beginReconfigure. The real nudge happens when identityStore.bindIfCurrent
@@ -344,7 +343,6 @@ class HostProfileController(
             beginReconfigureBarrier(identityStore!!, skeletonReloadCoordinator!!)
         }
         configureServerRaw(url, username, password)
-        return null
     }
 
     /**

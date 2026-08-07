@@ -12,17 +12,10 @@ import androidx.compose.ui.graphics.Color
 // 语义固定色（agent/diff/status，不跟随壁纸）见 [SemanticColors]。
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Stop button red. Material's default error red read as too dark AND too pure at
- * once. #E5484D is lighter while sitting a notch off pure red — close to iOS's
- * system red.
- */
-val StopRed = Color(0xFFE5484D)
-
 // ========== Dark Theme (v2 oc-2 dark) ==========
 // Primary family — v2 accent (`#3b5cf6`). Container slots remain M3-derived
 // (v2 has no direct equivalent; kept consistent with primary hue).
-val DarkPrimary = Color(0xFF3B5CF6)
+val DarkPrimary = Color(0xFF8FA3F8)
 val DarkOnPrimary = Color(0xFFFFFFFF)
 val DarkPrimaryContainer = Color(0xFF0A47A1)
 val DarkOnPrimaryContainer = Color(0xFFD3E4FF)

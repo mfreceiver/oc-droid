@@ -2,12 +2,12 @@ package cn.vectory.ocdroid.ui.session
 
 import cn.vectory.ocdroid.data.model.Session
 
-data class SessionNode(
+internal data class SessionNode(
     val session: Session,
     val children: List<SessionNode>
 )
 
-fun buildSessionTree(sessions: List<Session>): List<SessionNode> {
+internal fun buildSessionTree(sessions: List<Session>): List<SessionNode> {
     val sessionIds = sessions.map { it.id }.toSet()
     val childrenMap = sessions.groupBy { it.parentId }
     fun buildNodes(parentId: String?): List<SessionNode> =
@@ -22,7 +22,7 @@ fun buildSessionTree(sessions: List<Session>): List<SessionNode> {
     return (roots + orphans).sortedByDescending { it.session.time?.updated ?: 0L }
 }
 
-fun flattenVisibleTree(
+internal fun flattenVisibleTree(
     nodes: List<SessionNode>,
     expandedIds: Set<String>,
     depth: Int = 0

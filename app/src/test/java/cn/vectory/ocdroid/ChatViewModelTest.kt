@@ -58,6 +58,7 @@ import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
@@ -1942,6 +1943,57 @@ class ChatViewModelTest : MainViewModelTestBase() {
 
         // Patch/insert are pure state updates — no reload issued for either case.
         coVerify(exactly = 0) { repository.getMessagesPaged(any(), any(), any()) }
+    }
+
+    // ── §recursive-abort: partial-failure outcome ──────────────────────────
+
+    @Test
+    fun `abortSessionRecursive emits partial error when child abort fails`() = runTest {
+        // Root + child session with parentId tree
+        val child = Session(id = "child-1", directory = "/proj", parentId = "root")
+        val root = Session(id = "root", directory = "/proj")
+        coEvery { repository.abortSession("root") } returns Result.success(Unit)
+        // Child abort will throw — should trigger Partial outcome
+        coEvery { repository.abortSession("child-1") } throws IOException("child abort failed")
+        // getChildren cold-start fallback must return empty so we don't fetch more
+        coEvery { repository.getChildren(any()) } returns Result.success(emptyList())
+
+        val core = createCore()
+        val chatVM = ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
+        core.writeSessionList { it.copy(sessions = listOf(root, child)) }
+
+        chatVM.abortSessionRecursive("root")
+        advanceUntilIdle()
+
+        // Partial error must have been emitted
+        val lastErr = core.lastErrorEvent
+        assertNotNull("partial abort must emit an error event", lastErr)
+        assertEquals(R.string.error_abort_recursive_partial, lastErr!!.resId)
+    }
+
+    @Test
+    fun `abortSessionRecursive does NOT emit partial error when all children succeed`() = runTest {
+        val child = Session(id = "child-1", directory = "/proj", parentId = "root")
+        val root = Session(id = "root", directory = "/proj")
+        // All aborts succeed
+        coEvery { repository.abortSession(any()) } returns Result.success(Unit)
+        coEvery { repository.getChildren(any()) } returns Result.success(emptyList())
+
+        val core = createCore()
+        val chatVM = ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
+        core.writeSessionList { it.copy(sessions = listOf(root, child)) }
+
+        chatVM.abortSessionRecursive("root")
+        advanceUntilIdle()
+
+        // No error event should be emitted for this case
+        val lastErr = core.lastErrorEvent
+        // Either null or not the partial-abort error (could be something else emitted
+        // by a concurrent path — assert it's NOT our partial-abort error)
+        if (lastErr != null) {
+            assertNotEquals("must not emit recursive partial error on success",
+                R.string.error_abort_recursive_partial, lastErr.resId)
+        }
     }
 
 }

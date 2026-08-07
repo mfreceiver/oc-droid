@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -38,6 +37,8 @@ import cn.vectory.ocdroid.ui.ChatViewModel
 import cn.vectory.ocdroid.ui.SessionViewModel
 import cn.vectory.ocdroid.data.model.SlimSessionLastError
 import cn.vectory.ocdroid.ui.theme.AppBottomSheet
+import cn.vectory.ocdroid.ui.theme.AppFormDialog
+import cn.vectory.ocdroid.ui.theme.Dimens
 import cn.vectory.ocdroid.util.workdirBasename
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -215,28 +216,27 @@ fun ChatOverlayHost(
         }
     }
 
-    // ── Error detail dialog (AlertDialog) ─────────────────────────────
+    // ── Error detail dialog (AppFormDialog) ──────────────────────────
     errorDetail?.let { detail ->
-        AlertDialog(
+        AppFormDialog(
             onDismissRequest = { onDismissError() },
-            title = { Text(stringResource(R.string.chat_error_details)) },
-            text = {
-                SelectionContainer {
-                    Column(
-                        modifier = Modifier
-                            .heightIn(max = 400.dp)
-                            .verticalScroll(rememberScrollState())
-                    ) {
-                        Text(text = detail, style = MaterialTheme.typography.bodySmall)
-                    }
-                }
-            },
+            title = stringResource(R.string.chat_error_details),
             confirmButton = {
                 TextButton(onClick = { onDismissError() }) {
                     Text(stringResource(R.string.common_done))
                 }
+            },
+        ) {
+            SelectionContainer {
+                Column(
+                    modifier = Modifier
+                        .heightIn(max = 400.dp)  // Dimens has no content-height token; keep dp
+                        .verticalScroll(rememberScrollState())
+                ) {
+                    Text(text = detail, style = MaterialTheme.typography.bodySmall)
+                }
             }
-        )
+        }
     }
 
 }

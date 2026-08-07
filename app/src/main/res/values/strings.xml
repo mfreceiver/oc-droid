@@ -530,6 +530,7 @@
     <string name="chat_aborting">Stopping…</string>
     <string name="error_abort_pending_stuck">Agent is still running after stop. You can retry in a moment.</string>
     <string name="error_abort_session_failed">Failed to abort session: %1$s</string>
+    <string name="error_abort_recursive_partial">Some sub-sessions could not be stopped and may still be running.</string>
     <string name="success_refreshed">Refreshed</string>
     <string name="info_refresh_in_progress">A refresh is already in progress; please try again shortly.</string>
     <string name="error_session_sse_named">%1$s: %2$s</string>

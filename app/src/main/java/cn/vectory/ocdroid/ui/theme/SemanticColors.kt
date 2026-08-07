@@ -58,8 +58,6 @@ object SemanticColors {
     )
 
     // ── git diff / 文件状态（通用语义，固定单值）──────────────────────────────
-    val addedLine: Color = Color(0xFFE8F5E9)
-    val deletedLine: Color = Color(0xFFFFEBEE)
     val modifiedFile: Color = Color(0xFFFFA726)
     val addedFile: Color = Color(0xFF66BB6A)
     val deletedFile: Color = Color(0xFFEF5350)

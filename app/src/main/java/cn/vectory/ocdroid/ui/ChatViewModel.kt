@@ -581,7 +581,10 @@ class ChatViewModel @Inject constructor(
         }
 
         core.appScope.launch {
-            abortSessionRecursiveInternal(sid, token, bundle, maxNodes)
+            val outcome = abortSessionRecursiveInternal(sid, token, bundle, maxNodes)
+            if (outcome is RecursiveAbortOutcome.Partial) {
+                core.effectBus.tryEmitUiEvent(UiEvent.Error(R.string.error_abort_recursive_partial))
+            }
         }
         // 单个 operation-level watchdog：超时覆盖 fetch(10s/node) + abort(15s/node) 预算。
         // 递归完成时已主动清锁，watchdog 仅作兜底。
@@ -591,27 +594,38 @@ class ChatViewModel @Inject constructor(
         }
     }
 
+    /** §recursive-abort: outcome of a recursive abort operation. */
+    private sealed interface RecursiveAbortOutcome {
+        data object Complete : RecursiveAbortOutcome
+        data class Partial(val failedCount: Int) : RecursiveAbortOutcome
+    }
+
+    /** §recursive-abort: result of [fetchSubtreeRecursive]. */
+    private data class SubtreeFetch(val ids: List<String>, val hadErrors: Boolean)
+
     private suspend fun abortSessionRecursiveInternal(
         rootId: String,
         token: Long,
         bundle: BundleStamp,
         maxNodes: Int,
-    ) {
+    ): RecursiveAbortOutcome {
         // 1. 本地枚举子树
         val sl = core.sessionListFlow.value
         var subtreeIds = subtreeIds(rootId, sl.sessions, sl.directorySessions, sl.childSessions).toList()
 
         // 2. 冷启动 fallback：如果本地子树只有 root 自己，尝试 getChildren 补全。
         //    fetchSubtreeRecursive 使用独立的 visited 集合，不与主循环共享。
+        var hadFetchErrors = false
         if (subtreeIds.size <= 1) {
             val fetched = fetchSubtreeRecursive(rootId, maxNodes)
-            subtreeIds = (subtreeIds + fetched).distinct()
+            subtreeIds = (subtreeIds + fetched.ids).distinct()
+            hadFetchErrors = fetched.hadErrors
         }
 
         // 3. 确认连接身份（suspend 前校验）
         if (captureAbortBundle() != bundle) {
             clearAbortPendingIfToken(rootId, token)
-            return
+            return RecursiveAbortOutcome.Complete
         }
 
         // 4. post-order：treeIds 是前序 DFS（父先于子），reversed 保证子孙先于祖先
@@ -619,6 +633,7 @@ class ChatViewModel @Inject constructor(
         val allOrdered = subtreeIds.reversed().filter { it != rootId } + listOf(rootId)
         val ordered = if (allOrdered.size > maxNodes) allOrdered.take(maxNodes - 1) + listOf(rootId) else allOrdered
 
+        var perNodeFailures = 0
         for (id in ordered) {
             // 每次迭代前验证 token 仍属于当前递归操作——锁被清除/替换后立即停止，
             // 防止旧协程继续 abort 新启动的运行。
@@ -632,11 +647,13 @@ class ChatViewModel @Inject constructor(
                 }
             } catch (e: TimeoutCancellationException) {
                 DebugLog.w("Abort", "abortSessionRecursive: timeout for $id")
+                perNodeFailures++
             } catch (e: CancellationException) {
                 throw e  // 不吞 scope 取消
             } catch (e: Exception) {
                 // best-effort：子失败不阻断后续
                 DebugLog.w("Abort", "abortSessionRecursive: failed for $id: ${e.message}")
+                perNodeFailures++
             }
 
             // suspend 后校验连接身份
@@ -648,6 +665,15 @@ class ChatViewModel @Inject constructor(
 
         // 5. 递归完成后主动清锁（不依赖 watchdog）
         clearAbortPendingIfToken(rootId, token)
+
+        // §recursive-abort: report outcome — Complete if zero failures, else Partial
+        return if (perNodeFailures == 0 && !hadFetchErrors) {
+            RecursiveAbortOutcome.Complete
+        } else {
+            RecursiveAbortOutcome.Partial(
+                failedCount = perNodeFailures + if (hadFetchErrors) 1 else 0
+            )
+        }
     }
 
     /**
@@ -657,11 +683,12 @@ class ChatViewModel @Inject constructor(
     private suspend fun fetchSubtreeRecursive(
         rootId: String,
         maxNodes: Int,
-    ): List<String> {
+    ): SubtreeFetch {
         val result = mutableListOf<String>()
         val visited = HashSet<String>()  // 独立的环检测集合，不与主循环共享
         val queue = ArrayDeque<String>()
         queue.add(rootId)
+        var hadErrors = false
 
         while (queue.isNotEmpty() && result.size < maxNodes) {
             val current = queue.removeFirst()
@@ -677,14 +704,16 @@ class ChatViewModel @Inject constructor(
                 }
             } catch (e: TimeoutCancellationException) {
                 DebugLog.w("Abort", "fetchSubtreeRecursive: timeout for $current")
+                hadErrors = true
             } catch (e: CancellationException) {
                 throw e  // 不吞 scope 取消
             } catch (e: Exception) {
                 DebugLog.w("Abort", "fetchSubtreeRecursive: getChildren failed for $current: ${e.message}")
+                hadErrors = true
             }
         }
 
-        return result
+        return SubtreeFetch(ids = result, hadErrors = hadErrors)
     }
 
     /**

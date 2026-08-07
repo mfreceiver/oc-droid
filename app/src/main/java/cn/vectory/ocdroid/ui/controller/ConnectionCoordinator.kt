@@ -382,13 +382,6 @@ class ConnectionCoordinator(
         }
     }
 
-    /**
-     * L1 FGS commit 3: streaming lifecycle coordinator deleted.
-     * diagLayer is no longer available — the FGS layer diagnostic is
-     * permanently removed. Returns null.
-     */
-    val diagLayer: String? get() = null
-
     // ── State sync helpers (mirror orchestrator.writeConnection) ──
 
     /**
