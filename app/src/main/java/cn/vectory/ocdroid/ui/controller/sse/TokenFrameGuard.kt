@@ -157,6 +157,8 @@ internal class TokenFrameGuard(private val lock: Any) {
      * are still detected and stale-clear drops work correctly.
      */
     fun removeSid(sid: String) {
-        ownerByPartId.entries.removeIf { it.value.sid == sid }
+        synchronized(lock) {
+            ownerByPartId.entries.removeIf { it.value.sid == sid }
+        }
     }
 }
