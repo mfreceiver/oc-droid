@@ -388,22 +388,6 @@ class SettingsManagerTest {
     }
 
     @Test
-    fun `last nav page round trip and clamping`() {
-        settings.lastNavPage = 1
-        assertEquals(1, settings.lastNavPage)
-        // setter 钳制到 [0, 2]
-        settings.lastNavPage = 99
-        assertEquals(2, settings.lastNavPage)
-        settings.lastNavPage = -5
-        assertEquals(0, settings.lastNavPage)
-    }
-
-    @Test
-    fun `last nav page default is zero`() {
-        assertEquals(0, settings.lastNavPage)
-    }
-
-    @Test
     fun `lastRoute migrates persisted workspace to files and writes it back`() {
         rawEncryptedPrefs().edit().putString("last_route", "workspace").commit()
 
@@ -430,6 +414,49 @@ class SettingsManagerTest {
         rawEncryptedPrefs().edit()
             .putString("last_route", "unknown")
             .putInt("last_nav_page", 2)
+            .commit()
+
+        assertEquals("chat", settings.lastRoute)
+        assertEquals("chat", rawEncryptedPrefs().getString("last_route", null))
+    }
+
+    // ── last_nav_page → last_route one-shot migration (untested before Item 16) ──
+
+    @Test
+    fun `lastRoute migrates last_nav_page 0 to chat`() {
+        rawEncryptedPrefs().edit()
+            .putInt("last_nav_page", 0)
+            .commit()
+
+        assertEquals("chat", settings.lastRoute)
+        // The route is persisted after first-read migration.
+        assertEquals("chat", rawEncryptedPrefs().getString("last_route", null))
+    }
+
+    @Test
+    fun `lastRoute migrates last_nav_page 1 to sessions`() {
+        rawEncryptedPrefs().edit()
+            .putInt("last_nav_page", 1)
+            .commit()
+
+        assertEquals("sessions", settings.lastRoute)
+        assertEquals("sessions", rawEncryptedPrefs().getString("last_route", null))
+    }
+
+    @Test
+    fun `lastRoute migrates last_nav_page 2 to settings`() {
+        rawEncryptedPrefs().edit()
+            .putInt("last_nav_page", 2)
+            .commit()
+
+        assertEquals("settings", settings.lastRoute)
+        assertEquals("settings", rawEncryptedPrefs().getString("last_route", null))
+    }
+
+    @Test
+    fun `lastRoute migrates unknown last_nav_page to chat`() {
+        rawEncryptedPrefs().edit()
+            .putInt("last_nav_page", 99)
             .commit()
 
         assertEquals("chat", settings.lastRoute)
@@ -506,7 +533,7 @@ class SettingsManagerTest {
         // ── 安置"应擦除"的数据 ──
         settings.currentSessionId = "sess-wipe"
         settings.currentWorkdir = "/tmp/wipe"
-        settings.lastNavPage = 2
+        rawEncryptedPrefs().edit().putInt("last_nav_page", 2).commit()
         settings.themeMode = ThemeMode.DARK
         settings.fontLatin = "WipeFont"
         settings.markdownFontLatin = "WipeMdFont"

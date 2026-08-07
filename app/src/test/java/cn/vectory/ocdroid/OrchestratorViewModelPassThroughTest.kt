@@ -1,6 +1,3 @@
-@file:Suppress("DEPRECATION")
-// lastNavPage retained for the NavigationPrefs one-time migration; tests exercise the legacy path until the migration epic completes.
-
 package cn.vectory.ocdroid
 
 import cn.vectory.ocdroid.data.model.HealthResponse
@@ -34,7 +31,7 @@ import org.junit.Test
 /**
  * R18 Phase 5++ coverage: thin delegators + permission/question response
  * branches on [OrchestratorViewModel]. Coverage gap before this file:
- * 6/27 methods, 7/35 lines — setLastNavPage (every branch), respondPermission
+ * 6/27 methods, 7/35 lines — setLastRoute / requestNavigate, respondPermission
  * (success + failure), replyQuestion (success + failure + onError),
  * rejectQuestion (success + failure), showFileInFiles / clearFileToShow /
  * browseFilesInWorkdir / closeFileBrowser / clearDraftIfActive,
@@ -43,59 +40,6 @@ import org.junit.Test
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class OrchestratorViewModelPassThroughTest : MainViewModelTestBase() {
-
-    // ── Nav ────────────────────────────────────────────────────────────────
-
-    @Test
-    fun `setLastNavPage clamps below zero`() = runTest {
-        val core = createCore()
-        val vm = OrchestratorViewModel(core)
-        // Pre-set the nav slice to a non-zero value so the equality guard
-        // does not short-circuit when clamping -5 → 0.
-        core.store.mutateNav { it.copy(lastNavPage = 1) }
-
-        vm.setLastNavPage(-5)
-
-        assertEquals(0, core.navFlow.value.lastNavPage)
-        verify { settingsManager.lastNavPage = 0 }
-    }
-
-    @Test
-    fun `setLastNavPage clamps above two`() = runTest {
-        val core = createCore()
-        val vm = OrchestratorViewModel(core)
-        // §home-hub T7-C5: default lastNavPage=Sessions.legacyPage=1;
-        // 99 → 2 differs so the guard does not short-circuit.
-        vm.setLastNavPage(99)
-
-        assertEquals(2, core.navFlow.value.lastNavPage)
-        verify { settingsManager.lastNavPage = 2 }
-    }
-
-    @Test
-    fun `setLastNavPage in range writes through`() = runTest {
-        val core = createCore()
-        val vm = OrchestratorViewModel(core)
-        // §home-hub T7-C5: default lastNavPage is now Sessions.legacyPage=1,
-        // so use 2 (still in [0,2] range, differs from default) to exercise
-        // the write-through path.
-        vm.setLastNavPage(2)
-
-        assertEquals(2, core.navFlow.value.lastNavPage)
-        verify { settingsManager.lastNavPage = 2 }
-    }
-
-    @Test
-    fun `setLastNavPage same value is a no-op`() = runTest {
-        val core = createCore()
-        val vm = OrchestratorViewModel(core)
-        // §home-hub T7-C5: default lastNavPage=Sessions.legacyPage=1; setting
-        // 1 again must short-circuit without calling the setter.
-        vm.setLastNavPage(1)
-
-        // No setter call when value already matches.
-        verify(exactly = 0) { settingsManager.lastNavPage = any() }
-    }
 
     // ── CRITICAL-1: hub-back-trap contract ─────────────────────────────────
     // Proves the asymmetry that necessitates AppShell.backToHome()'s explicit

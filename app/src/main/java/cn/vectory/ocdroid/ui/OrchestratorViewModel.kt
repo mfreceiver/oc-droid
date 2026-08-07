@@ -18,7 +18,7 @@ import javax.inject.Inject
  * R-17 batch3 → batch3d → §R18 Phase 3 Wave 3 (P2-6): Orchestrator-domain
  * ViewModel. After the Wave 3 split this VM owns ONLY:
  *
- *  - **Nav** ([setLastNavPage]) — the persisted top-level destination.
+ *  - **Nav** ([setLastRoute] / [requestNavigate]) — the persisted top-level destination.
  *  - **File browser / file-to-show** ([showFileInFiles] / [clearFileToShow]
  *    / [browseFilesInWorkdir] / [closeFileBrowser]).
  *  - **Permission / Question responses** ([respondPermission] /
@@ -80,17 +80,6 @@ class OrchestratorViewModel @Inject constructor(
 
     // ── Nav ─────────────────────────────────────────────────────────────────
 
-    @Suppress("DEPRECATION")
-    fun setLastNavPage(page: Int) { // lastNavPage retained for the NavigationPrefs one-time migration; full removal is a separate epic.
-        val clamped = page.coerceIn(0, 2)
-        if (core.store.navFlow.value.lastNavPage == clamped) return
-        core.settingsManager.lastNavPage = clamped
-        val route = NavRoute.fromLegacyPage(clamped)
-        core.settingsManager.lastRoute = route.route
-        // TODO: migrate to lastRoute
-        core.store.mutateNav { it.copy(lastRoute = route.route, lastNavPage = clamped) }
-    }
-
     /**
      * §unified-nav (A1): the PASSIVE mirror setter. Writes [NavState.lastRoute]
      * ONLY — NEVER touches [NavState.navEpoch]. This is called SOLELY by the
@@ -108,9 +97,7 @@ class OrchestratorViewModel @Inject constructor(
      */
     fun setLastRoute(route: NavRoute) {
         val state = core.store.navFlow.value
-        // Authority is lastRoute only; lastNavPage is a deprecated mirror and is
-        // intentionally not co-written by the lastRoute-only migration paths.
-        // §unified-nav: passive mirror — NO navEpoch bump here.
+        // Authority is lastRoute only; §unified-nav: passive mirror — NO navEpoch bump here.
         if (state.lastRoute == route.route) return
         core.settingsManager.lastRoute = route.route
         core.store.mutateNav { it.copy(lastRoute = route.route) }

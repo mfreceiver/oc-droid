@@ -227,14 +227,12 @@ class SessionViewModelPassThroughTest : MainViewModelTestBase() {
         val vm = SessionViewModel(core)
         core.writeChat { it.copy(currentSessionId = "s1") }
         // Simulate being on Chat.
-        core.store.mutateNav { it.copy(lastRoute = NavRoute.Chat.route, lastNavPage = NavRoute.Chat.legacyPage) }
+        core.store.mutateNav { it.copy(lastRoute = NavRoute.Chat.route) }
 
         vm.closeSession("s1")
         advanceUntilIdle()
 
         assertEquals(NavRoute.Sessions.route, core.navFlow.value.lastRoute)
-        // lastNavPage is a deprecated mirror; force-home no longer co-writes it.
-        // Authority is lastRoute + navEpoch.
         verify { settingsManager.lastRoute = NavRoute.Sessions.route }
     }
 
@@ -246,7 +244,7 @@ class SessionViewModelPassThroughTest : MainViewModelTestBase() {
         val core = createCore()
         val vm = SessionViewModel(core)
         core.writeChat { it.copy(currentSessionId = null) }
-        core.store.mutateNav { it.copy(lastRoute = NavRoute.Chat.route, lastNavPage = NavRoute.Chat.legacyPage) }
+        core.store.mutateNav { it.copy(lastRoute = NavRoute.Chat.route) }
 
         vm.closeSession("orphan-open")
         advanceUntilIdle()
@@ -263,7 +261,7 @@ class SessionViewModelPassThroughTest : MainViewModelTestBase() {
         val vm = SessionViewModel(core)
         core.writeChat { it.copy(currentSessionId = "s1") }
         core.writeComposer { it.copy(draftWorkdir = "/proj", inputText = "typing") }
-        core.store.mutateNav { it.copy(lastRoute = NavRoute.Chat.route, lastNavPage = NavRoute.Chat.legacyPage) }
+        core.store.mutateNav { it.copy(lastRoute = NavRoute.Chat.route) }
 
         vm.closeSession("s1")
         advanceUntilIdle()
@@ -351,7 +349,7 @@ class SessionViewModelPassThroughTest : MainViewModelTestBase() {
         // Set the active route to Chat so the no-op assertion can verify the
         // route stays Chat (without this the default route is already Sessions
         // and the assertion is vacuously true).
-        core.store.mutateNav { it.copy(lastRoute = NavRoute.Chat.route, lastNavPage = NavRoute.Chat.legacyPage) }
+        core.store.mutateNav { it.copy(lastRoute = NavRoute.Chat.route) }
 
         vm.closeSession("root-1")
         advanceUntilIdle()

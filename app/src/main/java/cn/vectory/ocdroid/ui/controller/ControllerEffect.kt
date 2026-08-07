@@ -214,22 +214,22 @@ sealed class ControllerEffect {
     /** Full session-list refresh. */
     data object RefreshSessions : ControllerEffect()
     /**
-     * T13 — request the [cn.vectory.ocdroid.service.streaming.ProcessStatusPoller]
+     * T13 — request the [cn.vectory.ocdroid.service.streaming.SlimFanOutRetryScheduler]
      * to schedule a bounded exponential + jitter backoff (max 30s) for
      * the slim on-demand fan-out's next sweep. Emitted by
      * [SessionSyncCoordinator.applySlimStatusFanOutSummary] when a slim
      * fan-out sweep returned `retryableCount > 0` (503 / transport fault
      * per §6 G2). Handled by AppCore → forwards to
-     * [cn.vectory.ocdroid.service.streaming.ProcessStatusPoller.scheduleBackoff].
+     * [cn.vectory.ocdroid.service.streaming.SlimFanOutRetryScheduler.scheduleBackoff].
      */
     data object RequestPollerBackoff : ControllerEffect()
 
     /**
-     * T13 — request the poller to RESET its slim fan-out backoff state
+     * T13 — request the scheduler to RESET its slim fan-out backoff state
      * to base. Emitted by [SessionSyncCoordinator.applySlimStatusFanOutSummary]
      * when a slim fan-out sweep returned `retryableCount == 0` (success
      * — T13-C4 "success resets"). Handled by AppCore → forwards to
-     * [cn.vectory.ocdroid.service.streaming.ProcessStatusPoller.resetBackoff].
+     * [cn.vectory.ocdroid.service.streaming.SlimFanOutRetryScheduler.resetBackoff].
      */
     data object ResetPollerBackoff : ControllerEffect()
 }

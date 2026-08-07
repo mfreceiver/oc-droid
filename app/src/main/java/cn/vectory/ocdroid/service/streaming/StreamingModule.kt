@@ -2,8 +2,6 @@ package cn.vectory.ocdroid.service.streaming
 
 import cn.vectory.ocdroid.di.ApplicationScope
 import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
-import cn.vectory.ocdroid.service.status.StatusAggregator
-import cn.vectory.ocdroid.service.status.StatusAggregatorInput
 import dagger.Binds
 import dagger.Module
 import dagger.Provides
@@ -21,10 +19,10 @@ import javax.inject.Singleton
  * - [ConnectionBootstrapRunner] → [BootstrapRunner]
  * - [SharedStateStoreSessionSnapshotProvider] → [SessionSnapshotProvider]
  * - [AndroidStreamingServiceLauncher] → [StreamingServiceLauncher] (CP9)
- * - [ProcessStatusPoller] (D2 gate #4): constructed via `@Provides` (not
- *   `@Inject constructor`) so the clock default-param can be filled without
- *   a Hilt binding for `() -> Long` (mirrors
- *   [cn.vectory.ocdroid.service.status.StatusAggregatorImpl]'s pattern).
+ * - [SlimFanOutRetryScheduler] (Batch-1 item 17): constructed via `@Provides`
+ *   (not `@Inject constructor`) so the runner lambda + summary sink can be
+ *   wired with live deps ([SlimStatusFanOut], [SessionSyncCoordinator])
+ *   without Hilt binding the function types.
  *
  * The first three impls are `@Singleton @Inject constructor` themselves (no
  * constructor args beyond injectable deps), so a `@Binds` is sufficient —
@@ -62,46 +60,45 @@ abstract class StreamingModule {
 }
 
 /**
- * D2 (gate #4): provides the process-level [ProcessStatusPoller] singleton.
- * Extracted as a `@Provides` so the clock default-param (`() -> Long`) can
- * be filled without a Hilt binding for the function type.
+ * Batch-1 item 17: provides the process-level [SlimFanOutRetryScheduler]
+ * singleton. Extracted as a `@Provides` so the runner lambda + summary sink
+ * can be wired with live deps without Hilt binding function types.
  *
- * §final-gate I-1 (oracle §3.6): ALSO wires the slim status fan-out runner
+ * §final-gate I-1 (oracle §3.6): wires the slim status fan-out runner
  * + summary sink. The fan-out is constructed here (not as a Hilt binding)
  * because [SlimStatusFanOut] is a plain Kotlin class with no other deps
  * than the repository (mirrors the existing slim use-case pattern). The
  * runner gates on identity + slim-mode so legacy mode issues zero fan-out
  * HTTP requests.
+ *
+ * The dead 30s loop machinery (startLoop/ensureRunning/startAndAwaitFirstPoll)
+ * was removed in Batch 1 item 17 — the preserved backoff + single-flight-retry
+ * seam is the documented re-enablement vector (see [SlimFanOutRetryScheduler] kdoc).
  */
 @Module
 @InstallIn(SingletonComponent::class)
-object ProcessStatusPollerModule {
+object SlimFanOutRetrySchedulerModule {
     @Provides
     @Singleton
-    fun provideProcessStatusPoller(
+    fun provideSlimFanOutRetryScheduler(
         @ApplicationScope scope: CoroutineScope,
-        statusAggregatorInput: StatusAggregatorInput,
         snapshotProvider: SessionSnapshotProvider,
         identityStore: ConnectionIdentityStore,
-        statusAggregator: StatusAggregator,
         repository: cn.vectory.ocdroid.data.repository.OpenCodeRepository,
         serverCompatProfile:
             cn.vectory.ocdroid.data.repository.ServerCompatProfile,
         sessionSyncCoordinator:
             cn.vectory.ocdroid.ui.controller.SessionSyncCoordinator,
-    ): ProcessStatusPoller {
+    ): SlimFanOutRetryScheduler {
         // §final-gate I-1 (oracle §3.6): construct the slim fan-out here.
         // The fan-out's only dep is the repository (T4's
         // getSlimapiSessionStatusOutcome is consume-only).
         val fanOut = cn.vectory.ocdroid.service.status.SlimStatusFanOut(repository)
 
-        return ProcessStatusPoller(
+        return SlimFanOutRetryScheduler(
             scope = scope,
-            statusAggregatorInput = statusAggregatorInput,
             snapshotProvider = snapshotProvider,
             identityStore = identityStore,
-            statusAggregator = statusAggregator,
-            clock = { System.currentTimeMillis() },
 
             // §final-gate I-1 (oracle §3.6): slim-mode gate. Legacy repos
             // return null here for EVERY tick — zero fan-out HTTP. The
@@ -147,8 +144,8 @@ object ProcessStatusPollerModule {
                     // the sweep (archived → its idle correctly reclassified
                     // missing; created → its idle NOT misjudged missing).
                     // snapshotProvider is captured from this @Provides closure
-                    // (the param at :98) — it is the SAME provider the poller
-                    // re-reads every tick.
+                    // (the param at :98) — it is the SAME provider the scheduler
+                    // re-reads every retry.
                     knownSessionIdsProvider = { snapshotProvider.current().sessionsById.keys },
                 )
                 summary.copy(sweepStartEpoch = sweepStartEpoch)
@@ -158,7 +155,7 @@ object ProcessStatusPollerModule {
             // coordinator. applySlimStatusFanOutSummary emits per-sid
             // EvictSession effects (404) + the RequestPollerBackoff /
             // ResetPollerBackoff effect (retryable / success). AppCore's
-            // effect tail routes those back into this poller's backoff
+            // effect tail routes those back into this scheduler's backoff
             // state + single-flight retry.
             slimFanOutSummarySink = { summary ->
                 sessionSyncCoordinator.applySlimStatusFanOutSummary(summary)
@@ -166,7 +163,6 @@ object ProcessStatusPollerModule {
 
         )
     }
-
 }
 
 /**
@@ -180,8 +176,11 @@ object ProcessStatusPollerModule {
  *  - `recoveryPolicy: SseRecoveryPolicy` (the retry loop died)
  *  - `reconnectAllowed` lambda + `appLifecycleMonitor` (no reconnect gate)
  *  - `jitterSource` (no retry jitter)
- *  - `recoveryPolicy` param stays as a class (ProcessStatusPoller still uses
- *    it) but is dropped from the Owner constructor + this @Provides.
+ *  - `recoveryPolicy` (the [cn.vectory.ocdroid.service.streaming.SseRecoveryPolicy]
+ *    class) is retained as a schedule+jitter utility for tests + a future SSE-retry
+ *    reintroduction seam, but no longer participates in the slim fan-out path
+ *    (that math now lives in SlimFanOutBackoffPolicy). It is dropped from the
+ *    Owner constructor + this @Provides.
  *  - Added `ownershipGate: StreamingOwnershipGate` (lease authority).
  *  - Renamed `onTerminalExhaustion` → `onTerminalDrop`.
  */

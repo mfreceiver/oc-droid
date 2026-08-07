@@ -726,7 +726,7 @@ class ChatViewModelPassThroughTest : MainViewModelTestBase() {
         assertEquals(core.fileFlow, vm.fileFlow)
         assertEquals(core.trafficFlow, vm.trafficFlow)
         assertEquals(core.hostFlow, vm.hostFlow)
-        assertEquals(core.repository, vm.repository)
+        assertEquals(core.repository, vm.fileVcsRepository)
     }
 
     @Test

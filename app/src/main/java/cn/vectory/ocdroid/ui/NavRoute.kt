@@ -4,12 +4,12 @@ import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 
 /** Stable top-level route identities. Persist [route], never enum ordinals. */
-enum class NavRoute(val route: String, val legacyPage: Int) {
-    Chat("chat", 0),
-    Sessions("sessions", 1),
-    Files("files", 0),
-    Git("git", 0),
-    Settings("settings", 2);
+enum class NavRoute(val route: String) {
+    Chat("chat"),
+    Sessions("sessions"),
+    Files("files"),
+    Git("git"),
+    Settings("settings");
 
     companion object {
         const val chatPreviewRoutePattern: String = "chat/preview?workdir={workdir}&path={path}"
@@ -69,13 +69,6 @@ enum class NavRoute(val route: String, val legacyPage: Int) {
 
         fun isNestedSettingsRoute(route: String?): Boolean =
             route != null && route != Settings.route && route.startsWith("settings/")
-
-        /** Legacy phone-layout order: 2 was Settings; Files and Git have no legacy page. */
-        fun fromLegacyPage(page: Int): NavRoute = when (page) {
-            1 -> Sessions
-            2 -> Settings
-            else -> Chat
-        }
 
         private fun parameterizedRoute(base: String, vararg parameters: Pair<String, String?>): String {
             val query = parameters.mapNotNull { (name, value) ->

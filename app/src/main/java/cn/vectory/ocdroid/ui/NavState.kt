@@ -3,12 +3,6 @@ package cn.vectory.ocdroid.ui
 /**
  * In-memory mirror of the persisted stable route key.
  *
- * [lastNavPage] is the legacy integer projection derived through
- * [NavRoute.legacyPage]; it is not a persistence identity ([lastRoute] is).
- * AppShell is the sole shell (the legacy PhoneLayout + USE_NEW_SHELL flag
- * were removed in the redesign); [lastNavPage] is retained only for the
- * one-time migration in [cn.vectory.ocdroid.util.SettingsManager.lastRoute].
- *
  * §home-hub T7-C5 (cold-start-stays-home): the initial value is the Sessions
  * route (the new home hub), NOT Chat and NOT the persisted lastRoute. AppShell
  * never restores the persisted lastRoute on cold start (the old
@@ -50,9 +44,6 @@ package cn.vectory.ocdroid.ui
  */
 data class NavState(
     val lastRoute: String = NavRoute.Sessions.route,
-    /** §B6: lastNavPage 是 lastRoute 的旧整数镜像，不再作为导航权威。保留以不破坏现有写点。 */
-    @Deprecated("保留仅因 SettingsManager/OrchestratorVM 仍有写点；导航权威是 lastRoute")
-    val lastNavPage: Int = NavRoute.Sessions.legacyPage,
     /** §unified-nav: monotonic nav epoch. Bumped ONLY by requestNavigate (the
      *  explicit nav-command setter). setLastRoute (passive mirror) never touches it. */
     val navEpoch: Long = 0L,

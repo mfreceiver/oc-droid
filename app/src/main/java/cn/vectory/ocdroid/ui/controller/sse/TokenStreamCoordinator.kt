@@ -424,7 +424,8 @@ class TokenStreamCoordinator(
         // currentSid/state mutation and before launchStreamLifecycle) so no
         // lifecycle job / debounce / streamProvider call is ever made. The chat
         // falls back to REST (triggerSinceFetch / resync / manual refresh);
-        // ProcessStatusPoller keeps refreshing status (it never owned a stream).
+        // SlimFanOutRetryScheduler (fka ProcessStatusPoller) handles slim fan-out retry
+        // scheduling; it never owned a token stream.
         if (sseDisabled()) {
             DebugLog.i(TAG, "open($sid): sse_disabled=true → REST-only (no token stream)")
             return

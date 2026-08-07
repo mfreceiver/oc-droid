@@ -10,8 +10,8 @@ import cn.vectory.ocdroid.ui.SharedEffectBus
 import cn.vectory.ocdroid.ui.SkeletonReloadCoordinator
 import cn.vectory.ocdroid.ui.SliceFlows
 import cn.vectory.ocdroid.util.DebugLog
+import cn.vectory.ocdroid.service.status.SlimFanOutBackoffPolicy
 import cn.vectory.ocdroid.util.exponentialBackoffMs
-import cn.vectory.ocdroid.service.streaming.ProcessStatusPoller
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 
@@ -90,9 +90,9 @@ internal class StatusFanOutApplier(
                 val prevAttempt = auth.retryQueue[sid]?.attempt ?: 0
                 val nominalBackoffMs = exponentialBackoffMs(
                     attempt = prevAttempt,
-                    baseMs = ProcessStatusPoller.BACKOFF_BASE_MS,
-                    maxShift = ProcessStatusPoller.BACKOFF_MAX_SHIFT,
-                ).coerceAtMost(ProcessStatusPoller.BACKOFF_MAX_MS)
+                    baseMs = SlimFanOutBackoffPolicy.BACKOFF_BASE_MS,
+                    maxShift = SlimFanOutBackoffPolicy.BACKOFF_MAX_SHIFT,
+                ).coerceAtMost(SlimFanOutBackoffPolicy.BACKOFF_MAX_MS)
                 slices.store.dispatch(
                     AppAction.AuthorityEvent(
                         AuthorityOp.RetryQueued(

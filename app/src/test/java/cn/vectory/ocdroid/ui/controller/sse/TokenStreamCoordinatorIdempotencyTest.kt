@@ -274,7 +274,7 @@ class TokenStreamCoordinatorIdempotencyTest {
         // satisfied — the test would not exercise the round3 MAJOR branch.
         stateStore.mutateState {
             it.copy(
-                nav = it.nav.copy(lastRoute = "chat/s1", lastNavPage = NavRoute.Chat.legacyPage),
+                nav = it.nav.copy(lastRoute = "chat/s1"),
                 chat = it.chat.copy(currentSessionId = "s1"),
                 chatRouteInstance = 1L,
             )

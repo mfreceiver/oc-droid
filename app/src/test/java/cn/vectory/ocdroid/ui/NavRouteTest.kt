@@ -90,14 +90,6 @@ class NavRouteTest {
         assertTrue(NavRoute.gitRoutePattern.contains("session={session}&workdir={workdir}"))
     }
 
-    @Test
-    fun `legacy page mapping remains unchanged`() {
-        assertEquals(NavRoute.Chat, NavRoute.fromLegacyPage(0))
-        assertEquals(NavRoute.Sessions, NavRoute.fromLegacyPage(1))
-        assertEquals(NavRoute.Settings, NavRoute.fromLegacyPage(2))
-        assertEquals(NavRoute.Chat, NavRoute.fromLegacyPage(99))
-    }
-
     private fun extractQueryParam(route: String, name: String): String? =
         route.substringAfter('?', "")
             .split('&')

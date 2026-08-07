@@ -11,8 +11,6 @@ import cn.vectory.ocdroid.service.status.GlobalBusyState
 import cn.vectory.ocdroid.service.status.SessionBusyStatus
 import cn.vectory.ocdroid.service.status.SessionStatusKey
 import cn.vectory.ocdroid.service.status.SlimStatusFanOut
-import cn.vectory.ocdroid.service.status.StatusAggregator
-import cn.vectory.ocdroid.service.status.StatusAggregatorInput
 import cn.vectory.ocdroid.service.status.StatusFanOutSummary
 import cn.vectory.ocdroid.service.status.StatusSnapshot
 import io.mockk.coEvery
@@ -24,6 +22,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -36,7 +35,7 @@ import org.junit.Test
  * endpoint.
  *
  * # Gate predicate (flag = false)
- * The runner returns null → [ProcessStatusPoller.runSlimFanOut] skips the
+ * The runner returns null → [SlimFanOutRetryScheduler.runSlimFanOut] skips the
  * summary sink → zero calls to [OpenCodeRepository.getSlimapiSessionStatusOutcome].
  * Status data flow stays fully covered by bulk runRefresh; stale cleanup is
  * driven independently by /since 404 MarkDeleted + session.deleted SSE.
@@ -46,9 +45,9 @@ import org.junit.Test
  * which issues per-sid GETs. This case documents the re-enable behavior and
  * guards against accidentally inverting the gate.
  *
- * Both cases exercise the runner lambda directly through the poller's
- * [ProcessStatusPoller.startAndAwaitFirstPoll] path so the full trigger chain
- * (immediate runSlimFanOut → runner → sink / no-sink) is covered.
+ * Both cases exercise the runner lambda directly through the scheduler's
+ * [SlimFanOutRetryScheduler.requestSlimFanOutRetry] path so the full trigger chain
+ * (retry → runSlimFanOut → runner → sink / no-sink) is covered.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class SlimFanOutRunnerGateTest {
@@ -63,7 +62,6 @@ class SlimFanOutRunnerGateTest {
     @Test
     fun `gate blocks per-session calls when slimPerSessionStatusEndpointAvailable is false`() = runTest {
         val appScope = TestScope(UnconfinedTestDispatcher())
-        val input = FanOutGateRecordingInput(GlobalBusyState.AllIdleFresh)
         val store = ConnectionIdentityStore()
         bindIdentity(store)
 
@@ -83,7 +81,7 @@ class SlimFanOutRunnerGateTest {
         )
         val snapshotProvider = SessionSnapshotProvider { snapshot }
 
-        // mirrors StreamingModule.provideProcessStatusPoller slimFanOutRunner gate
+        // mirrors StreamingModule.provideSlimFanOutRetryScheduler slimFanOutRunner gate
         val runner: suspend (ConnectionIdentity, StatusSnapshot) -> StatusFanOutSummary? =
             runner@{ _, snap ->
                 if (!profile.slimPerSessionStatusEndpointAvailable) return@runner null
@@ -94,18 +92,16 @@ class SlimFanOutRunnerGateTest {
             }
 
         var sinkCount = 0
-        val poller = ProcessStatusPoller(
+        val scheduler = SlimFanOutRetryScheduler(
             scope = appScope,
-            statusAggregatorInput = input,
             snapshotProvider = snapshotProvider,
             identityStore = store,
-            statusAggregator = input,
-            clock = { 0L },
             slimFanOutRunner = runner,
             slimFanOutSummarySink = { sinkCount++ },
         )
 
-        poller.startAndAwaitFirstPoll(identity, snapshot)
+        // Drive via requestSlimFanOutRetry instead of the removed loop path.
+        scheduler.requestSlimFanOutRetry(0L)
         runCurrent(appScope)
 
         // Gate is closed: runner returned null, sink never invoked.
@@ -116,7 +112,6 @@ class SlimFanOutRunnerGateTest {
     @Test
     fun `gate allows per-session calls when slimPerSessionStatusEndpointAvailable is true`() = runTest {
         val appScope = TestScope(UnconfinedTestDispatcher())
-        val input = FanOutGateRecordingInput(GlobalBusyState.AllIdleFresh)
         val store = ConnectionIdentityStore()
         bindIdentity(store)
 
@@ -135,7 +130,7 @@ class SlimFanOutRunnerGateTest {
         )
         val snapshotProvider = SessionSnapshotProvider { snapshot }
 
-        // mirrors StreamingModule.provideProcessStatusPoller slimFanOutRunner gate
+        // mirrors StreamingModule.provideSlimFanOutRetryScheduler slimFanOutRunner gate
         val runner: suspend (ConnectionIdentity, StatusSnapshot) -> StatusFanOutSummary? =
             runner@{ _, snap ->
                 if (!profile.slimPerSessionStatusEndpointAvailable) return@runner null
@@ -146,18 +141,16 @@ class SlimFanOutRunnerGateTest {
             }
 
         val summaries = mutableListOf<StatusFanOutSummary>()
-        val poller = ProcessStatusPoller(
+        val scheduler = SlimFanOutRetryScheduler(
             scope = appScope,
-            statusAggregatorInput = input,
             snapshotProvider = snapshotProvider,
             identityStore = store,
-            statusAggregator = input,
-            clock = { 0L },
             slimFanOutRunner = runner,
             slimFanOutSummarySink = { summaries.add(it) },
         )
 
-        poller.startAndAwaitFirstPoll(identity, snapshot)
+        // Drive via requestSlimFanOutRetry instead of the removed loop path.
+        scheduler.requestSlimFanOutRetry(0L)
         runCurrent(appScope)
 
         // Gate is open: runner proceeded to fanOut, sink was invoked.
@@ -179,43 +172,5 @@ class SlimFanOutRunnerGateTest {
     private fun bindIdentity(store: ConnectionIdentityStore) {
         store.beginReconfigure()
         store.bind(identity.profileId, identity.normalizedWorkdir, identity.endpointFp)
-    }
-
-    /**
-     * Minimal fake [StatusAggregator] / [StatusAggregatorInput] for the
-     * slim fan-out gate tests. Records refresh calls without side effects
-     * (no completion gate — the sweep runs unblocked). Mirrors the pattern
-     * from [SlimFanOutPollerWiringTest.RecordingStatusInput] and
-     * [ProcessStatusPollerTest.RecordingStatusInput].
-     */
-    private class FanOutGateRecordingInput(initial: GlobalBusyState) : StatusAggregator,
-        StatusAggregatorInput {
-        private val _globalState = MutableStateFlow(initial)
-        override val globalState: StateFlow<GlobalBusyState> = _globalState.asStateFlow()
-        override val globalBusy: StateFlow<Boolean> =
-            MutableStateFlow(initial == GlobalBusyState.Busy).asStateFlow()
-        override val statusByKey:
-            StateFlow<Map<SessionStatusKey, SessionBusyStatus>> =
-            MutableStateFlow<Map<SessionStatusKey, SessionBusyStatus>>(emptyMap()).asStateFlow()
-        override fun stateAtNow(): GlobalBusyState = _globalState.value
-
-        override suspend fun refresh(
-            identity: ConnectionIdentity,
-            snapshot: StatusSnapshot,
-        ) {
-            // No-op: the sweep runs unblocked.
-        }
-
-        override fun applySseStatus(
-            key: SessionStatusKey,
-            status: SessionBusyStatus,
-            sourceTimeMs: Long,
-        ) = Unit
-
-        override fun markRequestFailed(
-            identity: ConnectionIdentity,
-            snapshot: StatusSnapshot,
-            sourceTimeMs: Long,
-        ) = Unit
     }
 }

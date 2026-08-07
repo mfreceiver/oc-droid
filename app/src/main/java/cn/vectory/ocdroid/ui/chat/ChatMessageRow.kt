@@ -43,7 +43,7 @@ import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.Part
 import cn.vectory.ocdroid.data.repository.isThinPlaceholder
-import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.data.repository.FileVcsRepository
 import cn.vectory.ocdroid.ui.theme.CardWidthScope
 import cn.vectory.ocdroid.ui.theme.Dimens
 import cn.vectory.ocdroid.ui.theme.StatusBanner
@@ -106,7 +106,7 @@ internal fun MessageRow(
     message: Message,
     parts: List<Part>,
     streamingPartTexts: Map<String, String>,
-    repository: OpenCodeRepository,
+    repository: FileVcsRepository,
     workspaceDirectory: String?,
     onFileClick: (String) -> Unit,
     onOpenSubAgent: (String) -> Unit,
@@ -675,7 +675,7 @@ internal fun PartView(
     part: Part,
     isUser: Boolean,
     streamingTextOverride: String?,
-    repository: OpenCodeRepository,
+    repository: FileVcsRepository,
     workspaceDirectory: String?,
     onFileClick: (String) -> Unit,
     onOpenSubAgent: (String) -> Unit,
