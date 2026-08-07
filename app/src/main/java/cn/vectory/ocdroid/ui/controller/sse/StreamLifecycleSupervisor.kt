@@ -160,6 +160,17 @@ internal class StreamLifecycleSupervisor(
         reconnectRequested.set(sid)
     }
 
+    /**
+     * Test seam: directly sets [currentSid] without going through [open].
+     * Used by mutation-testing the `currentSid.get() != sid` guard inside
+     * [scheduleReconnect] — the test must change the sid WITHOUT cancelling
+     * the pending reconnect job (which [open] would do via
+     * [launchStreamLifecycle]).
+     */
+    internal fun setCurrentSidForTest(sid: String?) {
+        currentSid.set(sid)
+    }
+
     /** §MF-1 (gate r2) test seam: reads the current sentinel value. */
     internal fun reconnectRequestedSnapshot(): String? = reconnectRequested.get()
 

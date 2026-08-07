@@ -358,29 +358,30 @@ class StreamLifecycleSupervisorTest {
     // ═══════════════════════════════════════════════════════════════════════
 
     /**
-     * Verifies that when the current sid changes during the reconnect backoff
-     * delay (host switch), the stale reconnect is dropped and does NOT create
-     * a new stream.
+     * Verifies that the `currentSid.get() != sid` guard inside
+     * [StreamLifecycleSupervisor.scheduleReconnect] drops a stale reconnect
+     * when the current sid changes during the backoff delay, WITHOUT relying
+     * on [launchStreamLifecycle]'s getAndSet cancellation.
+     *
+     * **Mutation-testing criterion**: deleting the guard at
+     * `StreamLifecycleSupervisor.kt:395` MUST make this test fail. The test
+     * achieves this by using [setCurrentSidForTest] to change the sid WITHOUT
+     * calling [open] (which would cancel the pending reconnect job via
+     * [launchStreamLifecycle]), so the reconnect job survives into its post-
+     * delay execution and the guard is the ONLY thing that stops it.
      *
      * Sequence:
-     *  1. Open "s1" with small watchdogMs=100.
-     *  2. Advance virtual time by 110ms — this fires the watchdog
-     *     (elapsed >= 100ms) but does NOT advance past the reconnect backoff
-     *     (50ms starting from when scheduleReconnect ran at ~+100ms, i.e. due
-     *     at ~+150ms).
-     *  3. During the backoff window, open "s2". This supersedes the reconnect
-     *     lifecycle via [launchStreamLifecycle]'s getAndSet + cancel, and
-     *     sets currentSid="s2". streamProvider is called: openCount=2.
-     *  4. Advance past the stale reconnect's 50ms backoff. The reconnect
-     *     block (its job was cancelled at step 3) does NOT run — it was
-     *     cancelled by the supersede, not by the sid re-check. The re-check
-     *     `currentSid.get() != sid` is the defense-in-depth that would fire
-     *     if the reconnect lifecycle somehow survived.
-     *  5. Only "s2" is active; openCount stays at 2.
+     *  1. Open "s1" — stream opens, openCount=1.
+     *  2. Advance past watchdogMs=100 — watchdog fires, scheduleReconnect("s1")
+     *     creates a reconnect lifecycle with 50ms backoff. openCount still 1.
+     *  3. Via [setCurrentSidForTest], set currentSid to "s2" WITHOUT calling
+     *     open() — the pending reconnect job for "s1" is NOT cancelled.
+     *  4. Advance past the 50ms backoff — the reconnect block fires, guard
+     *     detects `currentSid("s2") != "s1"` → returns early.
+     *  5. Assert openCount stays at 1 — no new stream was opened.
      *
-     * This pins the interaction: a host switch during backoff cancels the
-     * stale reconnect AND the sid re-check in the reconnect block serves as
-     * a second line of defence against stale reconnections.
+     * If the guard were deleted, step 4 would call runStream("s1") →
+     * streamProvider → openCount becomes 2 → assertion fails.
      */
     @Test
     fun `reconnect sid re-check drops stale after host switch during backoff`() {
@@ -394,37 +395,36 @@ class StreamLifecycleSupervisorTest {
             triggerSinceFetch = { sid, auth -> sinceFetchCalls += SinceFetchCall(sid, auth) },
         )
 
-        // Step 1: Open "s1".
+        // Step 1: Open "s1" → stream opens, openCount=1, currentSid="s1".
         supervisor.open("s1", source = "first")
         scope.runCurrent()
         assertEquals(1, fake.openCount.get())
 
-        // Step 2: Advance by 110ms — past watchdogMs=100 but NOT past the
-        // reconnect backoff (50ms from ~+100ms = ~+150ms).
+        // Step 2: Advance past watchdogMs=100 to trigger scheduleReconnect("s1")
+        // with backoff=50ms (due at ~t=150). The watchdog fires at t=100,
+        // onWatchdogTimeout calls scheduleReconnect → launchStreamLifecycle
+        // creates the reconnect lifecycle. openCount is still 1.
         scope.advanceTimeBy(110L)
         scope.runCurrent()
         assertTrue(
             "watchdog timeout must have triggered fetch",
             sinceFetchCalls.any { it.sid == "s1" && it.auth },
         )
+        assertEquals("reconnect must NOT have opened a stream yet (still in backoff)",
+            1, fake.openCount.get())
 
-        // Step 3: Open "s2" during the backoff window. Supersedes the
-        // reconnect lifecycle (getAndSet cancels the reconnect job).
-        supervisor.open("s2", source = "host-switch")
-        scope.runCurrent()
-        assertEquals("open s2 must call stream provider once",
-            2, fake.openCount.get())
+        // Step 3: Use the test seam to set currentSid to "s2" WITHOUT calling
+        // open(). The pending reconnect job for "s1" survives — NOT cancelled.
+        supervisor.setCurrentSidForTest("s2")
 
-        // Step 4: Advance past the backoff deadline (~+150ms, we go to
-        // 110+100=210). The stale reconnect was cancelled at step 3.
-        scope.advanceTimeBy(100L)
+        // Step 4: Advance past the stale reconnect's backoff deadline (~t=150).
+        // The reconnect block fires: currentSid("s2") != "s1" → guard returns
+        // early. runStream is NOT called → openCount unchanged.
+        scope.advanceTimeBy(60L) // from ~110 to ~170, past the 150 deadline
         scope.runCurrent()
-        assertEquals("stale reconnect must NOT open a new stream",
-            2, fake.openCount.get())
-        assertTrue("s2 lifecycle must be active",
-            supervisor.currentStreamJobSnapshot()?.isActive == true)
 
-        supervisor.close("s2")
-        scope.runCurrent()
+        // Step 5: The guard dropped the stale reconnect — no new stream.
+        assertEquals("stale reconnect guard must have dropped reconnect — no new stream",
+            1, fake.openCount.get())
     }
 }
