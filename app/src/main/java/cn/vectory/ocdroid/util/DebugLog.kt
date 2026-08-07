@@ -83,22 +83,42 @@ object DebugLog {
     /** Newest-first observable log. Subscribe in Compose via collectAsStateWithLifecycle. */
     val entries: StateFlow<List<Entry>> = _entries.asStateFlow()
 
-    /** Append a log entry (becomes index 0 = newest). Forwards to Logcat. */
+    /**
+     * Append a log entry (becomes index 0 = newest). Forwards to Logcat.
+     *
+     * §ring-buffer-debug-gate: DEBUG entries are ALWAYS forwarded to Logcat
+     * (adb parity), but are appended to the ring buffer ONLY when
+     * [verboseDiagEnabled] is on. Without this gate, chatty per-request /
+     * per-event DEBUG sources (HTTP intercept, SSE event, sync dispatch,
+     * slimapi probe — each firing on every request / event) flood the
+     * [MAX_ENTRIES]-cap ring buffer and evict genuinely useful ERROR/INFO
+     * entries from the in-app viewer. INFO / WARN / ERROR are ALWAYS buffered
+     * (these are the signal lines the viewer exists to surface).
+     *
+     * The gate lives here at the single internal append path shared by
+     * [d]/[i]/[w]/[e]/[log]; `e(tag, msg, throwable)` delegates to this with
+     * ERROR level, so every DEBUG entry path is covered.
+     */
     fun log(tag: String, message: String, level: Level = Level.DEBUG) {
-        val entry = Entry(
-            seq = seqCounter.incrementAndGet(),
-            timeMs = System.currentTimeMillis(),
-            tag = tag,
-            level = level,
-            message = message
-        )
-        synchronized(deque) {
-            if (deque.size >= MAX_ENTRIES) deque.removeLast()
-            deque.addFirst(entry)
-            // Emit an immutable snapshot — never publish the mutable deque.
-            _entries.value = deque.toList()
+        val shouldBuffer = level != Level.DEBUG || verboseDiagEnabled
+        if (shouldBuffer) {
+            val entry = Entry(
+                seq = seqCounter.incrementAndGet(),
+                timeMs = System.currentTimeMillis(),
+                tag = tag,
+                level = level,
+                message = message
+            )
+            synchronized(deque) {
+                if (deque.size >= MAX_ENTRIES) deque.removeLast()
+                deque.addFirst(entry)
+                // Emit an immutable snapshot — never publish the mutable deque.
+                _entries.value = deque.toList()
+            }
         }
-        // Logcat parity (best-effort; never let logging itself throw).
+        // Logcat parity (best-effort; never let logging itself throw). ALWAYS
+        // forwarded regardless of the ring-buffer gate above — adb keeps full
+        // DEBUG parity; only the in-app ring buffer is filtered.
         runCatching {
             when (level) {
                 Level.DEBUG -> Log.d(tag, message)

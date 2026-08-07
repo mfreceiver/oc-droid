@@ -210,7 +210,7 @@ class SessionSyncCoordinator(
         val type = event.payload.type
         val evtSession = event.payload.getString("sessionID") ?: "-"
         val noisy = type in NOISY_SSE_LOG_EVENTS
-        if (!noisy) {
+        if (DebugLog.verboseDiagEnabled && !noisy) {
             DebugLog.d("Sync", "dispatch $type session=$evtSession current=${slices.chat.value.currentSessionId}")
         }
         // Route through the T2 router (Chain-of-Responsibility — UNCHANGED)

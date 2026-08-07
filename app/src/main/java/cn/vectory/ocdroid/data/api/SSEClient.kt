@@ -298,7 +298,7 @@ class SSEClient internal constructor(
                         // plugin/catalog/integration bursts (the latter fire in
                         // large flurries when a run starts).
                         val noisy = type in NOISY_SSE_LOG_EVENTS
-                        if (!noisy) {
+                        if (DebugLog.verboseDiagEnabled && !noisy) {
                             DebugLog.d("SSE", "event type=$type session=${event.payload.getString("sessionID") ?: "-"}")
                         }
                         // §P2-8 race fix (double-check): decoding took real

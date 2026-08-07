@@ -116,21 +116,29 @@ internal class MessageGateway(
     suspend fun probeLatestSlim(sessionId: String): ProbeResult = runSuspendCatching {
         val resp = api.getSlimapiMessages(sessionId, limit = 1, before = null, mode = "skeleton")
         if (!resp.isSuccessful) {
-            DebugLog.d("SlimapiProbe", "probe sid=$sessionId FAILED http=${resp.code()}")
+            if (DebugLog.verboseDiagEnabled) {
+                DebugLog.d("SlimapiProbe", "probe sid=$sessionId FAILED http=${resp.code()}")
+            }
             return@runSuspendCatching ProbeResult(ok = false, httpStatus = resp.code())
         }
         val arr = resp.body() ?: return@runSuspendCatching ProbeResult(ok = false, httpStatus = resp.code())
         if (arr.isEmpty()) {
-            DebugLog.d("SlimapiProbe", "probe sid=$sessionId EMPTY")
+            if (DebugLog.verboseDiagEnabled) {
+                DebugLog.d("SlimapiProbe", "probe sid=$sessionId EMPTY")
+            }
             ProbeResult(ok = true, empty = true)
         } else {
             val mid = arr.first().info.id
             val ts = arr.first().info.time?.updated ?: arr.first().info.time?.created
-            DebugLog.d("SlimapiProbe", "probe sid=$sessionId OK latest=$mid ts=$ts")
+            if (DebugLog.verboseDiagEnabled) {
+                DebugLog.d("SlimapiProbe", "probe sid=$sessionId OK latest=$mid ts=$ts")
+            }
             ProbeResult(ok = true, messageID = mid, updatedAt = ts)
         }
     }.getOrElse { error ->
-        DebugLog.d("SlimapiProbe", "probe sid=$sessionId TRANSPORT_FAIL ${error.javaClass.simpleName}: ${error.message}")
+        if (DebugLog.verboseDiagEnabled) {
+            DebugLog.d("SlimapiProbe", "probe sid=$sessionId TRANSPORT_FAIL ${error.javaClass.simpleName}: ${error.message}")
+        }
         ProbeResult(ok = false, httpStatus = null)
     }
 

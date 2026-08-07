@@ -27,11 +27,21 @@ class DebugLogTest {
         // The object is a process singleton; isolate each test by clearing
         // the buffer so prior tests' entries don't leak in.
         DebugLog.clear()
+        // §ring-buffer-debug-gate (B-scheme): DEBUG only enters the ring
+        // buffer when verboseDiagEnabled is true. The bulk of these tests
+        // exercise buffer mechanics via default-level (DEBUG) calls, so run
+        // them under verbose-on — where DEBUG IS buffered — restoring their
+        // original intent. The gate itself is covered by the dedicated test
+        // `ring buffer skips DEBUG when verbose disabled…` below.
+        DebugLog.verboseDiagEnabled = true
     }
 
     @After
     fun tearDown() {
         DebugLog.clear()
+        // Restore the production default so the verbose-on state doesn't
+        // leak into other test classes that share this process singleton.
+        DebugLog.verboseDiagEnabled = false
     }
 
     @Test
@@ -229,5 +239,34 @@ class DebugLogTest {
             listOf(DebugLog.Level.ERROR, DebugLog.Level.WARN, DebugLog.Level.INFO),
             entries.map { it.level },
         )
+    }
+
+    @Test
+    fun `ring buffer skips DEBUG when verbose disabled and always buffers INFO B-scheme gate`() {
+        // §ring-buffer-debug-gate: DEBUG only enters the ring buffer when
+        // verboseDiagEnabled is true (default off). This is the safety net
+        // that stops chatty per-request DEBUG (Http intercept / SSE event /
+        // Sync dispatch / SlimapiProbe) from evicting useful ERROR/INFO
+        // entries from the 3000-cap buffer. INFO/WARN/ERROR always buffer
+        // regardless of the flag.
+        DebugLog.verboseDiagEnabled = false
+        DebugLog.clear()
+
+        DebugLog.log("T", "debug-msg") // default DEBUG → NOT buffered when verbose off
+        assertTrue(
+            "DEBUG must be skipped from the ring buffer when verbose is off",
+            DebugLog.entries.value.isEmpty(),
+        )
+
+        DebugLog.i("T", "info-msg") // INFO → always buffered
+        assertEquals(1, DebugLog.entries.value.size)
+        assertEquals(DebugLog.Level.INFO, DebugLog.entries.value.first().level)
+
+        DebugLog.verboseDiagEnabled = true
+        DebugLog.log("T", "debug-msg-2") // DEBUG now buffered
+        val entries = DebugLog.entries.value
+        assertEquals(2, entries.size)
+        assertEquals(DebugLog.Level.DEBUG, entries.first().level) // newest-first
+        assertEquals(DebugLog.Level.INFO, entries[1].level)
     }
 }

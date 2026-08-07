@@ -44,7 +44,7 @@ class DirectoryHeaderInterceptor : Interceptor {
         // we added it for. Health/messages/files/VCS are high-volume + not
         // diagnosis-relevant, so they are silenced.
         val path = original.url.encodedPath
-        if (path.contains("/question") || path.contains("/session/")) {
+        if (DebugLog.verboseDiagEnabled && (path.contains("/question") || path.contains("/session/"))) {
             DebugLog.d(
                 "Http",
                 "intercept path=$path dirSent=${built.header(HttpHeaders.DIRECTORY_HEADER) ?: "null"}"
