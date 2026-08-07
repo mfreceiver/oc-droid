@@ -1,96 +1,51 @@
 package cn.vectory.ocdroid.ui.controller.sse
 
-import cn.vectory.ocdroid.data.model.EpochFrame
 import cn.vectory.ocdroid.data.model.TokenStreamFrame
 import cn.vectory.ocdroid.data.repository.ClientBundle
-import cn.vectory.ocdroid.data.repository.TokenPartStreamState
-import cn.vectory.ocdroid.data.repository.TokenStreamCoordinatorEffect
-import cn.vectory.ocdroid.data.repository.TokenStreamReducer
-import cn.vectory.ocdroid.data.repository.TokenStreamReducerState
-import cn.vectory.ocdroid.ui.AppAction
-import cn.vectory.ocdroid.ui.BundleStamp
 import cn.vectory.ocdroid.ui.SliceFlows
-import cn.vectory.ocdroid.ui.StreamOwnedState
 import cn.vectory.ocdroid.util.DebugLog
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
-import kotlinx.coroutines.launch
-import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicLong
-import java.util.concurrent.atomic.AtomicReference
 
 /**
- * §Stage-D1 §3.7 / §3.8 / §5.8 / §3.10 — the lifecycle coordinator ENGINE for
- * the per-session token stream (`GET /slimapi/sessions/{sid}/stream`).
+ * Public facade for the per-session token stream engine.
  *
- * # Scope (D1 — engine only)
+ * # Architecture (strangler-fig composition split)
  *
- * This class is the unit-testable engine. It owns:
- *  - **max-1 foreground stream** (opening B closes A) + a short debounce on
- *    rapid `open(sid)` to avoid storming the sidecar's cap-8 admission.
- *  - **epoch capture at open** (M6/gpt): per-sid monotonic epoch; inbound
- *    frames are wrapped as [EpochFrame] and frames whose epoch no longer
- *    matches `currentEpoch[sid]` are dropped (stale — incl. post-cancel
- *    queued OkHttp callbacks that leak past the transport's own closed guard).
- *  - **watchdog pre-first-frame** (bgpt MF-2): an INDEPENDENT watchdog active
- *    FROM open() / onOpen that resets on ANY frame (incl. heartbeat) and
- *    fires on `TOKEN_WATCHDOG_MS` timeout. It does NOT reuse SSEClient's
- *    `eventCount==0` early-skip — that pattern would hang forever if the
- *    server never emits a first frame (half-open TCP, silent sidecar boot).
- *  - **reconnect backoff** (exponential, bounded) on failure / Reconnect effect.
- *  - **generation guard** (bgpt MF-3): per-sid generation + per-partId owner
- *    tag. Stale clears (from an old session/generation) do NOT wipe a newer
- *    session's same-partId overlay — extends epoch protection to clear-effects.
- *  - **consume reducer effects → dispatch**: runs [TokenStreamReducer.reduce]
- *    on each (post-epoch) frame; emits [AppAction.ClearTokenStreamState],
- *    invokes the [triggerSinceFetch] hook, schedules reconnect.
- *  - **bridge reducer state → ChatState**: dispatches [AppAction.TokenStreamPartUpdated]
- *    so `streamOwned` / `streamingPartTexts` reflect the live token buffer
- *    (the write-side Stage-B single-owner guard + Stage-A clear contract).
+ * This class is a **facade** over four `internal` collaborators in the same
+ * package. The constructor is byte-identical to the pre-split version (19
+ * parameters, defaults intact) — zero caller/test migration. Internal
+ * delegation:
  *
- * # What D1 does NOT do (D2 territory)
+ * | Component | Responsibility |
+ * |---|---|
+ * | [ReconnectPolicy] | Exponential backoff ladder + per-sid attempt counters |
+ * | [TokenFrameGuard] | Epoch + generation + ownership bookkeeping (stale-frame / stale-clear authority) |
+ * | [TokenStateDispatcher] | Reducer → ChatState bridging + effect translation + revision-hook invocation |
+ * | [StreamLifecycleSupervisor] | Max-1 lifecycle ownership: open/close/debounce, run loop, watchdog, reconnect scheduling, §MF-1 sentinel, lifecycle-bundle binding |
  *
- *  - NO ChatViewModel.loadMessages / busy-open UX wiring.
- *  - NO MessageCard display key-lifecycle.
- *  - NO session.deleted digest → close hook (D2 wires digest→coordinator.close).
- *  - NO `/since` 404 terminal handling (D2).
- *  - NO ConnectionCoordinator foreground/background integration (D2 calls
- *    [open] / [close] from the foreground lifecycle).
- *  - NO DI binding (D2 wires the production constructor params: real
- *    `streamProvider` from `tokenStreamClient(hostPort)` + TokenStreamClient.connect,
- *    real [triggerSinceFetch] → ControllerEffect.LoadMessages or
- *    SessionSyncCoordinator's reconcile path).
+ * # One monitor, reentrant
  *
- * # Coroutine scope / scheduler
+ * All four components share the [bundleCommitLock] (`Any`). The facade's
+ * [close] wraps all four cleanups in ONE outer `synchronized(bundleCommitLock)`;
+ * JVM `synchronized` reentrancy preserves today's single-acquisition atomicity.
+ * Atomics ([AtomicReference], [AtomicLong]) are retained for reads outside the
+ * lock (e.g. [StreamLifecycleSupervisor.reconnectRequestedSnapshot]).
  *
- * The coordinator is constructed with the caller's [scope] (production: the
- * app main CoroutineScope, matching every other UI controller in this package;
- * tests: a `TestScope(UnconfinedTestDispatcher())`). All launches — debounce,
- * collector, watchdog, reconnect-backoff — run on that scope. The
- * UnconfinedTestDispatcher in tests makes timing deterministic without
- * sleeping; the watchdog's `delay(watchdogPollMs)` + the test clock advance
- * together via `testScheduler.advanceUntilIdle()`.
+ * # Supervisor ↔ dispatcher wiring (lateinit)
  *
- * # TriggerSinceFetch wiring
+ * The supervisor↔dispatcher cycle is broken by construction order:
+ *  1. Build [TokenStateDispatcher] FIRST with `requestReconnect` and `onAnyFrame`
+ *     callbacks closing over a `lateinit var streamLifecycleSupervisor`.
+ *  2. Build [StreamLifecycleSupervisor] SECOND in an `init` block with
+ *     `dispatchFrame = this::dispatchEpochFrame`.
+ * First use is at the first [open] call, strictly after construction completes
+ * → `lateinit` is safe on the main-confined scope.
  *
- * There is no clean single-action dispatch for the slimapi `/since` fetch —
- * the existing path is [cn.vectory.ocdroid.ui.controller.SessionSyncCoordinator.reconcileSession]
- * wrapped behind a striped lock + cadence state machine, reached via
- * [cn.vectory.ocdroid.ui.controller.ControllerEffect.LoadMessages] (collected
- * by AppCore) OR the resync sweep. Rather than couple D1 to either (which
- * would pull SessionSyncCoordinator + AppCore into the engine's tests), D1
- * takes a [triggerSinceFetch] callback and invokes it verbatim. **D2 wires
- * the callback** to the chosen /since trigger (likely
- * `ControllerEffect.LoadMessages(sid, resetLimit = false)` emit on the shared
- * effect bus, OR a direct SessionSyncCoordinator.reconcileSession call).
+ * # Companion constants
  *
- * RFC reference: dev-plan §3.7 / §3.8 / §5.8 / §3.10 Stage-D.
+ * [TOKEN_HEARTBEAT_MS], [TOKEN_WATCHDOG_MS], etc. stay on this facade —
+ * tests reference them by name.
  */
 class TokenStreamCoordinator(
     private val scope: CoroutineScope,
@@ -313,69 +268,14 @@ class TokenStreamCoordinator(
         sessionId: String?,
     ): Boolean = tokenStateDispatcher.dispatchTokenStreamClear(partIds, expectedRouteInstance, sessionId)
 
-    /**
-     * §MF-1 (gate r1/r2): mid-collect Reconnect sentinel. Set by
-     * [handleEffect] when the reducer emits a [TokenStreamCoordinatorEffect.Reconnect]
-     * (checked INSIDE `flow.collect { }` right after [dispatchEpochFrame]).
-     * The collect lambda throws [TokenStreamReconnectRequested] to unwind the
-     * collector cleanly, and the run-loop's catch path is the SINGLE re-entry
-     * point that calls [scheduleReconnect] — guaranteeing no overlapping
-     * collectors (the old flow's EventSource is torn down via its awaitClose
-     * BEFORE the reconnect's backoff opens a new one).
-     *
-     * # §gate r2: UNCONDITIONAL set/clear (NOT CAS-on-sid)
-     *
-     * The sentinel uses **unconditional `set`** for both taking and releasing
-     * ownership — NOT `compareAndSet` against a specific sid value. The CAS
-     * approach had a recovery hole:
-     *
-     *  1. sid A processes `resync(reconnect)` → `handleEffect` sets sentinel `A`.
-     *  2. Before the post-dispatch check, `open(B)` cancels A's lifecycle.
-     *  3. A's collect throws `CancellationException` (NOT `TokenStreamReconnectRequested`)
-     *     → catch path that clears the sentinel does NOT run → sentinel stays `A`.
-     *  4. B's runStream does `compareAndSet(B, null)` → **FAILS** (value is `A`).
-     *  5. B gets a Reconnect → `compareAndSet(null, B)` → **FAILS** (value is `A`).
-     *  6. Post-check `reconnectRequested.get() == B` is false → **B never reconnects**.
-     *
-     * Unconditional `set(null)` in open/close/runStream-start/catch, and
-     * unconditional `set(sid)` in handleEffect, closes the hole: a new sid's
-     * lifecycle always starts with a clean sentinel regardless of what a
-     * cancelled prior sid left behind. The sentinel is effectively a
-     * "single-global pending-reconnect for the current lifecycle" — last
-     * writer wins, only one post-dispatch check runs per frame.
-     *
-     * Why a sentinel (not a direct [scheduleReconnect] call from handleEffect):
-     * handleEffect runs synchronously INSIDE `flow.collect { dispatchEpochFrame(...) }`.
-     * Calling scheduleReconnect directly would supersede the currently-running
-     * job via [launchStreamLifecycle], causing a self-cancellation race mid-frame
-     * and leaving the other effects in the same batch (ClearPartState /
-     * TriggerSinceFetch) in an ambiguous state. The sentinel defers the
-     * reconnect decision to the end of the frame's dispatch, after ALL effects
-     * have been processed.
-     */
-
     // ── Public API ──────────────────────────────────────────────────────────
 
     /**
-     * Foreground opt-in connect for [sid]. Supersedes any currently-open stream
-     * (max-1: opening B closes A). Applies a short debounce to coalesce rapid
-     * opens (UI taps / state-driven bursts) before actually issuing the
-     * transport connect.
-     *
-     * `directory` is threaded verbatim into the [streamProvider]; production
-     * D2 wiring resolves it from the live workdir just before calling open().
-     *
-     * §MF-1 (gate r1): the open's lifecycle job goes through [launchStreamLifecycle]
-     * which supersedes the prior [currentStreamJob] (whether it was an active
-     * collector OR a pending reconnect-in-backoff). This is the max-1 invariant:
-     * there is exactly ONE lifecycle job at any time.
+     * Foreground opt-in connect for [sid]. Delegates to [StreamLifecycleSupervisor.open]
+     * which handles the idempotent guard, debounce, and max-1 lifecycle supersede.
      *
      * [source] is a diagnostic tag logged at entry so repro logcat can
      * distinguish the driving caller.
-     *
-     * @param source diagnostic tag identifying the caller (e.g. "effect-load",
-     *   "chatvm-load"); logged at entry for root-cause attribution. Defaults to
-     *   "unknown" for backward compatibility.
      */
     fun open(sid: String, directory: String? = null, source: String = "unknown") =
         streamLifecycleSupervisor.open(sid, directory, source)
