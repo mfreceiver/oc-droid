@@ -2,6 +2,7 @@ package cn.vectory.ocdroid.ui.theme
 
 import androidx.compose.foundation.layout.Column
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -123,7 +124,9 @@ fun AppConfirmDialog(
             TextButton(onClick = onConfirm, enabled = confirmEnabled) {
                 Text(
                     text = confirmText,
-                    color = if (destructive) {
+                    color = if (!confirmEnabled) {
+                        LocalContentColor.current   // disabled → TextButton 的禁用 content color 生效
+                    } else if (destructive) {
                         MaterialTheme.colorScheme.error
                     } else {
                         MaterialTheme.colorScheme.primary

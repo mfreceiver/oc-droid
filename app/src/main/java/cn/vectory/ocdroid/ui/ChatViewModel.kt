@@ -642,8 +642,13 @@ class ChatViewModel @Inject constructor(
                 break
             }
             try {
-                withTimeout(15_000L) {
+                val result = withTimeout(15_000L) {
                     core.repository.abortSession(id)
+                }
+                if (result.isFailure) {
+                    // repository 用 Result.failure 编码网络/HTTP 失败（非异常），必须计入 partial
+                    DebugLog.w("Abort", "abortSessionRecursive: result failure for $id: ${result.exceptionOrNull()?.message}")
+                    perNodeFailures++
                 }
             } catch (e: TimeoutCancellationException) {
                 DebugLog.w("Abort", "abortSessionRecursive: timeout for $id")
@@ -697,7 +702,12 @@ class ChatViewModel @Inject constructor(
 
             try {
                 withTimeout(10_000L) {
-                    val children = core.repository.getChildren(current).getOrDefault(emptyList())
+                    val childrenResult = core.repository.getChildren(current)
+                    if (childrenResult.isFailure) {
+                        // getChildren 用 Result.failure 编码失败；getOrDefault 会吞掉，须显式标记
+                        hadErrors = true
+                    }
+                    val children = childrenResult.getOrDefault(emptyList())
                     children.forEach { child ->
                         if (child.id !in visited) queue.add(child.id)
                     }

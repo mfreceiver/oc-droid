@@ -1996,4 +1996,44 @@ class ChatViewModelTest : MainViewModelTestBase() {
         }
     }
 
+    @Test
+    fun `abortSessionRecursive emits partial error when child abort returns Result failure`() = runTest {
+        val child = Session(id = "child-1", directory = "/proj", parentId = "root")
+        val root = Session(id = "root", directory = "/proj")
+        coEvery { repository.abortSession("root") } returns Result.success(Unit)
+        // Production failure contract: Result.failure, not a thrown exception
+        coEvery { repository.abortSession("child-1") } returns Result.failure(IOException("net fail"))
+        coEvery { repository.getChildren(any()) } returns Result.success(emptyList())
+
+        val core = createCore()
+        val chatVM = ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
+        core.writeSessionList { it.copy(sessions = listOf(root, child)) }
+
+        chatVM.abortSessionRecursive("root")
+        advanceUntilIdle()
+
+        val lastErr = core.lastErrorEvent
+        assertNotNull("Result.failure abort must emit partial error event", lastErr)
+        assertEquals(R.string.error_abort_recursive_partial, lastErr!!.resId)
+    }
+
+    @Test
+    fun `abortSessionRecursive emits partial error when getChildren fetch returns Result failure`() = runTest {
+        val root = Session(id = "root", directory = "/proj")
+        coEvery { repository.abortSession(any()) } returns Result.success(Unit)
+        // Local subtree is just root (size<=1) → cold-start fetch fallback runs.
+        coEvery { repository.getChildren(any()) } returns Result.failure(IOException("fetch fail"))
+
+        val core = createCore()
+        val chatVM = ChatViewModel(core, mockk<BannerHysteresisOwner>(relaxed = true) { every { state } returns MutableStateFlow(BannerHysteresisState()) })
+        core.writeSessionList { it.copy(sessions = listOf(root)) }
+
+        chatVM.abortSessionRecursive("root")
+        advanceUntilIdle()
+
+        val lastErr = core.lastErrorEvent
+        assertNotNull("getChildren Result.failure must emit partial error event", lastErr)
+        assertEquals(R.string.error_abort_recursive_partial, lastErr!!.resId)
+    }
+
 }

@@ -71,7 +71,13 @@ internal class InteractionGateway(
     }
 
     suspend fun abortSession(sessionId: String): Result<Unit> =
-        runSuspendCatching { mutationApi.abortSession(sessionId) }
+        runSuspendCatching {
+            val response = mutationApi.abortSession(sessionId)
+            if (!response.isSuccessful) {
+                val errorBody = response.errorBody()?.string() ?: response.message()
+                throw Exception("Abort failed ${response.code()}: $errorBody")
+            }
+        }
 
     suspend fun summarizeSession(
         sessionId: String,
