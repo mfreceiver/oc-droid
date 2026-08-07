@@ -254,11 +254,14 @@ internal fun rememberChatDerivedState(
     }
 
     // ── Context usage (:531-539) — write-during-composition preserved ─────
-    val computedContextUsage: ContextUsage? = remember(
-        renderedMessages.value,
-    ) {
+    // Recompute every composition (matches 45dfe0db:ChatScaffold.kt:531 —
+    // freshness over memoization: computeContextUsage reads both renderedMessages
+    // AND providers, so a host-switch / provider refresh updates context usage
+    // even when messages are unchanged). The write-through into
+    // cachedContextUsageState below is the pre-existing §L5a smell preserved
+    // verbatim (follow-up F2).
+    val computedContextUsage: ContextUsage? =
         computeContextUsage(renderedMessages.value, settingsState.value.providers)
-    }
     // §L5a: cachedContextUsage is a MUTABLE State handle fed to
     // rememberChatTopBarState. The write-through below is the pre-existing
     // smell (:537-539) — preserved verbatim (follow-up F2).
