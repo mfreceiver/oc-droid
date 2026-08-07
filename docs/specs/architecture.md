@@ -109,12 +109,12 @@ L4+（协调 / service / UI）**禁读裸 `repository.isSlimMode`**，改读**�
 源自 `T3RepositoryExtractFreezeTest`（反射锁 ~40 公共方法 + `slimStateLock` 字段 + FQN）与 L4a0：
 
 - **I5 `slimStateLock` 单实例**：domain-delegate 与门面同锁；`Slim*Source` 经 lambda 回调，**禁自建锁 / 状态机**。
-- **I6 `configure()` 原子事务**：`ticket → configureClientCert → hostConfig.configure → rebuildClients → completeSlimReconfigure → (source 束 / setSlimConnection 发布)` 不可拆、跨 legacy+slim、同一 `@Synchronized` monitor。
-- **I7 `@Synchronized` monitor 序列化**；**rev-4 双监视器锁序**：`TofuRepository` 自带 `@Synchronized`，经 OCR 回调 rebuild 走同一 monitor（反向锁序会死锁）。
+- **I6 `configure()` 原子事务**：`ticket → configureClientCert → hostConfig.configure → rebuildClients → completeSlimReconfigure → (source 束 / setSlimConnection 发布)` 不可拆、跨 legacy+slim。**§concurrency-refactor**：`configure()` 不再整体 `@Synchronized`——阻塞计算（`resolveCandidateSsl` + `buildClientBundle`）在 `configureLock` 下、repo monitor 外跑（Phase 1）；仅 stamp + publish + `setSlimConnection`（Phase 2）在窄 `synchronized(this)` 内，事务原子性（publish 单 `@Volatile` 写 + stamp 配对）保持。
+- **I7 monitor 序列化 + 锁序**：`configureLock`（串行 `configure` body）→ `synchronized(this)`（Phase 2 publish），严格单向，禁反序；`publishClientBundle` / `commitIfConnectionCaptureCurrent` / `rebuildClients` 仍 `@Synchronized(this)`（不取 `configureLock`）。**rev-4 双监视器锁序**：`TofuRepository` 自带 `@Synchronized`，经 OCR 回调 rebuild 走同一 monitor（反向锁序会死锁）。
 - **I8 `serverCompatProfile` 写点**：`update()`/`updateSlimapi()`（probe 尾部）+ `setSlimConnection`（`configure` 受管扩展）。派生查询 / forwarder 只读。
 - **I15 token threading**：`SlimCommitToken` 外层 capture / 内层 require，端口化须原样穿透。
 - **I20 公共 FQN 向后兼容**：`OpenCodeApi`/`SSEClient`/`SlimapiContract`/`HostConfig` + 嵌套 `SlimCommitToken`/`StaleSlimCommitException`/`SlimReconfigureTicket`/`SupersededSlimReconfigureException` 不动；上游 import 零改（调用经门面 / L2 端口）。
-- **并发路由位 `@Volatile`**：`configure()` `@Synchronized` 内写、运行时 lock-free 读的可变 ref（`api`/`commandApi`/`mutationApi`/`sseClient`/`sessionSource`/`messageSource`）均 `@Volatile`；纯 builder 字段（`retrofit`/`*Http`，仅 `rebuildClients` 内写读）不加。
+- **并发路由位 `@Volatile`**：`configure()` 写、运行时 lock-free 读的可变 ref（`api`/`commandApi`/`mutationApi`/`sseClient`/`sessionSource`/`messageSource`）均 `@Volatile`；纯 builder 字段（`retrofit`/`*Http`，仅 `rebuildClients` 内写读）不加。**§concurrency-refactor**：`configure()` 写入仍在 `synchronized(this)`（Phase 2）/ `configureLock`（Phase 1）保护下；`currentSslConfig()` 已去 `@Synchronized`（读不可变 published bundle，非 mutable factory state）。
 - **freeze 行为保持**：端口化 / 能力化是纯加法 + 内部委托，公共签名 / 返回类型 / 错误语义（`Result` + `parseErrorCode` + `DebugLog.w` + rethrow）/ `X-Slimapi-Version=2`（不 bump）逐字不变。
 
 **v0.13.5 新增不变量（连接 / identity / SSE transport / 持久化 / 流式渲染）**：

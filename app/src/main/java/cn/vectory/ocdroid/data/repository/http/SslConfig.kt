@@ -213,6 +213,47 @@ class SslConfigFactory() {
     }
 
     /**
+     * §concurrency-refactor: publish a PRE-BUILT mTLS resolution onto the
+     * factory mirrors, replicating [configureClientCert] semantics EXACTLY but
+     * WITHOUT re-parsing the PKCS12 (the caller already parsed it once via
+     * [buildMutualTlsConfig], outside the repo monitor). Branch table —
+     * state-equivalent to [configureClientCert] (the SOLE allowed difference:
+     * on the success branch this reuses the caller's pre-built [MutualTLS]
+     * instance instead of re-parsing a new one — that reuse is precisely the
+     * point; the published state is identical, pinned by SslConfigFactoryTest's
+     * parity check — equal type + equal error state across all branches):
+     *  - [material] == null → clear [mutualTlsConfig] + [lastClientCertError]
+     *    (same as `configureClientCert(null)`).
+     *  - [material] != null + [resolved] != null → set [mutualTlsConfig] =
+     *    [resolved], clear [lastClientCertError] (same as the onSuccess arm).
+     *  - [material] != null + [resolved] == null → clear [mutualTlsConfig],
+     *    set [lastClientCertError] = [error] ?: "client cert load failed"
+     *    (same as the onFailure arm — PRESERVES the non-null fallback
+     *    asymmetry: the factory mirror is ALWAYS non-null on a failed load,
+     *    even when the throwing exception had no message).
+     *
+     * The [error] param mirrors [CandidateSsl.clientCertError] which is the
+     * raw `exception.message` (nullable); the `?: "client cert load failed"`
+     * fallback here reproduces configureClientCert's `it.message ?: …` exactly.
+     */
+    internal fun publishClientCertResolution(
+        material: ClientCertMaterial?,
+        resolved: SslConfig.MutualTLS?,
+        error: String?,
+    ) {
+        if (material == null) {
+            mutualTlsConfig = null
+            lastClientCertError = null
+        } else if (resolved != null) {
+            mutualTlsConfig = resolved
+            lastClientCertError = null
+        } else {
+            mutualTlsConfig = null
+            lastClientCertError = error ?: "client cert load failed"
+        }
+    }
+
+    /**
      * L7: 有状态解析（给 live client）：mTLS 优先；否则 trustAll 降级；
      * 否则 SystemDefault（公网证书静默放行）。
      * [hostPort] param KEPT for signature compat — callers still pass it;

@@ -78,6 +78,39 @@ class ClientBundle internal constructor(
     )
 
     /**
+     * §concurrency-refactor: structural copy that re-stamps ONLY [generation].
+     *
+     * Mirrors [withApisForTest]'s shape: every client / Retrofit / API / host /
+     * SSL value is carried over unchanged, and — CRITICALLY —
+     * [ownedGenerationClients] is shared so [retire] coverage is preserved on
+     * the stamped copy. One allocation; the pre-built bundle is never published
+     * (its [PLACEHOLDER_GENERATION] sentinel is discarded).
+     *
+     * Used by [OpenCodeRepository.configure] to build the OkHttp / SSL work
+     * OUTSIDE the repo monitor (Phase 1) with a throwaway generation, then stamp
+     * the real monotonic generation inside the narrow publish critical section
+     * (Phase 2).
+     */
+    internal fun withGeneration(generation: Long): ClientBundle = ClientBundle(
+        generation = generation,
+        hostSnapshot = hostSnapshot,
+        effectiveSslConfig = effectiveSslConfig,
+        clientCertError = clientCertError,
+        restHttp = restHttp,
+        restRetrofit = restRetrofit,
+        restApi = restApi,
+        sseHttp = sseHttp,
+        sseClient = sseClient,
+        commandHttp = commandHttp,
+        commandRetrofit = commandRetrofit,
+        commandApi = commandApi,
+        mutationHttp = mutationHttp,
+        mutationRetrofit = mutationRetrofit,
+        mutationApi = mutationApi,
+        ownedClients = ownedGenerationClients,
+    )
+
+    /**
      * Retire this generation exactly once. OkHttp clients own dispatchers and
      * connection pools, while the disk Cache is owned by RepositoryNetworkGraph
      * and therefore is never closed here.

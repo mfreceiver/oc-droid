@@ -136,6 +136,30 @@ class OpenCodeRepository @Inject constructor(
         effectiveSslConfig = networkGraph.sslConfigFactory.sslConfigFor(networkGraph.hostConfig.hostPort),
     )
 
+    /**
+     * §concurrency-refactor: serializes concurrent [configure] bodies against
+     * each other (all in-flight configures are mutually exclusive). The
+     * blocking SSL/OkHttp/client-cert compute phase ([resolveCandidateSsl] +
+     * [buildClientBundle]) runs UNDER this lock but NOT under the repo monitor
+     * (`synchronized(this)`), so Main-thread readers of the published volatile
+     * bundle no longer block on the blocking compute. Lock order is STRICTLY
+     * `configureLock → this` — the publish critical section (Phase 2) may
+     * acquire `this` while holding `configureLock`, but `configureLock` MUST
+     * NEVER be acquired while holding `this` (lock-order inversion → deadlock).
+     * See [configure].
+     *
+     * §rev-ds-🠮1 (scope accuracy): this lock covers [configure] ONLY.
+     * [rebuildClients] is `@Synchronized` on `this` and does NOT acquire this
+     * lock, so its compute is NOT mutually exclusive with [configure]'s
+     * Phase 1. [rebuildClients] currently has ZERO production call sites
+     * (dead code — grep-confirmed). Reviving it requires defining a lock
+     * protocol FIRST (e.g. acquiring `configureLock`), or its read of the
+     * factory mirror could race [configure]'s Phase-1 `configureTrustAll`
+     * write (torn "new trustAll + old mutualTlsConfig" — self-healing but
+     * observable).
+     */
+    private val configureLock = Any()
+
     /** Called while the repository monitor is held after a new bundle is published. */
     @Volatile
     internal var onBundlePublished: ((Long, String) -> Unit)? = null
@@ -522,6 +546,13 @@ class OpenCodeRepository @Inject constructor(
         }
     }
 
+    // §rev-ds-🟡4: this @Synchronized is LOAD-BEARING for the [rebuildClients]
+    // path (which calls publishClientBundle directly, relying on this monitor
+    // for mutual exclusion with readers). In the [configure] path it is
+    // redundant-but-harmless: configure's Phase 2 already holds synchronized(this)
+    // when calling this, and Java monitors are reentrant. Do NOT remove this
+    // annotation thinking "configure already holds the lock" — [rebuildClients]
+    // does not (it is @Synchronized on `this` only).
     @Synchronized
     private fun publishClientBundle(
         candidate: ClientBundle,
@@ -530,6 +561,18 @@ class OpenCodeRepository @Inject constructor(
         updateClientCert: Boolean = false,
         trustAll: Boolean = false,
         updateTrustAll: Boolean = false,
+        /**
+         * §concurrency-refactor: the pre-built [CandidateSsl] (config + error)
+         * computed OUTSIDE the repo monitor by [configure]'s Phase 1. When
+         * [updateClientCert] is true, the factory's mTLS mirror is published
+         * from this pre-built resolution via
+         * [SslConfigFactory.publishClientCertResolution] instead of
+         * re-invoking [SslConfigFactory.configureClientCert] (which would
+         * parse the PKCS12 a SECOND time, inside the monitor). Default null
+         * leaves the [rebuildClients] path (which passes
+         * `updateClientCert=false`) byte-for-byte unaffected.
+         */
+        clientCertResolution: CandidateSsl? = null,
     ) {
         val previous = currentClientBundle
         // This is the sole client-generation publication write.
@@ -549,7 +592,26 @@ class OpenCodeRepository @Inject constructor(
         // This mirror is updated only after the immutable bundle is published;
         // active clients and getters use the bundle's effective SSL value.
         if (updateClientCert) {
-            networkGraph.sslConfigFactory.configureClientCert(clientCert)
+            // §concurrency-refactor: publish the PRE-BUILT mTLS (parsed ONCE in
+            // resolveCandidateSsl, outside the monitor) instead of re-invoking
+            // configureClientCert (a second p12 parse inside the monitor). The
+            // three-branch semantics are byte-identical to configureClientCert:
+            //   clientCertResolution == null (rebuildClients path never sets
+            //   updateClientCert=true together with a null resolution) falls
+            //   back to configureClientCert for safety — but the only caller
+            //   that sets updateClientCert=true (configure) always supplies a
+            //   non-null resolution.
+            val resolution = clientCertResolution
+            if (resolution != null) {
+                val resolved = resolution.config as? SslConfig.MutualTLS
+                networkGraph.sslConfigFactory.publishClientCertResolution(
+                    material = clientCert,
+                    resolved = resolved,
+                    error = resolution.clientCertError,
+                )
+            } else {
+                networkGraph.sslConfigFactory.configureClientCert(clientCert)
+            }
         }
         if (updateTrustAll) {
             networkGraph.sslConfigFactory.configureTrustAll(trustAll)
@@ -593,8 +655,19 @@ class OpenCodeRepository @Inject constructor(
      * switching from an mTLS profile to a plain profile stops presenting
      * the cert (no residue). MUST run before [rebuildClients] so the rebuilt
      * OkHttp clients pick up the new SSL config.
+     *
+     * §concurrency-refactor: the method is NO LONGER `@Synchronized`. The
+     * blocking SSL/OkHttp/client-cert compute phase (Phase 1) now runs under
+     * [configureLock] but OUTSIDE the repo monitor (`synchronized(this)`),
+     * so Main-thread readers of the published volatile bundle no longer
+     * block on it. The design verified the Phase-1 compute reads NO shared
+     * mutable state ([resolveCandidateSsl] is pure — never reads the held
+     * mTLS cache; [buildClientBundle] builds from the immutable candidate
+     * snapshot), so narrowing the monitor is safe. Only the generation stamp
+     * + volatile publish + [onBundlePublished] dispatch + [setSlimConnection]
+     * (Phase 2) run under `synchronized(this)`, preserving the C3
+     * stamp-pairing contract. Lock order is strictly [configureLock] → this.
      */
-    @Synchronized
     fun configure(
         baseUrl: String,
         username: String? = null,
@@ -617,9 +690,24 @@ class OpenCodeRepository @Inject constructor(
          * candidate SSL config reflects trust-all when no mTLS is active.
          */
         trustAll: Boolean = false,
-    ) {
+    ) = synchronized(configureLock) {
+        // ── Phase 1: compute (under configureLock; NOT under the repo monitor) ──
+        // The blocking SSL/OkHttp/client-cert work (resolveCandidateSsl +
+        // buildClientBundle) lives here. resolveCandidateSsl is PURE (its
+        // invariant — never reads the held mTLS cache — is the load-bearing
+        // fact behind the lock narrowing). The PKCS12 is parsed ONCE here;
+        // the pre-built MutualTLS is carried into Phase 2 and published via
+        // publishClientCertResolution (no second parse inside the monitor).
+
         // L7: set trustAll on the factory BEFORE resolveCandidateSsl so the
         // candidate SSL config (built via sslConfigFor) reflects the flag.
+        // §concurrency-refactor: relocated from the old @Synchronized body into
+        // Phase 1 (under configureLock, outside synchronized(this)) for ZERO
+        // behavior delta. Redundant on the success path (publishClientBundle
+        // writes the same value) but observable on the FAILURE path (a failed
+        // configure today still flips the volatile trustAllEnabled). It's a
+        // volatile write; no reader pairs it with monitor-held state. Do NOT
+        // delete it.
         networkGraph.sslConfigFactory.configureTrustAll(trustAll)
         // P11: build every component from one immutable candidate snapshot.
         // Neither HostConfig nor the held SSL certificate state is changed
@@ -633,49 +721,66 @@ class OpenCodeRepository @Inject constructor(
             trustAllHost = trustAll,
         )
         val candidateSsl = resolveCandidateSsl(candidateSnapshot.hostPort, clientCert, trustAll)
-        val current = requireClientBundle()
-        val candidate = buildClientBundle(
+        val preBuilt = buildClientBundle(
             hostSnapshot = candidateSnapshot,
-            generation = current.generation + 1L,
+            generation = PLACEHOLDER_GENERATION,   // sentinel; NEVER published — Phase 2 stamps the real gen
             effectiveSslConfig = candidateSsl.config,
             clientCertError = candidateSsl.clientCertError,
         )
-        // Atomic client publication, then old-generation retirement. The
-        // source/readiness publication below remains after completion.
-        publishClientBundle(
-            candidate = candidate,
-            hostSnapshot = candidateSnapshot,
-            clientCert = clientCert,
-            updateClientCert = true,
-            trustAll = trustAll,
-            updateTrustAll = true,
-        )
-        // Wave2-cleanup: sessionSource/messageSource routing layer removed.
-        // getSessions/getSessionsForDirectory branch on serverCompatProfile.slimConnection
-        // directly; getMessagesPagedImpl calls api.getMessages() inline.
-        // ι-A (capability read-model): 发布能力 mode 仅在整条 ssl/host/client/readiness
-        // 事务全成功后。configure() 是 fail-forward（不回滚旧 networkGraph.hostConfig），
-        // 但能力模型只反映"最近一次成功 live 的 mode"，与 readiness 同语义。
-        //
-        // 受管写点（I8 扩展）：本行是 setSlimConnection 的唯一受管调用方；与 probe
-        // 写点（update/updateSlimapi，由 checkHealthFor / probeSlimapiHealth 尾部调用）
-        // 并列。仍在 configure() @Synchronized monitor 内（I5/I6/I7 不变量保持）。
-        // reconfigure 中途（新栈未确认前）slimConnection 仍报旧 mode = 仍 operative 的
-        // 旧连接；L4+ 无锁读到的始终是"当前仍 live 的 mode"。mode 在此刻 authoritatively
-        // 确立（= networkGraph.hostConfig.slim），不能从 serverCompatProfile 现有字段推导（legacy 模式
-        // 下 slimapi* 全 null；slim 模式首次 health 成功前 slimapi* 也全 null）。
-        serverCompatProfile.setSlimConnection(slim)
+
+        // ── Phase 2: stamp + publish (narrow critical section under the repo monitor) ──
+        synchronized(this) {
+            // Stamp the real monotonic generation (prev + 1) onto the pre-built
+            // bundle. withGeneration carries ownedGenerationClients so retire()
+            // coverage is preserved on the stamped copy.
+            val candidate = preBuilt.withGeneration(requireClientBundle().generation + 1L)
+            // Atomic client publication, then old-generation retirement. The
+            // source/readiness publication below remains after completion.
+            publishClientBundle(
+                candidate = candidate,
+                hostSnapshot = candidateSnapshot,
+                clientCert = clientCert,
+                clientCertResolution = candidateSsl,
+                updateClientCert = true,
+                trustAll = trustAll,
+                updateTrustAll = true,
+            )
+            // Wave2-cleanup: sessionSource/messageSource routing layer removed.
+            // getSessions/getSessionsForDirectory branch on serverCompatProfile.slimConnection
+            // directly; getMessagesPagedImpl calls api.getMessages() inline.
+            // ι-A (capability read-model): 发布能力 mode 仅在整条 ssl/host/client/readiness
+            // 事务全成功后。configure() 是 fail-forward（不回滚旧 networkGraph.hostConfig），
+            // 但能力模型只反映"最近一次成功 live 的 mode"，与 readiness 同语义。
+            //
+            // 受管写点（I8 扩展）：本行是 setSlimConnection 的唯一受管调用方；与 probe
+            // 写点（update/updateSlimapi，由 checkHealthFor / probeSlimapiHealth 尾部调用）
+            // 并列。仍在 configure() 同步块内（I5/I6/I7 不变量保持）——§concurrency-refactor
+            // 将其留在 synchronized(this) 内（Phase 2），AFTER publish，不在 failure path。
+            // reconfigure 中途（新栈未确认前）slimConnection 仍报旧 mode = 仍 operative 的
+            // 旧连接；L4+ 无锁读到的始终是"当前仍 live 的 mode"。mode 在此刻 authoritatively
+            // 确立（= networkGraph.hostConfig.slim），不能从 serverCompatProfile 现有字段推导（legacy 模式
+            // 下 slimapi* 全 null；slim 模式首次 health 成功前 slimapi* 也全 null）。
+            serverCompatProfile.setSlimConnection(slim)
+        }
     }
 
     /**
      * §2.4: the current effective [SslConfig] for the live host (mTLS priority
      * over trust-all, SystemDefault safe fallback). Callers
      * ([HttpImageHolder] / cold-start image sync) use this to mirror the same
-     * trust policy onto the markdown image client. `@Synchronized` because it
-     * reads the mutable [networkGraph.sslConfigFactory] state that [configure] writes under
-     * the same monitor (v3-glmer R2).
+     * trust policy onto the markdown image client.
+     *
+     * §concurrency-refactor: NO LONGER `@Synchronized`. It reads the immutable
+     * published bundle's [ClientBundle.effectiveSslConfig] (via
+     * [ConnectionGateway.currentSslConfig] → [bundleProvider]), NOT the
+     * mutable [SslConfigFactory] state — the old `@Synchronized` + "reads the
+     * mutable sslConfigFactory state" kdoc rationale (v3-glmer R2) was
+     * stale/wrong. The published bundle is a single volatile reference to a
+     * fully-constructed immutable object, so the read is lock-free and
+     * self-consistent (every field is observed together). Removing the monitor
+     * eliminates Main-thread blocking for the `currentSslConfig()` readers
+     * (ConnectionActions / HostProfileController) entirely.
      */
-    @Synchronized
     override fun currentSslConfig(): SslConfig = connectionGateway.currentSslConfig()
 
     /**
@@ -1305,6 +1410,17 @@ class OpenCodeRepository @Inject constructor(
          * to pass without change.
          */
         const val DEFAULT_SERVER = HostConfig.DEFAULT_SERVER
+
+        /**
+         * §concurrency-refactor: sentinel generation stamped onto the
+         * pre-built [ClientBundle] (Phase 1, outside the repo monitor). It is
+         * NEVER published — Phase 2 calls [ClientBundle.withGeneration] with
+         * the real monotonic `prev + 1` before the volatile write. A negative
+         * value is chosen so any accidental leak (a pre-built bundle escaping
+         * the narrow publish section) is trivially distinguishable from a real
+         * generation (which starts at 0 and is monotonically increasing).
+         */
+        private const val PLACEHOLDER_GENERATION = -1L
 
         /**
          * §session-scope-narrow: cold-start / resync `/slimapi/sessions` page

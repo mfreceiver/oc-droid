@@ -9,6 +9,7 @@ import okhttp3.tls.HeldCertificate
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -264,5 +265,142 @@ class SslConfigFactoryTest {
         val held = factory.sslConfigFor(null)
         assertTrue(held is SslConfig.MutualTLS)
         assertTrue("resolveProbe result is a fresh build, not the held cache", probe !== held)
+    }
+
+    // ── publishClientCertResolution (§concurrency-refactor) ──────────────────
+
+    /**
+     * §6.3 §concurrency-refactor: the new [SslConfigFactory.publishClientCertResolution]
+     * setter publishes a PRE-BUILT mTLS resolution onto the factory mirrors,
+     * replicating [configureClientCert] semantics EXACTLY without re-parsing the
+     * PKCS12. This block covers the three branches:
+     *  - null material → clear both mirrors.
+     *  - resolved MutualTLS → set mTLS, clear error.
+     *  - failed (resolved=null) → clear mTLS, set error (with the
+     *    "client cert load failed" fallback when the error message is null).
+     *
+     * It also pins the byte-identical parity between [configureClientCert] and
+     * [publishClientCertResolution] for the same inputs (the load-bearing
+     * guarantee that [configure] can swap the call without behavior change).
+     */
+    @Test
+    fun `publishClientCertResolution null material clears both mirrors`() {
+        val factory = SslConfigFactory()
+        // Seed a non-empty state first.
+        val ca = newRootCa()
+        val client = newSigned(ca)
+        factory.publishClientCertResolution(
+            material = ClientCertMaterial(p12(client, listOf(client.certificate, ca.certificate)), pw.toCharArray(), null),
+            resolved = buildMutualTlsConfig(
+                ClientCertMaterial(p12(client, listOf(client.certificate, ca.certificate)), pw.toCharArray(), null),
+            ),
+            error = null,
+        )
+        assertTrue("seed: mTLS held", factory.sslConfigFor(null) is SslConfig.MutualTLS)
+
+        // null material → clear both (mirrors configureClientCert(null)).
+        factory.publishClientCertResolution(material = null, resolved = null, error = null)
+
+        assertEquals("mutualTlsConfig cleared", SslConfig.SystemDefault, factory.sslConfigFor(null))
+        assertEquals("lastClientCertError cleared", null, factory.lastClientCertError)
+    }
+
+    @Test
+    fun `publishClientCertResolution resolved sets the pre-built mTLS and clears the error`() {
+        val factory = SslConfigFactory()
+        val ca = newRootCa()
+        val client = newSigned(ca)
+        val material = ClientCertMaterial(p12(client, listOf(client.certificate, ca.certificate)), pw.toCharArray(), null)
+        val preBuilt = buildMutualTlsConfig(material)
+
+        factory.publishClientCertResolution(material = material, resolved = preBuilt, error = null)
+
+        assertSame(
+            "factory must hold the EXACT pre-built MutualTLS instance (no second parse)",
+            preBuilt,
+            factory.sslConfigFor(null),
+        )
+        assertEquals("error cleared on resolved publish", null, factory.lastClientCertError)
+    }
+
+    @Test
+    fun `publishClientCertResolution failed with a message mirrors configureClientCert`() {
+        val factory = SslConfigFactory()
+        val badMaterial = ClientCertMaterial(ByteArray(8), pw.toCharArray(), null)
+
+        factory.publishClientCertResolution(material = badMaterial, resolved = null, error = "explicit parse error")
+
+        assertEquals(
+            "failed parse → SystemDefault (mTLS degraded)",
+            SslConfig.SystemDefault,
+            factory.sslConfigFor(null),
+        )
+        assertEquals(
+            "failed parse with message → that exact message",
+            "explicit parse error",
+            factory.lastClientCertError,
+        )
+    }
+
+    @Test
+    fun `publishClientCertResolution failed with null message falls back to the canonical message`() {
+        val factory = SslConfigFactory()
+        val badMaterial = ClientCertMaterial(ByteArray(8), pw.toCharArray(), null)
+
+        // error=null models a throwing exception whose .message was null. The
+        // factory mirror MUST substitute the non-null fallback (configureClientCert
+        // does `it.message ?: "client cert load failed"`); this asymmetry vs the
+        // nullable bundle field is preserved exactly.
+        factory.publishClientCertResolution(material = badMaterial, resolved = null, error = null)
+
+        assertEquals(
+            "null message → canonical non-null fallback on the factory mirror",
+            "client cert load failed",
+            factory.lastClientCertError,
+        )
+    }
+
+    @Test
+    fun `publishClientCertResolution is state-equivalent to configureClientCert for the same inputs`() {
+        // The load-bearing parity guarantee: for every (material, resolved-or-error)
+        // combination, publishClientCertResolution and configureClientCert leave
+        // the factory mirrors in the SAME state. This is what lets configure()
+        // swap configureClientCert → publishClientCertResolution with zero
+        // behavior delta (and parse the p12 once instead of twice).
+        val ca = newRootCa()
+        val client = newSigned(ca)
+        val goodMaterial = ClientCertMaterial(p12(client, listOf(client.certificate, ca.certificate)), pw.toCharArray(), null)
+        val preBuilt = buildMutualTlsConfig(goodMaterial)
+        val badMaterial = ClientCertMaterial(ByteArray(64) { it.toByte() }, pw.toCharArray(), null)
+        val badError = runCatching { buildMutualTlsConfig(badMaterial) }.exceptionOrNull()?.message
+
+        // Branch 1: resolved (good material). configureClientCert re-parses;
+        // publishClientCertResolution reuses preBuilt. sslConfigFor must be
+        // MutualTLS for both (different instances, same TYPE — re-parse builds
+        // a new object; that is the only allowed divergence).
+        val a1 = SslConfigFactory().apply { configureClientCert(goodMaterial) }
+        val b1 = SslConfigFactory().apply { publishClientCertResolution(goodMaterial, preBuilt, null) }
+        assertTrue("configureClientCert resolved → MutualTLS", a1.sslConfigFor(null) is SslConfig.MutualTLS)
+        assertTrue("publishClientCertResolution resolved → MutualTLS", b1.sslConfigFor(null) is SslConfig.MutualTLS)
+        assertEquals("both clear error on resolved", null, a1.lastClientCertError)
+        assertEquals("both clear error on resolved", null, b1.lastClientCertError)
+
+        // Branch 2: failed (bad material). Both must degrade identically.
+        val a2 = SslConfigFactory().apply { configureClientCert(badMaterial) }
+        val b2 = SslConfigFactory().apply { publishClientCertResolution(badMaterial, null, badError) }
+        assertEquals("both degrade to SystemDefault", a2.sslConfigFor(null), b2.sslConfigFor(null))
+        assertEquals(
+            "both carry the SAME error message (one parse, byte-identical)",
+            a2.lastClientCertError,
+            b2.lastClientCertError,
+        )
+
+        // Branch 3: null material. Both clear.
+        val a3 = SslConfigFactory().apply { configureClientCert(goodMaterial); configureClientCert(null) }
+        val b3 = SslConfigFactory().apply { publishClientCertResolution(goodMaterial, preBuilt, null); publishClientCertResolution(null, null, null) }
+        assertEquals("both clear mTLS", SslConfig.SystemDefault, a3.sslConfigFor(null))
+        assertEquals("both clear mTLS", SslConfig.SystemDefault, b3.sslConfigFor(null))
+        assertEquals("both clear error", null, a3.lastClientCertError)
+        assertEquals("both clear error", null, b3.lastClientCertError)
     }
 }

@@ -10,12 +10,14 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNotSame
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import cn.vectory.ocdroid.data.repository.http.ClientCertMaterial
 import cn.vectory.ocdroid.data.repository.http.SlimapiContract
 import cn.vectory.ocdroid.util.TrafficLogger
 import cn.vectory.ocdroid.util.TrafficTracker
@@ -364,5 +366,223 @@ class OpenCodeRepositoryClientBundleTest {
         writer.join()
         readers.forEach { it.join() }
         failure.get()?.let { throw it }
+    }
+
+    // ── §concurrency-refactor: new coverage for the two-lock narrowing ──────
+
+    /**
+     * §6.1 §concurrency-refactor: concurrent configure storm.
+     *
+     * N threads each call [configure] with a distinct host. Because [configure]
+     * serializes its bodies on `configureLock`, the publishes are observed
+     * exactly N times with strictly-increasing consecutive generations, and
+     * each published endpointFp matches one of the configured hosts. Concurrent
+     * readers (mirroring T3-3-C1-iv) continue to observe complete, consistent
+     * immutable bundles. This is the load-bearing test for the lock narrowing:
+     * it would fail (duplicate/missing/non-monotonic generations, or a reader
+     * seeing a partial bundle) had the [configureLock] + [ClientBundle.withGeneration]
+     * stamping been wired incorrectly.
+     */
+    @Test
+    fun `concurrent configure storm produces exactly N monotonic publishes with consistent readers`() {
+        val stormSize = 24
+        // Capture every publish under the monitor (onBundlePublished is invoked
+        // inside synchronized(this)). A synchronized list mirrors the
+        // single-writer-per-monitor contract; the test only reads it after join.
+        val publishes = java.util.Collections.synchronizedList(mutableListOf<Pair<Long, String>>())
+        repository.onBundlePublished = { generation, endpointFp ->
+            publishes += generation to endpointFp
+        }
+
+        val readerFailure = AtomicReference<Throwable?>(null)
+        val stopReaders = java.util.concurrent.atomic.AtomicBoolean(false)
+        val readers = (0 until 6).map {
+            thread {
+                while (!stopReaders.get()) {
+                    val bundle = repository.currentClientBundle() ?: continue
+                    try {
+                        // Every field of an immutable bundle is self-consistent:
+                        // the endpointFp (baseUrl) must match the Retrofit baseUrl
+                        // captured on the same object. A torn/partial read (which
+                        // the pre-refactor wide monitor could not produce, and the
+                        // narrowed monitor must ALSO not produce) breaks this.
+                        val trailing = bundle.hostSnapshot.baseUrl.substringAfterLast('/').ifBlank { "init" }
+                        if (trailing.startsWith("storm-")) {
+                            assertEquals(
+                                "Retrofit baseUrl must match the bundle's endpointFp",
+                                "${bundle.hostSnapshot.baseUrl}/",
+                                bundle.restRetrofit.baseUrl().toString(),
+                            )
+                        }
+                    } catch (error: Throwable) {
+                        readerFailure.compareAndSet(null, error)
+                    }
+                }
+            }
+        }
+
+        val writers = (0 until stormSize).map { index ->
+            thread {
+                repository.configure(
+                    baseUrl = server.url("/storm-$index/").toString().trimEnd('/'),
+                    username = "u-$index",
+                    password = "p-$index",
+                )
+            }
+        }
+        writers.forEach { it.join() }
+        stopReaders.set(true)
+        readers.forEach { it.join() }
+        readerFailure.get()?.let { throw it }
+
+        // Exactly N publishes (one per successful configure; configureLock
+        // serializes the bodies so no publish is lost or duplicated).
+        assertEquals("exactly $stormSize publishes captured", stormSize, publishes.size)
+        // Generations strictly increasing AND consecutive (1..N), proving the
+        // prev+1 stamping under synchronized(this) is race-free.
+        val generations = publishes.map { it.first }
+        assertEquals(
+            "generations must be the consecutive sequence 1..$stormSize",
+            (1L..stormSize.toLong()).toList(),
+            generations,
+        )
+        // Each published endpointFp matches a configured host (the storm used
+        // distinct /storm-i/ hosts); the set must be exactly the N hosts.
+        val expectedHosts = (0 until stormSize).map {
+            server.url("/storm-$it/").toString().trimEnd('/')
+        }.toSet()
+        assertEquals(
+            "every published endpointFp must match a configured host (no torn stamps)",
+            expectedHosts,
+            publishes.map { it.second }.toSet(),
+        )
+        // The final published bundle carries the highest generation.
+        val finalBundle = repository.currentClientBundle()!!
+        assertEquals(stormSize.toLong(), finalBundle.generation)
+    }
+
+    /**
+     * §6.2 §concurrency-refactor: cert-error parity.
+     *
+     * A corrupted p12 configured via [configure] must surface the SAME error
+     * message on BOTH the published bundle's [ClientBundle.clientCertError]
+     * (read via [OpenCodeRepository.lastClientCertError]) AND the factory's
+     * [SslConfigFactory.lastClientCertError] mirror. This proves the pre-built
+     * [CandidateSsl] resolution (parsed ONCE in Phase 1) feeds both the bundle
+     * field and the factory mirror via [publishClientCertResolution] — i.e. no
+     * second p12 parse produces a divergent message.
+     *
+     * For a corrupted p12, the throwing exception carries a non-null message,
+     * so both surfaces are equal AND non-null. The null-message →
+     * "client cert load failed" fallback asymmetry (factory non-null, bundle
+     * nullable) is covered directly in [SslConfigFactoryTest] on the new
+     * [SslConfigFactory.publishClientCertResolution] setter.
+     */
+    @Test
+    fun `corrupted p12 configure surfaces the same error on the bundle and the factory mirror`() {
+        val corrupted = ClientCertMaterial(ByteArray(64) { it.toByte() }, "bad-pw".toCharArray(), null)
+
+        repository.configure(
+            baseUrl = server.url("/").toString().trimEnd('/'),
+            clientCert = corrupted,
+        )
+
+        val bundle = repository.currentClientBundle()!!
+        assertNotNull("bundle must carry the client-cert error", bundle.clientCertError)
+
+        // Bundle-level surface (immutable published field).
+        val bundleError = repository.lastClientCertError
+        assertNotNull("repository.lastClientCertError (bundle mirror) must be non-null", bundleError)
+        assertEquals(
+            "bundle.clientCertError == repository.lastClientCertError (same published field)",
+            bundle.clientCertError,
+            bundleError,
+        )
+
+        // Factory-level mirror (the volatile lastClientCertError on the
+        // repository's SslConfigFactory, published via
+        // publishClientCertResolution — the new pre-built path).
+        val factoryError = repositoryFactoryLastClientCertError()
+        assertNotNull("factory.lastClientCertError must be non-null (corrupted p12)", factoryError)
+        assertEquals(
+            "bundle error and factory mirror must carry the IDENTICAL message " +
+                "(one parse, two byte-identical surfaces)",
+            bundle.clientCertError,
+            factoryError,
+        )
+        // mTLS degraded to non-MutualTLS on a failed parse.
+        assertTrue(
+            "effective SSL must NOT be MutualTLS after a failed cert parse",
+            bundle.effectiveSslConfig !is cn.vectory.ocdroid.data.repository.http.SslConfig.MutualTLS,
+        )
+    }
+
+    /**
+     * §6.4 §concurrency-refactor: [ClientBundle.withGeneration] structural test.
+     *
+     * Mirrors the [replaceClientBundleForTest] checks: a stamped copy shares
+     * every OkHttp client / Retrofit / API and the [ownedGenerationClients]
+     * retire coverage, while ONLY the generation changes. This is the contract
+     * [configure]'s Phase 2 relies on — a stamped copy must retire the SAME
+     * clients the pre-built bundle owned, or a subsequent configure would leak
+     * / wrong-retire clients.
+     */
+    @Test
+    fun `withGeneration stamps only the generation and shares retire-owned clients`() {
+        repository.configure(baseUrl = server.url("/gen0/").toString().trimEnd('/'))
+        val original = repository.currentClientBundle()!!
+
+        val stamped = original.withGeneration(original.generation + 100L)
+
+        // Only the generation changes.
+        assertNotSame("generation must change", original.generation, stamped.generation)
+        assertEquals(original.generation + 100L, stamped.generation)
+        // Host / SSL / error identity preserved.
+        assertSame(original.hostSnapshot, stamped.hostSnapshot)
+        assertSame(original.effectiveSslConfig, stamped.effectiveSslConfig)
+        assertEquals(original.clientCertError, stamped.clientCertError)
+        // Every OkHttp client / Retrofit / API is the SAME instance (one
+        // allocation; withGeneration is a structural copy, not a rebuild).
+        assertSame(original.restHttp, stamped.restHttp)
+        assertSame(original.restRetrofit, stamped.restRetrofit)
+        assertSame(original.restApi, stamped.restApi)
+        assertSame(original.sseHttp, stamped.sseHttp)
+        assertSame(original.sseClient, stamped.sseClient)
+        assertSame(original.commandHttp, stamped.commandHttp)
+        assertSame(original.commandRetrofit, stamped.commandRetrofit)
+        assertSame(original.commandApi, stamped.commandApi)
+        assertSame(original.mutationHttp, stamped.mutationHttp)
+        assertSame(original.mutationRetrofit, stamped.mutationRetrofit)
+        assertSame(original.mutationApi, stamped.mutationApi)
+
+        // Retire coverage is shared: the stamped copy carries the SAME
+        // ownedGenerationClients as the pre-built bundle (proven by the
+        // assertSame checks above — restHttp etc. are identical instances), so
+        // retiring the stamped copy — what a later configure does to the
+        // published bundle — tears down the SAME clients the pre-built bundle
+        // owned. isRetired proves the retire CAS fired on the stamped copy;
+        // the shared-instance asserts above prove a NON-sharing withGeneration
+        // (the regression this test guards) would FAIL them. (connectionCount
+        // is intentionally NOT asserted here — on a never-used client the pool
+        // is already empty, so such a check would be a vacuous tautology, and
+        // firing a real request to populate it would add network brittleness
+        // for no extra coverage given the assertSame checks already pin shared
+        // ownership.)
+        stamped.retire()
+        assertTrue("stamped copy is retired", stamped.isRetired)
+    }
+
+    /**
+     * Helper: read the repository's [SslConfigFactory.lastClientCertError]
+     * mirror via reflection (networkGraph is private; this mirrors
+     * RepositoryNetworkGraphTest's reflection access). The factory mirror is
+     * the volatile written by [publishClientCertResolution] under the publish
+     * critical section.
+     */
+    private fun repositoryFactoryLastClientCertError(): String? {
+        val graphField = OpenCodeRepository::class.java.getDeclaredField("networkGraph")
+        graphField.isAccessible = true
+        val graph = graphField.get(repository) as RepositoryNetworkGraph
+        return graph.sslConfigFactory.lastClientCertError
     }
 }
