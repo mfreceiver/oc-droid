@@ -65,9 +65,9 @@ abstract class MainViewModelTestBase {
      * T13 (round-2 review fix): the relaxed-mock poller wired into the core.
      * Tests that exercise [ControllerEffect.RequestPollerBackoff] /
      * [ControllerEffect.ResetPollerBackoff] dispatch verify on this mock
-     * via `verify { processStatusPoller.scheduleBackoff(any()) }`.
+     * via `verify { slimFanOutRetryScheduler.scheduleBackoff(any()) }`.
      */
-    protected lateinit var processStatusPoller: cn.vectory.ocdroid.service.streaming.ProcessStatusPoller
+    protected lateinit var slimFanOutRetryScheduler: cn.vectory.ocdroid.service.streaming.SlimFanOutRetryScheduler
         private set
 
     @Before
@@ -306,12 +306,12 @@ abstract class MainViewModelTestBase {
             // CP3 (notify Phase-0): SSE event stream + bridge.
             sseEventStream,
             sseEventBridge,
-            // T13 (round-2 review fix): ProcessStatusPoller — relaxed mock
+            // T13 (round-2 review fix): SlimFanOutRetryScheduler — relaxed mock
             // so AppCore's RequestPollerBackoff / ResetPollerBackoff
             // dispatch has somewhere to land. Tests that exercise the
             // backoff wiring (AppCoreDispatcherTest) verify on this mock.
-            mockk<cn.vectory.ocdroid.service.streaming.ProcessStatusPoller>(relaxed = true).also {
-                processStatusPoller = it
+            mockk<cn.vectory.ocdroid.service.streaming.SlimFanOutRetryScheduler>(relaxed = true).also {
+                slimFanOutRetryScheduler = it
             },
         )
         // §R-17 batch3e → §R18 Phase 4: side-channel Error/Success UiEvents

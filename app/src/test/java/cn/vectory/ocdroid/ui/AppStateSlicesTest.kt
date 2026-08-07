@@ -1,6 +1,3 @@
-@file:Suppress("DEPRECATION")
-// lastNavPage retained for the NavigationPrefs one-time migration; tests exercise the legacy path until the migration epic completes.
-
 package cn.vectory.ocdroid.ui
 
 import cn.vectory.ocdroid.data.model.FileDiff
@@ -181,24 +178,6 @@ class AppStateSlicesTest {
     // entire multi-gap replacement (the contract GapMarker + the GapFill
     // coordinator + the gap-aware render pipeline) was deleted in Task 4 —
     // catch-up now always merges the fetched window.
-
-    @Test
-    fun `NavState default lastNavPage is Sessions legacyPage`() {
-        // §home-hub T7-C5: the initial NavState now mirrors the home hub
-        // (Sessions) so cold start does not trigger a route hop. lastNavPage
-        // is the legacy integer projection of lastRoute (Sessions.legacyPage=1).
-        val n = cn.vectory.ocdroid.ui.NavState()
-        assertEquals(cn.vectory.ocdroid.ui.NavRoute.Sessions.legacyPage, n.lastNavPage)
-        assertEquals(cn.vectory.ocdroid.ui.NavRoute.Sessions.route, n.lastRoute)
-    }
-
-    @Test
-    fun `NavState copy`() {
-        val n1 = cn.vectory.ocdroid.ui.NavState(lastNavPage = 2)
-        val n2 = n1.copy(lastNavPage = 0)
-        assertEquals(2, n1.lastNavPage)
-        assertEquals(0, n2.lastNavPage)
-    }
 
     // ── §U-MN3: SessionListState.withProjection + copy propagation ─────────
 

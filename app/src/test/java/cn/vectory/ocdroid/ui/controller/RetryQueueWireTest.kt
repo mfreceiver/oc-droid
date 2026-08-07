@@ -351,7 +351,7 @@ class RetryQueueWireTest {
         val backoff = retryQueue()["s1"]?.backoffMs
         assertNotNull(backoff)
         assertTrue("backoff clamped to BACKOFF_MAX_MS (got $backoff)",
-            backoff!! <= cn.vectory.ocdroid.service.streaming.ProcessStatusPoller.BACKOFF_MAX_MS)
+            backoff!! <= cn.vectory.ocdroid.service.status.SlimFanOutBackoffPolicy.BACKOFF_MAX_MS)
     }
 
     @Test

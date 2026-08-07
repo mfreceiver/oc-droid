@@ -6,9 +6,10 @@ import android.content.SharedPreferences
  * L4b domain split of [SettingsManager] — NAVIGATION domain.
  *
  * Owns the current session id and the top-level navigation persistence
- * (last pager page + last shell route, including the first-read migration
- * from the legacy [KEY_LAST_NAV_PAGE] 0/1/2 integer to the [KEY_LAST_ROUTE]
- * route string).
+ * ([KEY_LAST_ROUTE] route string). The legacy [KEY_LAST_NAV_PAGE] integer
+ * key is now a read-only migration source — the [lastRoute] getter reads it
+ * on first access (no [KEY_LAST_ROUTE] present yet) as a one-shot migration
+ * to the route string. No public accessor exposes [KEY_LAST_NAV_PAGE].
  *
  * Behavior byte-identical to pre-split [SettingsManager]: same ESP instance,
  * same key strings, same `workspace → files` and unknown-route → chat
@@ -20,15 +21,6 @@ internal class NavigationPrefs(
     var currentSessionId: String?
         get() = encryptedPrefs.getString(KEY_SESSION_ID, null)
         set(value) = encryptedPrefs.edit().putString(KEY_SESSION_ID, value).apply()
-
-    /**
-     * Index of the last-opened top-level page in the phone HorizontalPager
-     * (0=Chat, 1=Sessions, 2=Settings). Restored on cold start so the user
-     * lands back on the screen they last used instead of always Chat.
-     */
-    var lastNavPage: Int
-        get() = encryptedPrefs.getInt(KEY_LAST_NAV_PAGE, 0).coerceIn(0, 2)
-        set(value) = encryptedPrefs.edit().putInt(KEY_LAST_NAV_PAGE, value.coerceIn(0, 2)).apply()
 
     /**
      * Stable top-level route persistence for AppShell (the sole shell; the

@@ -159,10 +159,6 @@ class SettingsManager @Inject constructor(
         get() = navigationPrefs.currentSessionId
         set(value) { navigationPrefs.currentSessionId = value }
 
-    var lastNavPage: Int
-        get() = navigationPrefs.lastNavPage
-        set(value) { navigationPrefs.lastNavPage = value }
-
     var lastRoute: String
         get() = navigationPrefs.lastRoute
         set(value) { navigationPrefs.lastRoute = value }

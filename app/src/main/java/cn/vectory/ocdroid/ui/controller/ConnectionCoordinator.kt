@@ -356,9 +356,12 @@ class ConnectionCoordinator(
      * transport (the foreground-return path re-probes and re-connects via the
      * health probe). Launched on the init scope — never runs during construction.
      *
-     * Phase 1 (后台驻留移除): the [ProcessStatusPoller.ensureRunning]
-     * background-polling start that USED to fire here was removed — background
-     * is now completely silent (0 polling). The SSE disconnect stays so a
+     * Phase 1 (后台驻留移除) + Batch-1 item 17: the
+     * [cn.vectory.ocdroid.service.streaming.SlimFanOutRetryScheduler]'s
+     * antecedent [ProcessStatusPoller.ensureRunning] background-polling start
+     * that USED to fire here was removed — background is now completely silent
+     * (0 polling). The loop machinery was deleted in item 17; the backoff +
+     * single-flight-retry seam is retained. The SSE disconnect stays so a
      * backgrounded app does not hold an open socket. Foreground return re-arms
      * SSE via the health probe's foreground monitor.
      */

@@ -15,20 +15,20 @@ import javax.inject.Singleton
  * NOT gate [SourceActivation.Rejected.Exhausted] (which fires on the FIRST
  * pre-ready break/completion — see [SourceActivation.Rejected.Exhausted],
  * NOT after 3 retries). The class survives as a schedule + jitter utility:
- *  - Production's sole main-source consumer is
- *    [ProcessStatusPoller.scheduleBackoff], which uses the companion
- *    [applyJitter] helper for its slim-fan-out backoff (a SEPARATE
- *    200ms-base exponential, NOT this 30s/2m/5m schedule — only the jitter
- *    math is shared).
+ *  - The slim-fan-out backoff math (200ms-base exponential + ±20% jitter) now
+ *    lives entirely in [cn.vectory.ocdroid.service.status.SlimFanOutBackoffPolicy]
+ *    (architecture-debt Batch 1 item 17); this class no longer participates in
+ *    that path. The former `applyJitter` companion helper was removed — its sole
+ *    consumer was the slim fan-out `scheduleBackoff`, which now inlines the
+ *    equivalent math via SlimFanOutBackoffPolicy.computeDelayMs.
  *  - The instance API ([attempts] / [baseDelayMs] / [delayMs]) is preserved
  *    for [SseRecoveryPolicyTest] and as a future reintroduction seam if the
  *    service-level retry is ever restored.
  *
  * **Contract**: the default schedule produces `30s / 2m / 5m` + ±20% jitter
  * (deterministic when [delayMs] receives `jitter = 0.0`, which the unit-test
- * fake does — production supplies a `Random`-backed implementation). Pure:
- * given (attempt, jitter) it returns the delay; no I/O; no clock side-effects.
- * [baseDelayMs] requires `attempt in 1..attempts`.
+ * fake does). Pure: given (attempt, jitter) it returns the delay; no I/O; no
+ * clock side-effects. [baseDelayMs] requires `attempt in 1..attempts`.
  */
 @Singleton
 open class SseRecoveryPolicy @Inject constructor() {
@@ -86,14 +86,5 @@ open class SseRecoveryPolicy @Inject constructor() {
 
         /** §5 step 6 unmodified schedule: 30s / 2m / 5m. */
         val DEFAULT_SCHEDULE_MS: LongArray = longArrayOf(30_000L, 120_000L, 300_000L)
-
-        /**
-         * Convenience for callers that round their own jitter to a delay
-         * (production uses [delayMs]).
-         */
-        fun applyJitter(base: Long, jitter: Float): Long {
-            val j = jitter.coerceIn(-0.2f, 0.2f)
-            return (base * (1.0f + j)).toLong().coerceAtLeast(0L)
-        }
     }
 }

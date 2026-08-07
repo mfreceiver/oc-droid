@@ -28,7 +28,6 @@ class B4RouteTransitionStateMachineTest {
     ): StoreState = StoreState.initial().copy(
         nav = NavState(
             lastRoute = chatRoute(sessionId),
-            lastNavPage = NavRoute.Chat.legacyPage,
             navEpoch = 1L,
         ),
         chatRouteInstance = routeInstance,

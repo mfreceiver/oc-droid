@@ -44,7 +44,7 @@ import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.Part
 import cn.vectory.ocdroid.data.model.isEffectivelyRenderableEmpty
-import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.data.repository.FileVcsRepository
 import cn.vectory.ocdroid.ui.ChatViewModel
 import cn.vectory.ocdroid.ui.ComposerViewModel
 import cn.vectory.ocdroid.ui.LoadedContent
@@ -136,7 +136,7 @@ internal fun ChatMessageList(
         if (routeContent != null) routeContent.hasMoreMessages else chatState.hasMoreMessages
     val olderMessagesCursor: String? =
         if (routeContent != null) routeContent.olderMessagesCursor else chatState.olderMessagesCursor
-    val repository: OpenCodeRepository = chatVM.repository
+    val fileVcsRepository: FileVcsRepository = chatVM.fileVcsRepository
     val workspaceDirectory: String? = currentSession?.directory
     val onLoadMore: () -> Unit = chatVM::loadMoreMessages
     val onToggleExpand: (String, Boolean) -> Unit = composerVM::togglePartExpand
@@ -326,7 +326,7 @@ internal fun ChatMessageList(
                                         parts = msgParts,
                                         streamingPartTexts = block.streamingPartTexts,
                                         streamingReasoningPartId = streamingReasoningPart?.id,
-                                        repository = repository,
+                                        repository = fileVcsRepository,
                                         workspaceDirectory = workspaceDirectory,
                                         onFileClick = onFileClick,
                                         onOpenSubAgent = onOpenSubAgent,

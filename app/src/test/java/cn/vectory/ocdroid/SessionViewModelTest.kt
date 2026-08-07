@@ -876,7 +876,7 @@ class SessionViewModelTest : MainViewModelTestBase() {
         // Set the active route to Chat so the no-op assertion can verify the
         // route stays Chat (without this the default route is already Sessions
         // and the assertion is vacuously true).
-        core.store.mutateNav { it.copy(lastRoute = NavRoute.Chat.route, lastNavPage = NavRoute.Chat.legacyPage) }
+        core.store.mutateNav { it.copy(lastRoute = NavRoute.Chat.route) }
 
         // Closing the parent (ancestor of current "child") → no-op.
         sessionVM.closeSession("parent")

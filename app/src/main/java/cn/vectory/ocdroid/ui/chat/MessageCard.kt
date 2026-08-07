@@ -100,6 +100,7 @@ import androidx.compose.ui.unit.dp
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.Part
+import cn.vectory.ocdroid.data.repository.FileVcsRepository
 import cn.vectory.ocdroid.ui.theme.AppConfirmDialog
 import cn.vectory.ocdroid.ui.theme.MenuItem
 
@@ -121,7 +122,7 @@ import cn.vectory.ocdroid.ui.theme.MenuItem
  *                to the body).
  * @param streamingReasoningPartId the active streaming reasoning part id
  *                (passed to the body).
- * @param repository the OpenCode repository (passed to the body).
+ * @param repository the FileVcs repository seam (passed to the body for markdown image resolution).
  * @param workspaceDirectory the session workdir (passed to the body).
  * @param onFileClick file-click callback (passed to the body).
  * @param onOpenSubAgent sub-agent open callback (passed to the body).
@@ -157,7 +158,7 @@ internal fun MessageCard(
     parts: List<Part>,
     streamingPartTexts: Map<String, String>,
     streamingReasoningPartId: String?,
-    repository: cn.vectory.ocdroid.data.repository.OpenCodeRepository,
+    repository: FileVcsRepository,
     workspaceDirectory: String?,
     onFileClick: (String) -> Unit,
     onOpenSubAgent: (String) -> Unit,

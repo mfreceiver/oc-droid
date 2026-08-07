@@ -196,35 +196,30 @@ class AppCore @Inject constructor(
      */
     private val sseEventBridge: SseEventBridge,
     /**
-     * T13 (round-2 review fix — AppCore dispatch): the process-level
-     * [ProcessStatusPoller], injected so [dispatchSessionSyncEffect] can
-     * route [ControllerEffect.RequestPollerBackoff] /
+     * Batch-1 item 17: the [SlimFanOutRetryScheduler], injected so
+     * [dispatchSessionSyncEffect] can route [ControllerEffect.RequestPollerBackoff] /
      * [ControllerEffect.ResetPollerBackoff] (emitted by
      * [SessionSyncCoordinator.applySlimStatusFanOutSummary]) to
-     * [ProcessStatusPoller.scheduleBackoff] /
-     * [ProcessStatusPoller.resetBackoff]. Without this wiring the emitted
-     * effects disappeared through the unhandled-effect warning path
-     * (rev-gpt round-1 review #6).
+     * [SlimFanOutRetryScheduler.scheduleBackoff] /
+     * [SlimFanOutRetryScheduler.resetBackoff].
      *
      * `@Singleton` (provided by
-     * [cn.vectory.ocdroid.service.streaming.ProcessStatusPollerModule]);
-     * AppCore receives the SAME instance [SessionStreamingService] injects
-     * (the L3 background loop owner) so the backoff state machine is
-     * process-coherent.
+     * [cn.vectory.ocdroid.service.streaming.SlimFanOutRetrySchedulerModule]).
      *
-     * **Phase 1 (后台驻留移除) inert-by-design note**: the poller's only
-     * production start path (`ConnectionCoordinator`'s background-transition
-     * `ensureRunning` call) was removed with the rest of the background
-     * polling subsystem — background is now fully silent. The class + this
-     * DI binding + the backoff effect handlers are RETAINED so a future
-     * foreground-degraded-polling path can re-wire `ensureRunning` without
-     * rebuilding the backoff/slim-fan-out machinery. Until then the poller
-     * loop never starts; `scheduleBackoff`/`resetBackoff`/`requestSlimFanOutRetry`
-     * mutate an inert instance's backoff state (no runtime effect, no
-     * regression — the foreground SSE-disconnect case was never covered by
-     * this poller, which was always background-started-only).
+     * **Shrink-and-rename (Batch 1 item 17)**: the dead 30s loop machinery
+     * ([startLoop]/[ensureRunning]/[startAndAwaitFirstPoll]) was deleted —
+     * the background-polling design was deliberately rejected in Phase 1
+     * (后台驻留移除). The retained backoff + single-flight-retry seam is the
+     * documented re-enablement vector for a future foreground-degraded-polling
+     * path. Currently the fan-out circuit has **no production entry trigger**:
+     * the runner is gated off by `slimPerSessionStatusEndpointAvailable=false`
+     * (see [StreamingModule] kdoc). `scheduleBackoff`/`resetBackoff`/
+     * `requestSlimFanOutRetry` mutate an inert instance's backoff state
+     * (no runtime effect — identical to the removed ProcessStatusPoller's
+     * behaviour at head dad3b3b2, where the whole effect circuit was a
+     * closed circuit with no entry; see archdebt-batch1-design §5.1).
      */
-    private val processStatusPoller: cn.vectory.ocdroid.service.streaming.ProcessStatusPoller,
+    private val slimFanOutRetryScheduler: cn.vectory.ocdroid.service.streaming.SlimFanOutRetryScheduler,
 ) {
     /**
      * §Wave2.1-split-l2 (rev-gpt APPROVED EXCEPTION): _lazy composition_ of the 5
@@ -1116,18 +1111,18 @@ class AppCore @Inject constructor(
          * slim fan-out sweep:
          *
          *  - [ControllerEffect.RequestPollerBackoff] (retryableCount > 0):
-         *    the poller schedules a bounded exponential + jitter backoff
+         *    the scheduler schedules a bounded exponential + jitter backoff
          *    for the next sweep AND launches a single-flight retry job
          *    that fires one sweep after the delay. The default jitter
-         *    sampler inside [ProcessStatusPoller.scheduleBackoff] kicks
+         *    sampler inside [SlimFanOutRetryScheduler.scheduleBackoff] kicks
          *    in (we do NOT pass jitter explicitly — see M2 fix).
          *  - [ControllerEffect.ResetPollerBackoff] (retryableCount == 0):
-         *    the poller resets its backoff state to base (the success
+         *    the scheduler resets its backoff state to base (the success
          *    path; symmetric so the state machine stays coherent across
          *    sweeps) AND cancels any pending retry (no stale retry on
          *    top of fresh data).
          *
-         * These effects carry no payload by design (the poller owns the
+         * These effects carry no payload by design (the scheduler owns the
          * backoff state + the retry job; the coordinator just reports
          * the sweep outcome).
          */
@@ -1137,15 +1132,15 @@ class AppCore @Inject constructor(
             // (200ms → 400ms → … → 30s cap, ±20% jitter). The retry is
             // single-flight (requestSlimFanOutRetry cancels any prior
             // pending retry before launching the new one).
-            val delayMs = processStatusPoller.scheduleBackoff()
-            processStatusPoller.requestSlimFanOutRetry(delayMs)
+            val delayMs = slimFanOutRetryScheduler.scheduleBackoff()
+            slimFanOutRetryScheduler.requestSlimFanOutRetry(delayMs)
             true
         }
         is ControllerEffect.ResetPollerBackoff -> {
             // §final-gate I-1 (oracle §3.7): a successful sweep cancels
             // any pending retry (no stale retry stacking on top of fresh
             // data) and resets the backoff state to base.
-            processStatusPoller.resetBackoff()
+            slimFanOutRetryScheduler.resetBackoff()
             true
         }
         else -> false

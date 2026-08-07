@@ -3,6 +3,7 @@ package cn.vectory.ocdroid.ui
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import cn.vectory.ocdroid.R
+import cn.vectory.ocdroid.data.repository.FileVcsRepository
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.ui.controller.ControllerEffect
 import cn.vectory.ocdroid.ui.controller.allSessionsById
@@ -112,7 +113,7 @@ class ChatViewModel @Inject constructor(
 
     /** §R-17 batch3e: repository exposed so ChatMessageList can pass it down
      *  to MessageRow without touching `.core.` from a Composable. */
-    val repository: OpenCodeRepository get() = core.repository
+    val fileVcsRepository: FileVcsRepository get() = core.repository
 
     // ── Chat-domain methods (bodies moved from AppCore) ─────────────────────
 

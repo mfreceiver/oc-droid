@@ -246,9 +246,10 @@ private fun opScopeValid(op: AuthorityOp, state: StoreState): Boolean {
  * SSE busy reliably arrives AFTER onSuccess and corrects; the false-busy
  * is largely unreachable there.
  *
- * **Recovery caveat**: ProcessStatusPoller starts ONLY on foreground→
- * background transition (ConnectionCoordinator), NOT in foreground steady
- * state. So a false busy on a foreground first-opened session may stick
+ * **Recovery caveat**: SlimFanOutRetryScheduler (fka ProcessStatusPoller)
+ * had its background loop deleted in Batch-1 item 17; the backoff/single-flight
+ * retry seam is preserved but currently has no production entry trigger.
+ * So a false busy on a foreground first-opened session may stick
  * until the next session activity or backgrounding — NOT a 30s self-heal.
  *
  * **Fix direction** (patch-level, deferred): capture a dispatch-time

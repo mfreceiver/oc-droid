@@ -395,7 +395,7 @@ class AppCoreDispatcherTest : MainViewModelTestBase() {
     fun `dispatchSessionSyncEffect handles RequestPollerBackoff by calling scheduleBackoff (T13 round-2 #6)`() {
         // Round-2 review fix #6: the coordinator emits
         // RequestPollerBackoff; AppCore MUST route it to
-        // processStatusPoller.scheduleBackoff() (the default-jitter arg
+        // slimFanOutRetryScheduler.scheduleBackoff() (the default-jitter arg
         // kicks in so production jitter samples — see M2). Without this
         // dispatch the emitted effect disappeared through the unhandled-
         // effect warning path.
@@ -407,7 +407,7 @@ class AppCoreDispatcherTest : MainViewModelTestBase() {
             "RequestPollerBackoff must be claimed by the session-sync dispatcher",
             handled,
         )
-        io.mockk.verify(exactly = 1) { processStatusPoller.scheduleBackoff() }
+        io.mockk.verify(exactly = 1) { slimFanOutRetryScheduler.scheduleBackoff() }
     }
 
     @Test
@@ -420,7 +420,7 @@ class AppCoreDispatcherTest : MainViewModelTestBase() {
             "ResetPollerBackoff must be claimed by the session-sync dispatcher",
             handled,
         )
-        io.mockk.verify(exactly = 1) { processStatusPoller.resetBackoff() }
+        io.mockk.verify(exactly = 1) { slimFanOutRetryScheduler.resetBackoff() }
     }
 
     @Test
@@ -435,7 +435,7 @@ class AppCoreDispatcherTest : MainViewModelTestBase() {
         core.effectBus.tryEmitEffect(ControllerEffect.RequestPollerBackoff)
         advanceUntilIdle()
 
-        io.mockk.verify(exactly = 1) { processStatusPoller.scheduleBackoff() }
+        io.mockk.verify(exactly = 1) { slimFanOutRetryScheduler.scheduleBackoff() }
         val unhandled = DebugLog.entries.value.filter {
             it.message.startsWith("unhandled effect=")
         }
