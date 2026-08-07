@@ -1,14 +1,34 @@
-// ChatScaffold.kt — Phase 1B chat shell. Replaces the chrome of ChatScreen
-// (the alert-dialog popups for agent/model pickers) with the new M3-native
-// surface (D.2/D.5): single TopAppBar + session-history icon + context chip,
-// ModalBottomSheet SessionPicker (D.4), Agent/Model AssistChips (D.3).
+// ChatScaffold.kt — Phase 1B chat shell (facade). The ~930-line god-composable
+// was split into 4 internal components following the existing
+// `rememberChatTopBarState` precedent (ChatTopBar.kt:195):
 //
-// PARITY (mandatory): ChatScaffold preserves the existing slice reads and
-// effects from ChatScreen verbatim. It only changes the chrome — the message
-// list, streaming overlay, gap-paging, scroll anchoring, draft lifecycle,
-// metadata-marker injection, and unread clearing are delegated to
-// ChatMessageList without re-implementing any of it. New state slice fields
-// New state slice fields are additive only.
+// Component map (all in `ui/chat/`):
+//
+//   ChatDerivedState.kt        — `rememberChatDerivedState(...)`
+//     ~20 cross-slice derived values as per-field `State<T>` properties.
+//     Route identity, session identity, context-usage, agent/model,
+//     activity/matching, host profile, drawer session list.
+//
+//   ChatChromeState.kt         — `rememberChatChromeState(...)`
+//     Chrome/overlay state: 4 rememberSaveable flags (slot-positionality
+//     preserved), 4 remember dialog flags, drawer state + actions,
+//     snackbar host, image picker.
+//
+//   ChatNavigationEffects.kt   — `ChatNavigationEffects(...)`
+//     Pure-effect host: checkpoint consume, reconcile state machine,
+//     parent/drawer BackHandlers (LIFO order), UiEvent snackbar,
+//     stale-notice snackbar, compacting auto-clear.
+//
+// Stays in ChatScaffold (~690 lines after split):
+//   - 11 collectAsStateWithLifecycle subscriptions
+//   - isWide/showSessionSidebar (tablet-responsive layout)
+//   - rememberChatTopBarState + topBarActions wiring
+//   - chatBodyContent lambda (composable tree)
+//   - SaveableStateHolder for sidebar / drawer branch
+//   - ChatDrawerHost / RecentSessionsPane / ChatOverlayHost wiring
+//   - Force-abort AppConfirmDialog
+//
+// §Item15b (archdebt-batch2): extraction completed 2026-08-08.
 
 package cn.vectory.ocdroid.ui.chat
 
