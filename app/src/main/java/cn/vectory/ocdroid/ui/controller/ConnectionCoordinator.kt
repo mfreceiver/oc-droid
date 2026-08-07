@@ -179,6 +179,16 @@ class ConnectionCoordinator(
      * null resolve instead of falling back to stale settings).
      */
     private val effectiveConnectionConfigResolver: cn.vectory.ocdroid.service.streaming.EffectiveConnectionConfigResolver? = null,
+    /**
+     * §network-off-main: forwarded to [healthProbe] so its network I/O hops
+     * (`repository.checkHealth()` / `connectionBootstrapEngine.bootstrap()`)
+     * run on [Dispatchers.IO] in production. Production Hilt
+     * ([cn.vectory.ocdroid.di.ControllerModule]) passes [Dispatchers.IO]
+     * explicitly; tests omit it (null) so the probe reuses the injected
+     * TestScope's dispatcher and stays deterministic. See
+     * [ConnectionHealthProbe.ioDispatcher].
+     */
+    private val ioDispatcher: kotlinx.coroutines.CoroutineDispatcher? = null,
 ) {
     /**
      * L4c (Wave ζ): the health-probe concern (testConnection /
@@ -317,6 +327,7 @@ class ConnectionCoordinator(
         effectiveConnectionConfigResolver = effectiveConnectionConfigResolver,
         awaitPendingReconfigureTeardown = ::awaitPendingReconfigureTeardown,
         onProbeCoroutineStartedHook = { onProbeCoroutineStarted?.invoke() },
+        ioDispatcher = ioDispatcher,
     )
 
     /**

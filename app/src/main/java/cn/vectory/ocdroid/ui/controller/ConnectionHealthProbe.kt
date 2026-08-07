@@ -21,10 +21,13 @@ import cn.vectory.ocdroid.ui.UiEvent
 import cn.vectory.ocdroid.ui.errorMessageOrFallback
 import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.SettingsManager
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 
 /**
@@ -127,8 +130,42 @@ internal class ConnectionHealthProbe(
      * gap the old inside-lock handoff seam could not capture). Default `{}`.
      */
     private val onProbeCoroutineStartedHook: () -> Unit = {},
+    /**
+     * §network-off-main: the dispatcher used for the network I/O hops in
+     * [testConnection] (`repository.checkHealth()`) and
+     * [testConnectionWithEngine] (`connectionBootstrapEngine.bootstrap()`).
+     *
+     * **Production** wires this to [Dispatchers.IO] via Hilt
+     * ([cn.vectory.ocdroid.di.ControllerModule]) so blocking network I/O
+     * (OkHttp client build / SSL / DNS / REST) is moved OFF the Main-bound
+     * [scope] ([cn.vectory.ocdroid.di.UiApplicationScope] =
+     * [Dispatchers.Main.immediate]). Without this hop, StrictMode throws
+     * NetworkOnMainThreadException, the probe failure path writes
+     * Disconnected, and the reprobe controller escalates backoff forever —
+     * even though the SSE/TokenStream connection is healthy.
+     *
+     * **Tests** omit it (null) → [networkDispatcher] falls back to the [scope]'s
+     * own dispatcher (the injected TestScope, or Dispatchers.Main replaced by
+     * [cn.vectory.ocdroid.MainDispatcherRule]). This keeps the network hops as
+     * no-ops on the test dispatcher so deterministic
+     * `testScheduler.advanceUntilIdle()` semantics are preserved — a real
+     * Dispatchers.IO hop would race the test scheduler and flake every probe
+     * assertion. Default `null` preserves legacy/test construction unchanged.
+     */
+    private val ioDispatcher: CoroutineDispatcher? = null,
 ) {
     private var lastHealthCheckTime = 0L
+
+    /**
+     * §network-off-main: the resolved dispatcher for the [withContext] network
+     * hops. Explicit [ioDispatcher] (production IO wiring) wins; otherwise the
+     * [scope]'s own interceptor (test dispatcher) is reused so tests stay
+     * deterministic; final fallback [Dispatchers.IO]. See [ioDispatcher] doc.
+     */
+    private val networkDispatcher: CoroutineDispatcher =
+        ioDispatcher
+            ?: (scope.coroutineContext[kotlin.coroutines.ContinuationInterceptor] as? CoroutineDispatcher)
+            ?: Dispatchers.IO
 
     // ── State sync helpers (mirror orchestrator.writeConnection) ──
 
@@ -276,7 +313,18 @@ internal class ConnectionHealthProbe(
                     // testConnectionWithEngine (~L499). null when identityStore is
                     // absent (legacy/test construction — no generation to guard).
                     val probeEpoch = identityStore?.currentEpoch()
-                    val healthResult = repository.checkHealth()
+                    // §network-off-main: the probe coroutine runs on the Main-
+                    // bound UiApplicationScope (Dispatchers.Main.immediate) so
+                    // slice writes stay single-threaded. checkHealth()'s REST
+                    // path (bundle.restApi.getHealth()) and the synchronous
+                    // OkHttp client / SSL / DNS init in its bundleProvider()
+                    // call graph perform blocking network I/O that StrictMode
+                    // rejects with NetworkOnMainThreadException. Hop to IO for
+                    // the network call ONLY — probeEpoch stays captured on Main
+                    // BEFORE the suspend (epoch-CAS invariant), and the entire
+                    // when/success body below stays on Main (slice writes /
+                    // onSettled / loadInitialData / startSSE).
+                    val healthResult = withContext(networkDispatcher) { repository.checkHealth() }
                     if (healthResult.isSuccess) {
                         val health = healthResult.getOrNull()
                         if (health != null && health.healthy) {
@@ -508,7 +556,21 @@ internal class ConnectionHealthProbe(
                     // the engine returns a ConnectionIdentity (Success); Failed
                     // carries no identity, so we fall back to epoch comparison.
                     val probeEpoch = identityStore?.currentEpoch()
-                    when (val outcome = engine.bootstrap()) {
+                    // §network-off-main: engine.bootstrap() drives
+                    // repository.configure() (OkHttp client + SSL/cert init +
+                    // captureServerCert) and repository.checkHealth() — its full
+                    // call graph performs blocking network I/O. The probe
+                    // coroutine runs on Main.immediate (UiApplicationScope), so
+                    // bootstrap() on Main trips NetworkOnMainThreadException,
+                    // which the failure path misclassifies as "server
+                    // unreachable" → Disconnected → reprobe backoff spiral even
+                    // though SSE/TokenStream are healthy. Hop ONLY the bootstrap
+                    // call to IO; probeEpoch stays captured on Main BEFORE the
+                    // suspend (stale-identity epoch guard invariant), and the
+                    // entire when body below (writeConnection / onSettled /
+                    // loadInitialData / connectSseAndAwait) stays on Main.
+                    val outcome = withContext(networkDispatcher) { engine.bootstrap() }
+                    when (outcome) {
                         is ConnectionBootstrapOutcome.Success -> {
                             loadInitialData()
                             // L1 FGS commit 1: connect the SSE owner directly

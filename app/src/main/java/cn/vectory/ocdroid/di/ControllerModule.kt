@@ -418,6 +418,11 @@ object ControllerModule {
         // testConnection path resolves the URL through the single authority,
         // matching the engine + token-stream factory.
         effectiveConnectionConfigResolver = effectiveConnectionConfigResolver,
+        // §network-off-main: wire Dispatchers.IO so the health-probe's network
+        // hops (engine.bootstrap / repository.checkHealth) run off the Main-
+        // bound UiApplicationScope — prevents NetworkOnMainThreadException.
+        // Tests omit ioDispatcher so the probe reuses the TestScope dispatcher.
+        ioDispatcher = kotlinx.coroutines.Dispatchers.IO,
     )
 
     /**
