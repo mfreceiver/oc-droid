@@ -569,8 +569,9 @@ internal fun ChatTopBar(
                         // About surfaces (`versionName` may include a git-hash
                         // suffix like `0.9.2-fb2fdff`, displayed verbatim).
                         val appName = stringResource(R.string.app_name)
-                        val titleText = if (versionName != null) {
-                            "$appName v$versionName"
+                        val cleanVersion = versionName?.substringBefore('-')
+                        val titleText = if (cleanVersion != null) {
+                            "$appName v$cleanVersion"
                         } else {
                             appName
                         }

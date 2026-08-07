@@ -1,10 +1,6 @@
-// Composer.kt — Phase 1B composer. Replaces the old `ChatInputBar.kt` with
-// the new M3-native surface (D.3): Agent/Model AssistChips above the input
-// row, an Add-menu ModalBottomSheet (Photos only in Phase 1B; "Reference
-// file" and "Commands" are stubs / Phase 2), and a file-reference
-// chip strip driven by the new additive `ComposerState.fileReferences` slice
-// field (F.4). Slash-command autocomplete continues to work inline via the
-// existing `CommandSuggestionsPanel`. Send/Stop is a 48dp M3 IconButton.
+// Composer.kt — composer surface (D.3): a [+] IconButton that directly opens
+// the image picker, and slash-command autocomplete inline via
+// `CommandSuggestionsPanel`. Send/Stop is a 48dp M3 IconButton.
 //
 // PARITY (mandatory): Composer subscribes to the same `composerFlow` +
 // `settingsFlow` slices the old `ChatInputBar` read, and dispatches through
@@ -17,7 +13,6 @@ package cn.vectory.ocdroid.ui.chat
 
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -39,9 +34,7 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Stop
-import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -57,7 +50,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -69,24 +61,15 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import cn.vectory.ocdroid.R
 import cn.vectory.ocdroid.ui.ChatViewModel
-import cn.vectory.ocdroid.ui.ComposerFileReference
 import cn.vectory.ocdroid.ui.ComposerViewModel
 import cn.vectory.ocdroid.ui.OrchestratorViewModel
-import cn.vectory.ocdroid.ui.theme.AppBottomSheet
 import cn.vectory.ocdroid.ui.theme.Dimens
 import cn.vectory.ocdroid.util.workdirBasename
-import kotlinx.coroutines.launch
 
 /**
  * Phase 1B composer (D.3). Mirrors the old [ChatInputBar] signature + body
  * shape, then layers:
- *  - Agent + Model [AssistChip]s above the input row (D.3 / P4-1).
- *  - A file-reference [InputChip] strip driven by [ComposerState.fileReferences]
- *    (F.4, additive slice field). Tapping the × on a chip calls
- *    [ComposerViewModel.removeFileReference] which removes the chip AND
- *    strips the matching `File: <path>` line from `inputText`.
- *  - An Add-menu [ModalBottomSheet] (D.3). Phase 1B ships only Photos; the
- *    other two rows are stubs.
+ *  - A [+] IconButton (D.3) that directly opens the image picker.
  *  - Agent / Model picker [ModalBottomSheet]s opened from the chips. Body
  *    content re-uses the existing AlertDialog content (no Search yet —
  *    Phase 2 G.2 step 1).
@@ -143,7 +126,6 @@ fun Composer(
     // — the projection existed solely to feed the chips.
     val text = composerState.inputText
     val imageAttachments = composerState.imageAttachments
-    val fileReferences = composerState.fileReferences
     val availableCommands = settingsState.availableCommands
 
     val onTextChange = composerVM::setInputText
@@ -187,10 +169,8 @@ fun Composer(
     // the chip Row that triggered them was deleted (the selectors moved
     // into the top-bar overflow menu, P2.3). The picker sheet composables
     // are now triggered from ChatScaffold (where the overflow menu's open-
-    // callbacks fire). Only the Add-menu + stop-confirm state remain here.
-    var showAdd by rememberSaveable { mutableStateOf(false) }
+    // callbacks fire). Only the stop-confirm state remains here.
     var showStopConfirm by rememberSaveable { mutableStateOf(false) }
-    val scope = rememberCoroutineScope()
 
     // §IME-OWNER (sole): NO .imePadding() here — AppShell's NavHost is the
     // unique IME padding owner (see AppShell.kt §IME-OWNER). Adding padding
@@ -223,19 +203,6 @@ fun Composer(
                 )
             }
 
-            // §1B (F.4): file-reference chip strip. Reads the additive
-            // ComposerState.fileReferences field; renders one InputChip per
-            // reference. Removing a chip calls removeFileReference which
-            // also strips the matching `File: <path>` line from inputText
-            // (see ComposerController.removeFileReference).
-            if (fileReferences.isNotEmpty()) {
-                FileReferenceChipStrip(
-                    references = fileReferences,
-                    onRemove = { id -> composerVM.removeFileReference(id) },
-                    modifier = Modifier.padding(vertical = 4.dp),
-                )
-            }
-
             // §0.8.2 P2.5: the Agent + Model AssistChip Row that used to
             // live here is REMOVED. The two selectors moved into the top-
             // bar overflow menu (P2.3 — Agent / Model items); the picker
@@ -245,8 +212,8 @@ fun Composer(
             // (now `internal` so ChatScaffold can call them).
 
             // §PARITY: editor row — [+] [input weight=1f] [send/stop].
-            // The Add button is now an M3 IconButton (48dp) opening the
-            // ModalBottomSheet. The send/stop button is also an M3
+            // The [+] button is an M3 IconButton (48dp) that directly opens
+            // the image picker. The send/stop button is also an M3
             // IconButton (48dp). Both replace the old Box+clickable
             // wrappers.
             // §0.8.2 P2.5: vertical padding tightened from 8dp to
@@ -260,13 +227,13 @@ fun Composer(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 IconButton(
-                    onClick = { showAdd = true },
+                    onClick = onAddImages,
                     enabled = !questionPending && !isSubagent,
                     modifier = Modifier.size(48.dp),
                 ) {
                     Icon(
                         Icons.Default.Add,
-                        contentDescription = stringResource(R.string.chat_add_menu_title),
+                        contentDescription = stringResource(R.string.chat_add_image),
                         tint = MaterialTheme.colorScheme.onSurfaceVariant
                             .copy(alpha = if (questionPending || isSubagent) 0.5f else 1f),
                     )
@@ -369,31 +336,6 @@ fun Composer(
         }
     }
 
-    if (showAdd) {
-        AddMenuSheet(
-            onDismiss = { showAdd = false },
-            onPhotos = {
-                showAdd = false
-                onAddImages()
-            },
-            // §1B: "Reference file" is a Phase 2 entry. Rendered
-            // as a disabled row so the user sees the menu shape that will
-            // land in Phase 2.
-            onFileRef = {
-                showAdd = false
-                scope.launch {
-                    // No-op in Phase 1B — wired in Phase 2 via
-                    // orchestratorVM.requestPickFileForComposer → Files
-                    // round-trip.
-                }
-            },
-            onCommands = {
-                showAdd = false
-                composerVM.setInputText("/")
-            },
-        )
-    }
-
     // §0.8.2 P2.5: the AgentPickerSheet / ModelPickerSheet invocations that
     // used to live here are REMOVED — the chip Row that opened them was
     // deleted (selectors moved to the top-bar overflow menu, P2.3). The
@@ -425,96 +367,4 @@ fun Composer(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun FileReferenceChipStrip(
-    references: List<ComposerFileReference>,
-    onRemove: (String) -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    // Phase 1B: simple horizontal row of InputChips. LazyColumn is overkill
-    // — file references per draft are bounded by the workspace tree depth
-    // (typical: < 10). When the count grows, swap to LazyRow.
-    Row(
-        modifier = modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        references.forEach { ref ->
-            val baseName = ref.path.workdirBasename() ?: ref.path
-            // §phase3 48dp audit (plan §5 task 4): the file-ref chip's
-            // trailingIcon used to carry its own `.size(16.dp).clickable`
-            // — a 16dp touch target far below the 48dp minimum. The whole
-            // chip is now the removal tap target (chip width >> 48dp, the
-            // M3 idiom for removable InputChip rows). The × icon stays as a
-            // pure visual affordance (no separate clickable on the icon).
-            InputChip(
-                selected = false,
-                onClick = { onRemove(ref.id) },
-                label = { Text(baseName, maxLines = 1) },
-                leadingIcon = {
-                    Icon(
-                        Icons.Default.AttachFile,
-                        contentDescription = null,
-                        modifier = Modifier.size(16.dp),
-                    )
-                },
-                trailingIcon = {
-                    Icon(
-                        Icons.Default.Close,
-                        contentDescription = stringResource(R.string.chat_remove_file_ref),
-                    )
-                },
-                colors = InputChipDefaults.inputChipColors(
-                    labelColor = MaterialTheme.colorScheme.onSurfaceVariant,
-                ),
-            )
-        }
-    }
-}
 
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun AddMenuSheet(
-    onDismiss: () -> Unit,
-    onPhotos: () -> Unit,
-    onFileRef: () -> Unit,
-    onCommands: () -> Unit,
-) {
-    // §WT1: 迁移到 AppBottomSheet（容器色 / titleLarge / sheetState / 底部
-    // inset 由 recipe 统一）。原手写 titleMedium 标题行删除（recipe 的 title
-    // 槽接管）。底部 16dp padding 也删除（recipe 已统一加底部 Spacer，避免
-    // 双重留白，见 SheetRecipe.kt §inset-note）。
-    AppBottomSheet(
-        onDismissRequest = onDismiss,
-        title = stringResource(R.string.chat_add_menu_title),
-    ) {
-        androidx.compose.material3.ListItem(
-            headlineContent = { Text(stringResource(R.string.chat_add_photos)) },
-            supportingContent = { Text(stringResource(R.string.chat_add_photos_desc)) },
-            leadingContent = {
-                Icon(Icons.Default.PhotoLibrary, contentDescription = null)
-            },
-            modifier = Modifier.clickable(onClick = onPhotos),
-        )
-        androidx.compose.material3.ListItem(
-            headlineContent = { Text(stringResource(R.string.chat_add_file_ref)) },
-            supportingContent = { Text(stringResource(R.string.chat_add_file_ref_desc)) },
-            leadingContent = {
-                Icon(Icons.Default.AttachFile, contentDescription = null)
-            },
-            // Phase 1B: row is visible but disabled to communicate the
-            // upcoming surface; Phase 2 will wire
-            // orchestratorVM.requestPickFileForComposer → workspace/files.
-            modifier = Modifier.clickable(enabled = false, onClick = onFileRef),
-        )
-        androidx.compose.material3.ListItem(
-            headlineContent = { Text(stringResource(R.string.chat_add_commands)) },
-            supportingContent = { Text(stringResource(R.string.chat_add_commands_desc)) },
-            leadingContent = {
-                Icon(Icons.Default.Terminal, contentDescription = null)
-            },
-            modifier = Modifier.clickable(onClick = onCommands),
-        )
-    }
-}

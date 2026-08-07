@@ -199,9 +199,8 @@ fun SessionsScreen(
         )
     }
     val appName = stringResource(R.string.app_name)
-    // §review-fix IMPORTANT-1: spec requires "<app_name> v <versionName>"
-    // (space AFTER the "v"); was missing the space.
-    val homeTitle = if (versionName != null) "$appName v $versionName" else appName
+    val cleanVersion = versionName?.substringBefore('-')
+    val homeTitle = if (cleanVersion != null) "$appName v$cleanVersion" else appName
 
     // ── Local UI state ─────────────────────────────────────────────────────
     // Two collapsible sections; rememberSaveable so config-change / process-

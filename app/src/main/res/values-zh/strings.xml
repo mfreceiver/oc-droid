@@ -136,14 +136,6 @@
     <string name="git_no_workdir">未选取工作目录</string>
     <string name="sessions_recent_section">最近</string>
     <string name="sessions_by_workdir_section">按工作目录</string>
-    <string name="chat_add_menu_title">添加到消息</string>
-    <string name="chat_add_photos">图片</string>
-    <string name="chat_add_photos_desc">附加图片到下一条消息</string>
-    <string name="chat_add_file_ref">引用工作区文件</string>
-    <string name="chat_add_file_ref_desc">即将上线 — Phase 2</string>
-    <string name="chat_add_commands">命令</string>
-    <string name="chat_add_commands_desc">插入斜杠命令</string>
-    <string name="chat_remove_file_ref">移除文件引用</string>
     <string name="chat_action_overflow">会话操作</string>
     <!-- §1C-FIX-⑧: ChatPermissionCard 中文化 + scheme E.4 元数据
          （host / workdir / session / tool / target），让用户知道
@@ -338,7 +330,6 @@
     <string name="chat_files_changed">%1$d 个文件变更</string>
     <string name="host_profile_delete_failed">删除失败</string>
     <string name="sessions_connect_new_action">连接新项目</string>
-    <string name="chat_command_section">命令</string>
     <string name="chat_command_clear">开新会话</string>
     <string name="chat_command_compact">压缩对话历史</string>
     <string name="chat_command_undo">撤销上一步</string>
