@@ -220,76 +220,18 @@ class AppCore @Inject constructor(
      * closed circuit with no entry; see archdebt-batch1-design §5.1).
      */
     private val slimFanOutRetryScheduler: cn.vectory.ocdroid.service.streaming.SlimFanOutRetryScheduler,
-) {
     /**
-     * §Wave2.1-split-l2 (rev-gpt APPROVED EXCEPTION): _lazy composition_ of the 5
-     * orchestrator dependencies, NOT Hilt constructor injection.
-     *
-     * ## Why lazy, not Hilt ctor injection (§2.2 Pattern B)
-     *
-     * The Wave2.1 architecture report §2.2 specifies Pattern B: orchestrator
-     * classes declare constructor deps via `@Inject constructor` and AppCore
-     * receives them as constructor-injected parameters. This is the target state.
-     *
-     * However, migrating AppCore's constructor signature would break existing
-     * test factories (MainViewModelTestBase.createCore, ForkSessionTest) that
-     * construct AppCore manually with positional args and do not go through Hilt.
-     * Those factories are outside the Wave2.1 write domain, so constructor
-     * injection of orchestrators is deferred.
-     *
-     * ## What this means for Hilt ownership
-     *
-     * The orchestrator classes retain `@Singleton @Inject constructor`
-     * annotations (they are Hilt-provisionable types, future-proof for
-     * Wave2.2). But in Wave2.1, AppCore does NOT obtain them via Hilt — it owns
-     * the instances via `lazy`, which calls the orchestrator constructors
-     * directly. This is runtime-safe because:
-     *   - The dependency graph is acyclic (Refresh → Send → Draft → Command).
-     *   - All deps required by orchestrator constructors are already available
-     *     as AppCore constructor-injected fields (same Singleton instances Hilt
-     *     would provide).
-     *   - Production access is single-threaded (Dispatchers.Main), so lazy
-     *     synchronization overhead is negligible.
-     *
-     * ## TODO(Wave2.2)
-     *
-     * Migrate test factories to allow full Hilt constructor injection of the 5
-     * orchestrators into AppCore. Then remove this `lazy` composition block and
-     * add the 5 params to AppCore's `@Inject constructor`.
+     * §Wave2.2 (item 13): the 5 orchestrators are now Hilt-provided via their
+     * existing @Singleton @Inject constructors, injected directly as ctor params.
+     * No lazy composition (the §Wave2.1-split-l2 block was deleted — see
+     * archdebt-batch2-design §3.3).
      */
-    private val sessionOpener by lazy { SessionOpener(store, repository, appScope, sessionSwitcher) }
-    internal val refreshOrchestrator by lazy {
-        RefreshOrchestrator(
-            store, repository, settingsManager, effectBus, appScope,
-            currentProfileId, sessionSwitcher, connectionCoordinator,
-            sessionSyncCoordinator, foregroundCatchUpController, hostProfileStore,
-            serverCompatProfile, tokenStreamCoordinator,
-        )
-    }
-    private val sendOrchestrator by lazy {
-        SendOrchestrator(
-            store, repository, settingsManager, effectBus, appScope,
-            currentProfileId, sessionSwitcher, connectionCoordinator,
-        )
-    }
-    internal val draftSessionOrchestrator by lazy {
-        DraftSessionOrchestrator(
-            store, repository, settingsManager, effectBus, appScope,
-            currentProfileId, composerController, sessionSwitcher,
-            sendOrchestrator, refreshOrchestrator,
-        )
-    }
-    private val commandOrchestrator by lazy {
-        // `repository` (the OCR @Singleton) is passed twice: it implements BOTH
-        // SessionRepository and InteractionRepository — the same singleton sits
-        // behind both narrow seams (see RepositoryInterfaceModule @Binds). This
-        // is intentional, not a typo.
-        CommandOrchestrator(
-            store, repository, repository, settingsManager, effectBus, appScope,
-            currentProfileId, composerController,
-            draftSessionOrchestrator, sessionOpener,
-        )
-    }
+    private val sessionOpener: SessionOpener,
+    internal val refreshOrchestrator: RefreshOrchestrator,
+    private val sendOrchestrator: SendOrchestrator,
+    internal val draftSessionOrchestrator: DraftSessionOrchestrator,
+    private val commandOrchestrator: CommandOrchestrator,
+) {
 
     // ── Slice accessors (delegate to SharedStateStore) ──────────────────────
     // §R18 Phase 4 (P0-9): SharedStateStore now owns private MutableStateFlows
@@ -602,8 +544,8 @@ class AppCore @Inject constructor(
      * because Hilt ViewModels are not @Inject-able).
      */
     private fun dispatchEffect(effect: ControllerEffect) {
-        // §Wave2.1-split-l2: orchestrators are created via `lazy`; by the time
-        // an effect arrives (after init block completes), they are available.
+        // §Wave2.2 (item 13): orchestrators are ctor-injected fields
+        // (Hilt-provided); by the time an effect arrives they are available.
         val handled = dispatchForegroundCatchUpEffect(effect)
             || dispatchSessionEffect(effect)
             || dispatchHostEffect(effect)
