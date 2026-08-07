@@ -91,6 +91,16 @@ internal class ConnectionGateway(
         }
     }
 
+    // TODO(test-determinism): this hardcoded withContext(Dispatchers.IO) is
+    // NOT covered by the injectable networkDispatcher in ConnectionHealthProbe
+    // (§network-off-main). Unlike repository.checkHealth() / engine.bootstrap()
+    // — which hop via the injected dispatcher (prod = Dispatchers.IO, tests =
+    // TestScope) — this slim health path always escapes to real Dispatchers.IO.
+    // Currently safe because probe tests mock/avoid this path; a future
+    // slim-probe test that injects a TestScope WILL see this hop escape to a
+    // real IO thread and flake under advanceUntilIdle(). Thread the injected
+    // dispatcher here too (or extract the health client call to a dispatcher-
+    // injected seam) if such a test is added.
     private suspend fun probeSlimapiHealth(
         baseUrl: String,
         username: String?,
