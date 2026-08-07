@@ -57,7 +57,7 @@ internal fun ServerManagementDialog(
                 )
             } else {
                 Surface(
-                    // RectangleShape removed — let AppFormDialog own the dialog shape
+                    // Surface uses M3 default shape (RectangleShape) — no explicit override needed
                     color = MaterialTheme.colorScheme.surfaceContainerLow,
                     modifier = Modifier.fillMaxWidth()
                 ) {

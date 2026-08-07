@@ -38,7 +38,6 @@ import cn.vectory.ocdroid.ui.SessionViewModel
 import cn.vectory.ocdroid.data.model.SlimSessionLastError
 import cn.vectory.ocdroid.ui.theme.AppBottomSheet
 import cn.vectory.ocdroid.ui.theme.AppFormDialog
-import cn.vectory.ocdroid.ui.theme.Dimens
 import cn.vectory.ocdroid.util.workdirBasename
 
 @OptIn(ExperimentalMaterial3Api::class)

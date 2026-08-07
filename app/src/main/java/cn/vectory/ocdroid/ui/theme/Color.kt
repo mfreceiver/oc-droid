@@ -16,7 +16,7 @@ import androidx.compose.ui.graphics.Color
 // Primary family — v2 accent (`#3b5cf6`). Container slots remain M3-derived
 // (v2 has no direct equivalent; kept consistent with primary hue).
 val DarkPrimary = Color(0xFF8FA3F8)
-val DarkOnPrimary = Color(0xFFFFFFFF)
+val DarkOnPrimary = Color(0xFF0F1A4E)  // 深 onPrimary 配合调亮的 DarkPrimary(#8FA3F8)：M3 dark 惯例（浅 primary + 深 onPrimary）。白字在 #8FA3F8 上仅 ~2.4:1 不达 AA；深靛 #0F1A4E ≈ 6:1
 val DarkPrimaryContainer = Color(0xFF0A47A1)
 val DarkOnPrimaryContainer = Color(0xFFD3E4FF)
 

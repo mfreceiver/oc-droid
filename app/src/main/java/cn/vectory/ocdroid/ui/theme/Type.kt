@@ -205,9 +205,8 @@ fun markdownTypography(
  * 审计（评审 I5）：[compactTypography] 不直接引用 [FontFamily.Default]——它
  * 从 `base` 复制，自动继承 `base` 中已注入的 family（来自 [appTypography]）。
  *
- * B6 决策 4 同步：bodyLarge 与主 [appTypography] 保持 ~0.79 的 compact:main
- * 比例（同 bodyMedium 12/16=0.75）——主 bodyLarge 16 → compact 13（16×0.79
- * ≈12.6，取 13 保 ≥12sp 可读下限且维持 bodyLarge>bodyMedium 层级）。
+ * B6 决策 4 同步：compact 与主 [appTypography] 保持比例——bodyLarge 13/16≈0.81、
+ * bodyMedium 12/14≈0.86——保 ≥12sp 可读下限且维持 bodyLarge>bodyMedium 层级。
  */
 fun compactTypography(base: Typography): Typography = base.copy(
     bodyLarge = base.bodyLarge.copy(fontSize = 13.sp, lineHeight = 20.sp),
