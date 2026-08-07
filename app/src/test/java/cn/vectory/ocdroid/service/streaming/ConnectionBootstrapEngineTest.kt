@@ -245,4 +245,49 @@ class ConnectionBootstrapEngineTest {
         verify(exactly = 2) { f.repository.configure(any(), any(), any(), any(), any(), any()) }
         coVerify(exactly = 0) { f.repository.checkHealth() }
     }
+
+    // ───────────── §stale-identity-heal regression (Bug 1 catch-22 fix) ──────
+    // The prior identity-mismatch sub-clause (finalIdentity != null && field-
+    // mismatch) killed the bootstrap when identity.normalizedWorkdir had drifted
+    // from the resolved key's workdir (user switched directories without a
+    // beginReconfigure → epoch unchanged, identity not nulled). bindIfCurrent
+    // (the ONLY identity re-bind path) was unreachable after the mismatch
+    // failure → permanent deadlock. This test verifies the fix: a stale workdir
+    // identity is healed by bindIfCurrent and the bootstrap succeeds.
+
+    @Test
+    fun `stale workdir identity is healed by bindIfCurrent`() = runTest {
+        val settings = mockk<SettingsManager>(relaxed = true)
+        val repository = mockk<OpenCodeRepository>(relaxed = true)
+        every { settings.currentWorkdir } returns "/new-work"
+        val store = ConnectionIdentityStore()
+        // Pre-bind identity with OLD workdir (simulating user switched dir after
+        // a prior successful connect; workdir change doesn't trigger beginReconfigure).
+        store.bind("profile", "/old-work", "https://server:443")
+        val resolver = mockk<EffectiveConnectionConfigResolver>()
+        every { resolver.resolve() } returns EffectiveConnectionConfig(
+            source = EffectiveConnectionSource.Profile,
+            profileId = profile.id,
+            connectionKey = profile.id,
+            url = "https://server:443",
+            username = null,
+            password = null,
+            workdir = "/new-work",
+            clientCertId = null,
+            mtlsEnabled = false,
+        )
+        coEvery { repository.checkHealth() } returns Result.success(HealthResponse(true, "1.0"))
+
+        val engine = ConnectionBootstrapEngine(
+            resolver, settings, repository, store,
+            ServerCompatProfile(), hasActivity = { false },
+        )
+
+        val result = engine.bootstrap()
+
+        assertTrue("bootstrap must succeed despite stale workdir identity", result is ConnectionBootstrapOutcome.Success)
+        val success = result as ConnectionBootstrapOutcome.Success
+        assertEquals("/new-work", success.identity.normalizedWorkdir)
+        assertEquals("/new-work", store.currentIdentity.value?.normalizedWorkdir)
+    }
 }

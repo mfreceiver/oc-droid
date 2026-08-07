@@ -281,4 +281,47 @@ class ConnectionReprobeControllerTest {
         assertEquals(60_000L, ConnectionReprobeController.DELAYS[3])
         assertEquals(120_000L, ConnectionReprobeController.DELAYS[4])
     }
+
+    // ───────────── §connecting-defer-fix regression (Bug 2 backoff reset) ────
+    // The prior isSseDown exit was BEFORE isConnecting continue. Connecting is
+    // NOT isSseDown, so a concurrent probe writing Connecting caused the episode
+    // to exit ("phase recovered (Connecting)") → supervisor restarted from
+    // attempt=0 → backoff never advanced. This test verifies the fix by checking
+    // that probe② fires at the tier-1 delay (15s) NOT the tier-0 delay (5s),
+    // which is the observable difference between "episode survived" and "episode
+    // restarted from attempt=0".
+
+    @Test
+    fun `Connecting transient from concurrent probe does not reset backoff tier`() {
+        settleResults.addAll(listOf(false, false))
+        store.slices.mutateConnection { it.copy(connectionPhase = ConnectionPhase.Disconnected) }
+        ctrl()
+        advance(5_000); assertEquals(1, probeCount) // probe① at t=5s, fails → attempt=1
+
+        // Concurrent probe writes Connecting + isConnecting=true (real-world:
+        // user clicks banner → testConnection writes this pair atomically)
+        store.slices.mutateConnection {
+            it.copy(isConnecting = true, connectionPhase = ConnectionPhase.Connecting)
+        }
+        advance(15_000); assertEquals("no probe during Connecting transient", 1, probeCount) // t=20s
+
+        // Concurrent probe settles → Disconnected restored
+        store.slices.mutateConnection {
+            it.copy(isConnecting = false, connectionPhase = ConnectionPhase.Disconnected)
+        }
+        // DISTINGUISHING ASSERTION at t=30s (10s after Disconnected restored):
+        // OLD code: episode exited on Connecting at t=20 → supervisor restarted
+        //   at attempt=0 → probe② fired at t=25 (5s delay) → probeCount=2.
+        // NEW code: episode survived (isConnecting→continue at t=20), holding
+        //   tier=1 → next probe at t=35 (15s delay) → probeCount=1.
+        advance(10_000)
+        assertEquals("tier must NOT reset: probe② should not have fired yet (expected at t=35, not t=25)", 1, probeCount)
+
+        // Advance to t=35s: NEW code fires probe② at tier-1 delay (15s)
+        advance(5_000)
+        assertEquals("probe② fires at tier=1 delay (15s, not 5s)", 2, probeCount)
+
+        store.slices.mutateConnection { it.copy(connectionPhase = ConnectionPhase.Connected) }
+        advance()
+    }
 }

@@ -126,10 +126,13 @@ internal class ConnectionReprobeController(
             delay(DELAYS[attempt.coerceAtMost(DELAYS.lastIndex)])
             val conn = connectionFlow.value
             // Decision-point re-validation (state may have moved since collect).
-            if (!conn.connectionPhase.isSseDown) {
-                DebugLog.i(TAG, "reprobe episode exiting: phase recovered (${conn.connectionPhase})")
-                return
-            }
+            // §connecting-defer-fix: check isConnecting BEFORE isSseDown exit.
+            // Connecting is NOT isSseDown, so the prior order caused the episode
+            // to exit ("phase recovered (Connecting)") whenever a concurrent
+            // probe (manual refresh / foreground return) wrote Connecting. The
+            // episode then restarted from attempt=0 → backoff never advanced.
+            // Moving isConnecting first lets the episode survive the concurrent
+            // probe's transient and hold its backoff tier.
             if (conn.authFailureReason != null || conn.mtlsDegradedError != null ||
                 conn.slimapiVersionIncompatible != null) {
                 DebugLog.i(TAG, "reprobe episode exiting: permanent failure signal (auth=${conn.authFailureReason != null}, mtls=${conn.mtlsDegradedError != null}, version=${conn.slimapiVersionIncompatible != null})")
@@ -143,7 +146,11 @@ internal class ConnectionReprobeController(
                 DebugLog.i(TAG, "reprobe episode exiting: epoch advanced ($epochAtStart -> ${currentEpoch()}), new generation takes over")
                 return
             }
-            if (conn.isConnecting) continue // another probe in flight: defer, hold this backoff tier
+            if (conn.isConnecting) continue // concurrent probe in flight (own or external): defer, hold this backoff tier
+            if (!conn.connectionPhase.isSseDown) {
+                DebugLog.i(TAG, "reprobe episode exiting: phase recovered (${conn.connectionPhase})")
+                return
+            }
             if (!doProbe()) return // probe succeeded or episode should exit
             attempt++
             DebugLog.i(TAG, "reprobe probe failed; advancing to backoff tier $attempt/${DELAYS.lastIndex}")

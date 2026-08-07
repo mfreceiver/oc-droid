@@ -128,14 +128,24 @@ class ConnectionBootstrapEngine internal constructor(
             val health = healthResult.getOrNull()
             if (health != null && health.healthy) {
                 val finalKey = configResolver.resolve()
-                val finalIdentity = identityStore.currentIdentity.value
                 if (finalKey != key ||
-                    identityStore.currentEpoch() != expectedEpoch ||
-                    (finalIdentity != null && (finalIdentity.profileId != key.connectionKey ||
-                        finalIdentity.normalizedWorkdir != key.workdir || finalIdentity.endpointFp != key.url))
+                    identityStore.currentEpoch() != expectedEpoch
                 ) {
-                    return ConnectionBootstrapOutcome.Failed(IllegalStateException("Config or identity changed"))
+                    return ConnectionBootstrapOutcome.Failed(IllegalStateException("Config or epoch changed"))
                 }
+                // §stale-identity-heal: identity workdir can drift from the
+                // resolved key's workdir when the user switches directories
+                // WITHOUT triggering beginReconfigure() (workdir writes don't
+                // touch identityStore). The prior identity-mismatch sub-clause
+                // killed the bootstrap here, but bindIfCurrent (below) is the
+                // ONLY path that re-binds identity — placing it after the
+                // mismatch check created a catch-22 where stale identity could
+                // never be healed. The true supersession guard is the epoch
+                // check above + bindIfCurrent's epoch-CAS (single synchronized
+                // critical section, ConnectionIdentityStore.kt:171-179).
+                // Removing the identity-mismatch sub-clause lets bindIfCurrent
+                // atomically re-bind at the captured epoch, healing the stale
+                // workdir field.
                 serverCompatProfile.update(health.version)
                 val identity = identityStore.bindIfCurrent(
                     key.connectionKey,
