@@ -256,6 +256,9 @@ class TokenStreamCoordinator(
         initialBackoffMs, maxBackoffMs, backoffMultiplier, bundleCommitLock,
     )
 
+    /** Epoch + generation + ownership bookkeeping (stale-frame / stale-clear authority). */
+    private val tokenFrameGuard = TokenFrameGuard(bundleCommitLock)
+
     /** The sid of the currently-open (or pending-debounce) stream. Null = idle. */
     private val currentSid = AtomicReference<String?>(null)
     /** The directory captured for the current stream (for reconnect). */
@@ -294,21 +297,6 @@ class TokenStreamCoordinator(
      */
     private val lifecycleRouteInstance = AtomicLong(0L)
 
-    /**
-     * Per-sid monotonic epoch counter. Bumped at every open(sid) that reaches
-     * runStream.
-     */
-    private val epochBySid = ConcurrentHashMap<String, AtomicLong>()
-    /**
-     * Per-sid generation counter (bgpt MF-3). Bumped by [beginSession]; used
-     * to reject stale clears that target a partId a NEWER session/generation
-     * now owns. Distinct from [epochBySid] (epoch tags inbound frames;
-     * generation tags outbound clears) — they bump together at every open/
-     * reconnect but serve different guards.
-     */
-    private val genBySid = ConcurrentHashMap<String, AtomicLong>()
-    /** partId → the (sid, generation) that owns it. */
-    private val ownerByPartId = ConcurrentHashMap<String, OwnerTag>()
     /** Per-sid reducer working state (single active stream, but per-sid for safety). */
     private val reducerStateBySid = ConcurrentHashMap<String, TokenStreamReducerState>()
     private fun dispatchBound(boundBundle: ClientBundle, action: AppAction) {
@@ -572,7 +560,7 @@ class TokenStreamCoordinator(
         // Clear coordinator-internal state for this sid regardless of whether
         // it was the current stream (defensive: covers a stale sid whose job
         // was already cancelled by a newer open()).
-        ownerByPartId.entries.removeIf { it.value.sid == sid }
+        tokenFrameGuard.removeSid(sid)
         reducerStateBySid.remove(sid)
         // B-4 HIGH-2: reclaim ALL revision entries for this session on close
         // (stream teardown, session switch, background — prevents unbounded
@@ -586,10 +574,10 @@ class TokenStreamCoordinator(
     internal fun currentStreamJobSnapshot(): Job? = currentLifecycle.get()?.job
 
     /** Test/diagnostic read: the current epoch for [sid] (or 0 if none). */
-    internal fun epochOf(sid: String): Long = epochBySid[sid]?.get() ?: 0L
+    internal fun epochOf(sid: String): Long = tokenFrameGuard.epochOf(sid)
 
     /** Test/diagnostic read: the current generation for [sid] (or 0 if none). */
-    internal fun genOf(sid: String): Long = genBySid[sid]?.get() ?: 0L
+    internal fun genOf(sid: String): Long = tokenFrameGuard.genOf(sid)
 
     /**
      * Test-only: bumps the epoch for [sid] WITHOUT going through open() (so
@@ -597,9 +585,7 @@ class TokenStreamCoordinator(
      * frames via [dispatchEpochFrame]).
      */
     internal fun bumpEpochForTest(sid: String): Long =
-        synchronized(bundleCommitLock) {
-            epochBySid.computeIfAbsent(sid) { AtomicLong(0L) }.incrementAndGet()
-        }
+        tokenFrameGuard.bumpEpochForTest(sid)
 
     /**
      * §MF-1 (gate r2) test seam: directly sets the reconnect sentinel to
@@ -616,13 +602,7 @@ class TokenStreamCoordinator(
 
     /** Test/diagnostic read: the partIds currently owned by the active stream for [sid]. */
     internal fun ownedPartsForSid(sid: String): Set<String> =
-        ownerByPartId.entries
-            .asSequence()
-            .filter { it.value.sid == sid }
-            .map { it.key }
-            .toSet()
-
-    // ── Generation guard (bgpt MF-3) ─────────────────────────────────────────
+        tokenFrameGuard.ownedPartsForSid(sid)
 
     /**
      * Bumps the generation for [sid] and returns the new value. Called at
@@ -630,28 +610,18 @@ class TokenStreamCoordinator(
      * generation become stale.
      */
     internal fun beginSession(sid: String): Long =
-        synchronized(bundleCommitLock) {
-            genBySid.computeIfAbsent(sid) { AtomicLong(0L) }.incrementAndGet()
-        }
+        tokenFrameGuard.beginSession(sid)
 
     private fun beginStreamIncarnation(sid: String): Pair<Long, Long> =
-        synchronized(bundleCommitLock) {
-            val epoch = epochBySid.computeIfAbsent(sid) { AtomicLong(0L) }.incrementAndGet()
-            val generation = genBySid.computeIfAbsent(sid) { AtomicLong(0L) }.incrementAndGet()
-            epoch to generation
-        }
+        tokenFrameGuard.beginStreamIncarnation(sid)
 
     /**
      * Records that [partId] is owned by stream ([sid], [gen]). Only records
      * when [gen] is the current generation for [sid] — a stale claim (from
      * a cancelled collector whose gen lags behind beginSession) is dropped.
      */
-    internal fun onPartOwned(sid: String, gen: Long, partId: String) {
-        synchronized(bundleCommitLock) {
-            val currentGen = genBySid[sid]?.get() ?: return
-            if (currentGen != gen) return
-            ownerByPartId[partId] = OwnerTag(sid, gen)
-        }
+    private fun onPartOwned(sid: String, gen: Long, partId: String) {
+        tokenFrameGuard.onPartOwned(sid, gen, partId)
     }
 
     /**
@@ -665,46 +635,31 @@ class TokenStreamCoordinator(
      *
      * Side-effect: removes allowed-and-owned entries from [ownerByPartId].
      */
-    internal fun filterClearByGeneration(sid: String, gen: Long, partIds: Set<String>): Set<String> {
-        synchronized(bundleCommitLock) {
-            if (partIds.isEmpty()) return emptySet()
-            val allowed = mutableSetOf<String>()
-            for (partId in partIds) {
-                val tag = ownerByPartId[partId]
-                if (tag == null) {
-                    allowed += partId
-                } else if (tag.sid == sid && tag.gen == gen) {
-                    allowed += partId
-                    ownerByPartId.remove(partId)
-                }
-                // else: stale — a newer stream owns this partId. Drop.
-            }
-            return allowed
-        }
-    }
+    internal fun filterClearByGeneration(sid: String, gen: Long, partIds: Set<String>): Set<String> =
+        tokenFrameGuard.filterClearByGeneration(sid, gen, partIds)
 
     // ── Epoch-tagged frame dispatch (unit-testable surface) ──────────────────
 
     /**
      * Epoch-guarded entry: validates [sid]/[epoch] against the current
-     * `epochBySid[sid]` BEFORE any reduce / state mutation. Drops stale
-     * frames (the connection that delivered this frame has been torn down
-     * and re-opened under a newer epoch — late OkHttp callbacks that leaked
-     * past the transport's own `closed` guard). Then resets the watchdog,
-     * runs the pure reducer, bridges any part-text change into ChatState,
-     * and processes emitted effects.
+     * epoch via [TokenFrameGuard.isEpochCurrent] BEFORE any reduce / state
+     * mutation. Drops stale frames (the connection that delivered this frame has
+     * been torn down and re-opened under a newer epoch — late OkHttp callbacks
+     * that leaked past the transport's own `closed` guard). Then resets the
+     * watchdog, runs the pure reducer, bridges any part-text change into
+     * ChatState, and processes emitted effects.
      *
      * Exposed internal so unit tests can drive frames with crafted epochs
      * without going through the asynchronous [streamProvider].
      */
     /**
      * Epoch-guarded entry: validates [sid]/[epoch] against the current
-     * `epochBySid[sid]` BEFORE any reduce / state mutation. Drops stale
-     * frames (the connection that delivered this frame has been torn down
-     * and re-opened under a newer epoch — late OkHttp callbacks that leaked
-     * past the transport's own `closed` guard). Then resets the watchdog,
-     * runs the pure reducer, bridges any part-text change into ChatState,
-     * and processes emitted effects.
+     * epoch via [TokenFrameGuard.isEpochCurrent] BEFORE any reduce / state
+     * mutation. Drops stale frames (the connection that delivered this frame has
+     * been torn down and re-opened under a newer epoch — late OkHttp callbacks
+     * that leaked past the transport's own `closed` guard). Then resets the
+     * watchdog, runs the pure reducer, bridges any part-text change into
+     * ChatState, and processes emitted effects.
      *
      * §B4 round-2 (rev-gpt C2): [capturedRouteInstance] is the route token
      * captured at THIS lifecycle's open()/runStream() entry and threaded
@@ -727,11 +682,10 @@ class TokenStreamCoordinator(
         val deferredEffects = mutableListOf<() -> Unit>()
         synchronized(bundleCommitLock) {
         if (!isBundleCurrentForCommit(boundBundle)) return
-        val currentEpoch = epochBySid[sid]?.get() ?: return
-        if (currentEpoch != epoch) {
+        if (!tokenFrameGuard.isEpochCurrent(sid, epoch)) {
             DebugLog.d(
                 TAG,
-                "drop stale-epoch frame sid=$sid epoch=$epoch current=$currentEpoch type=${frame::class.simpleName}",
+                "drop stale-epoch frame sid=$sid epoch=$epoch current=${tokenFrameGuard.epochOf(sid)} type=${frame::class.simpleName}",
             )
             return
         }
@@ -774,7 +728,7 @@ class TokenStreamCoordinator(
             }
         // The reducer's resync branch unions reducer-known parts with the
         // EXTERNALLY-owned parts for the sid (the ChatState.streamOwned view).
-        // We feed our own ownerByPartId projection as that union source — it
+        // We feed the guard's owned-parts projection as that union source — it
         // IS the authoritative ownership map (Stage A's clear reads the same
         // concept via ChatState.streamOwned; D1 keeps its own working set so
         // the engine stays decoupled from the UI slice in unit tests).
