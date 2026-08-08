@@ -172,7 +172,7 @@ data class ScopeKey(
  * unified here — identityStore-sourced (authorityScope/currentScope) vs
  * host-profile-sourced (resolveScopeKey) differ during the reconfigure window
  * (see maintainability-fix-plan §P10 分歧3 conservative ruling). The
- * consistency assertion in StatusAggregatorImpl guards steady-state agreement.
+ * Steady-state agreement was historically pinned by the retired StatusAggregatorImpl's consistency test (F6); the conservative SOURCE separation above remains the ruling.
  *
  * [ScopeKey.slimapiInstanceFp] is kept (default null) — always null in
  * production today, retained for future multi-instance scope extension.
@@ -200,6 +200,6 @@ enum class EntryOrigin {
     TREE,
 }
 
-/** §U-MN8: Freshness classification (previously P1-C bookkeeping) was eliminated.
- *  TTL/liveness is now solely computed by StatusAggregatorImpl.project from
- *  sourceTimeMs — the freshness field had no consumers (discovery §0.C in design). */
+/** §U-MN8: Freshness classification was eliminated — the freshness field had
+ * no consumers (discovery §0.C in design). (Its former consumer,
+ * `StatusAggregatorImpl.project`'s TTL/liveness computation, was retired in F6.) */

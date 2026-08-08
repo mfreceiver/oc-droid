@@ -36,9 +36,10 @@ interface BootstrapRunner {
 sealed interface BootstrapResult {
 
     /**
-     * Bootstrap succeeded; [identity] is the bound identity for the caller
-     * to feed into the aggregator's read side (via the authority derivation
-     * pipeline, now that [StatusAggregatorInput] is retired).
+     * Bootstrap succeeded; [identity] is the bound identity for the caller's
+     * status-authority pipeline (both the `StatusAggregatorInput` write side
+     * (F1) and the aggregator read side (F6) are retired — authority state is
+     * consumed via [SharedStateStore] projections directly).
      */
     data class Success(val identity: ConnectionIdentity) : BootstrapResult
 

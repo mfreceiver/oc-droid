@@ -19,7 +19,7 @@ package cn.vectory.ocdroid.data.repository.http
  *
  * Centralised here (rather than inlined at each catch-site) so that the
  * HTTP-status routing logic in later tasks (L2 reducer / L3
- * `StatusAggregatorImpl` / `ProcessStatusPoller`) compares against a
+ * `StatusPollOrchestrator.launchLoadSessionStatus`) compares against a
  * single source of truth and the prefix check
  * `code.startsWith(UPSTREAM_HTTP_PREFIX)` is uniform. `upstream_http_<N>`
  * is a *prefix*, not a literal — the sidecar suffixes the upstream status

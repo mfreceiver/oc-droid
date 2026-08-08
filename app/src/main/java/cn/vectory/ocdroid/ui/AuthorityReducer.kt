@@ -266,11 +266,11 @@ private fun opScopeValid(op: AuthorityOp, state: StoreState): Boolean {
  * (serverRound=null) passes through keepRound which preserves
  * prev.serverRound, so an entry may show a MIXED semantic of origin=OPTIMISTIC
  * but serverRound != null (carried from a prior slim SSE write; REST
- * snapshots do not produce serverRound). The CURRENT sole behavioral
- * consumer of origin is StatusAggregatorImpl.fresh = (origin == REST); both
- * OPTIMISTIC and SSE are fresh=false, so the mixed semantic has NO
- * behavioral impact today. Future consumers MUST be aware: origin denotes
- * the last writer, NOT the provenance of serverRound.
+ * snapshots do not produce serverRound). The sole behavioral consumer of
+ * origin was the retired StatusAggregatorImpl's fresh derivation (F6); origin
+ * is still written/stored (§B9 ServerBusy classification) and the mixed
+ * semantic has NO behavioral impact. Future consumers MUST be aware: origin
+ * denotes the last writer, NOT the provenance of serverRound.
  *
  * # §review-note-N6 (coverage)
  *
@@ -720,10 +720,10 @@ private fun applyPurge(cur: AuthorityState, op: AuthorityOp.PurgeHost): Authorit
  * Coverage: [Coverage.registeredWorkdirs] is preserved from [op] (the failure
  * caller carries the snapshot's registered set so the coverage predicate keeps
  * gating `AllIdleFresh`); `coveredWorkdirs` is emptied and
- * `lastSuccessTimeMs = -1` so the derived aggregator `project()` returns
- * [GlobalBusyState.Unknown] (cold-start / stale-success guard) — matching the
- * old markFailed → Unknown semantics via the coverage gate rather than Unknown
- * status entries.
+ * `lastSuccessTimeMs = -1` marks the coverage as failed/stale (cold-start
+ * guard) — preserving the FGS-lifecycle guarantee that a failure never reads
+ * as idle (the former aggregator projection's `Unknown` verdict, retired in
+ * F6).
  *
  * Purity: this branch is pure (no injected deps, no clock read — [op.monotonic]
  * is carried data). Same `(state, op)` always yields the same output (CAS retry

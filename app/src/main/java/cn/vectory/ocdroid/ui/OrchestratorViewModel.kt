@@ -161,11 +161,13 @@ class OrchestratorViewModel @Inject constructor(
      * §unified-nav (A1 optional cleanup): force-navigate to Sessions is now
      * delegated to [requestNavigate] (Sessions) so there is ONE explicit nav-
      * command API. Behavior is identical to the prior inline impl: writes
-     * settingsManager.lastRoute = Sessions + bumps navEpoch (requestNavigate
-     * always bumps). Used by the MainActivity deep-link fail-safe (malformed
-     * session id → Sessions) where [setLastRoute] would short-circuit when the
-     * mirror already reads "sessions" (which it does on Files/Git — those
-     * destinations do not update navState).
+     * [NavState.lastRoute] = Sessions + bumps [NavState.navEpoch]
+     * (requestNavigate always bumps). F2: the redundant
+     * settingsManager.lastRoute persistence write was deleted (see
+     * [setLastRoute] / [requestNavigate]). Used by the MainActivity deep-link
+     * fail-safe (malformed session id → Sessions) where [setLastRoute] would
+     * short-circuit when the mirror already reads "sessions" (which it does
+     * on Files/Git — those destinations do not update navState).
      */
     internal fun forceNavigateToSessions() = requestNavigate(NavRoute.Sessions)
 

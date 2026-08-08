@@ -5,8 +5,6 @@ import cn.vectory.ocdroid.data.model.SSEEvent
 import cn.vectory.ocdroid.data.model.SessionStatus
 import cn.vectory.ocdroid.data.model.QuestionRequest
 import cn.vectory.ocdroid.data.model.TodoItem
-import cn.vectory.ocdroid.service.status.SessionStatusKey
-import cn.vectory.ocdroid.service.status.toSessionBusyStatus
 import cn.vectory.ocdroid.ui.AppAction
 import cn.vectory.ocdroid.ui.NavRoute
 import cn.vectory.ocdroid.ui.routeChatSessionId

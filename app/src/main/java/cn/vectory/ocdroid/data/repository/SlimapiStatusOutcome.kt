@@ -9,7 +9,7 @@ import cn.vectory.ocdroid.data.model.SessionStatus
  *
  * Every HTTP branch the sidecar can return for
  * `GET /slimapi/sessions/{sid}/status` collapses into exactly one of these
- * five shapes so the caller (T7 reconcile / T11 StatusAggregator) never
+ * five shapes so the caller (T7 reconcile / slim status fan-out) never
  * pattern-matches on `retrofit2.Response` / HTTP status / error-code
  * strings. Mirrors the [ExpandOutcome] discipline (T3 G6).
  *

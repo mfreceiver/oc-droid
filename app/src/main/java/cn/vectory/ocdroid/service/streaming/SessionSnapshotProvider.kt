@@ -16,9 +16,11 @@ import cn.vectory.ocdroid.service.status.StatusSnapshot
  * **D1 (gate #5)**: the pre-D1 contract returned `Map<String, Session>` only,
  * which collapsed the universe to the sessions map — a registered workdir
  * whose sessions were all archived vanished from coverage. The new contract
- * returns [StatusSnapshot] so the aggregator can positively enforce
- * registered-workdir coverage AND positively classify an active id returned
- * by `/session/status` that is NOT in `sessionsById` as `Busy` (not skipped).
+ * returns [StatusSnapshot] so the caller (slim fan-out retry path) can
+ * positively enforce registered-workdir coverage AND positively classify an
+ * active id returned by `/session/status` that is NOT in `sessionsById` as
+ * `Busy` (not skipped). (The pre-F6 consumer was the retired
+ * `StatusAggregator`.)
  */
 fun interface SessionSnapshotProvider {
     /**

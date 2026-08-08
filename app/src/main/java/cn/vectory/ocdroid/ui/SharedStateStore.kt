@@ -58,8 +58,8 @@ class SharedStateStore @Inject constructor(
      * REAL authority [ScopeKey] at the non-aggregator snapshot sites
      * (StatusPollOrchestrator / SessionTreeHydrator / SessionListActions).
      * Previously these sites used an EMPTY ScopeKey ("","") → coverage was
-     * written under a key the aggregator never reads → globalState degraded
-     * to Unknown. */
+     * written under a key no reader consulted → the (F6-retired) global busy
+     * projection degraded to Unknown. */
     private val identityStore: cn.vectory.ocdroid.service.identity.ConnectionIdentityStore,
     @cn.vectory.ocdroid.di.UiApplicationScope
     private val scope: kotlinx.coroutines.CoroutineScope? = null,
@@ -195,10 +195,9 @@ class SharedStateStore @Inject constructor(
     /**
      * §P0-A rev-gpt #5: the REAL authority [ScopeKey] for the current identity
      * (profileId + endpointFp). Used by the non-aggregator snapshot sites
-     * so coverage is written under the SAME key the aggregator reads
-     * ([StatusAggregatorImpl.currentScope] derives identically from
-     * `identityStore.currentIdentity.value`). MUST match the aggregator's
-     * derivation — no second scope source. */
+     * so coverage is written under the connection identity's key. Scope
+     * construction is centralized in `scopeKeyOf` — no second scope source.
+     */
     internal fun authorityScope(): cn.vectory.ocdroid.data.state.ScopeKey {
         val id = identityStore.currentIdentity.value
         return cn.vectory.ocdroid.data.state.scopeKeyOf(

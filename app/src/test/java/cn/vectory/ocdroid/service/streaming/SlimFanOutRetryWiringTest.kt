@@ -4,7 +4,6 @@ import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.repository.StatusOutcome
 import cn.vectory.ocdroid.service.identity.ConnectionIdentity
 import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
-import cn.vectory.ocdroid.service.status.StatusAggregator
 import cn.vectory.ocdroid.service.status.StatusFanOutSummary
 import cn.vectory.ocdroid.service.status.StatusSnapshot
 import kotlinx.coroutines.CompletableDeferred

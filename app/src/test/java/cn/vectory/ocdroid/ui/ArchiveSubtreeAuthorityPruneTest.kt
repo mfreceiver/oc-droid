@@ -19,15 +19,14 @@ import org.junit.Test
  * `authority.bySid` and recompute the `sessionList.sessionStatuses` projection
  * via [reduceAuthority] (the SOLE writer of sessionStatuses). Pre-fix these two
  * paths removed/archived the session in the list but left its entry in
- * `authority.bySid`, so an archived session stayed Busy in the aggregator's
- * derived view forever.
+ * `authority.bySid`, so an archived session stayed Busy in any downstream
+ * busy projection forever.
  *
  * This mirrors the LOCAL archive/delete subtree tests
  * ([SessionListFieldsReducer] / `AppActionReducerTest`) but covers the two
  * server-driven paths they do NOT (SSE `session.updated (archived)` +
- * `BulkSessionsRefreshed`). Deliberately NOT in [AuthorityReducerTest] /
- * [cn.vectory.ocdroid.service.status.StatusAggregatorImplTest] (CORE lane owns
- * those files).
+ * `BulkSessionsRefreshed`). Deliberately NOT in [AuthorityReducerTest] (CORE
+ * lane owns that file).
  *
  * §B10 (#4): also pins the sole-writer gate — the public `SessionListState`
  * factory seeds `sessionStatuses = emptyMap()` and `copy(...)` has no
