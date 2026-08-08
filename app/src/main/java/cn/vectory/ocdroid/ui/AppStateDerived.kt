@@ -401,8 +401,62 @@ fun isStaleRunningPart(
     runningSinceEpochMs: Long?,
     graceMs: Long = QUESTION_INTERRUPT_GRACE_MS
 ): Boolean {
-    if (part.isThinPlaceholder()) return sessionStatus?.isIdle == true
+    if (part.isThinPlaceholder()) {
+        // §fix-thin-flicker: thin_placeholder 也过 grace，避免流式期间 session
+        // status 瞬时 idle 抖动（Bug C）导致"已中断"闪烁。runningSince==null
+        // 保持"首次观测即终态"语义（与 isInterruptedQuestionPart 一致）。
+        if (sessionStatus?.isIdle != true) return false
+        if (runningSinceEpochMs != null && nowEpochMs - runningSinceEpochMs < graceMs) return false
+        return true
+    }
     return isInterruptedQuestionPart(part, pending, sessionStatus, nowEpochMs, runningSinceEpochMs, graceMs)
+}
+
+/**
+ * §fix-thin-flicker: seed/prune/judge loop for stale-running part keys,
+ * extracted from ChatMessageList's `remember` block so the cross-recompose
+ * stateful sequence is unit-testable.
+ *
+ * Carries the caller-owned [runningSince] map across recomposes:
+ *  - **seed**: a part becomes a candidate (and gets a `putIfAbsent` timestamp)
+ *    iff it is a stale question part OR a thin_placeholder currently in an
+ *    idle session. The `&& idle` gate on thin_placeholder is the critical
+ *    fix — the timestamp then records "when continuous idle began" rather
+ *    than "when the part first appeared", so [QUESTION_INTERRUPT_GRACE_MS]
+ *    measures continuous-idle duration. Without it the part would seed during
+ *    busy streaming and grace would always be elapsed, making the gate useless
+ *    against Bug C's sub-second idle flaps.
+ *  - **prune**: `retainAll(liveCandidates)` drops ids no longer a candidate
+ *    (e.g. session flipped back to busy). Because seed-condition and
+ *    candidate-membership are the SAME predicate, a thin_placeholder's seed
+ *    is pruned the instant session goes busy — so the NEXT idle flap re-seeds
+ *    from scratch, resetting grace. This yields "continuous idle ≥ grace"
+ *    semantics with no extra idle-since state.
+ *  - **judge**: [isStaleRunningPart] decides terminal-interrupt per part.
+ *
+ * Returns the set of part ids that should render as "interrupted".
+ */
+internal fun evaluateStaleRunningKeys(
+    parts: Collection<Part>,
+    pending: List<QuestionRequest>,
+    sessionStatus: SessionStatus?,
+    now: Long,
+    runningSince: MutableMap<String, Long>,
+): Set<String> {
+    val liveCandidates = HashSet<String>()
+    val keys = HashSet<String>()
+    for (part in parts) {
+        val thinIdle = part.isThinPlaceholder() && sessionStatus?.isIdle == true
+        if (isStaleQuestionPart(part, pending) || thinIdle) {
+            liveCandidates.add(part.id)
+            runningSince.putIfAbsent(part.id, now)
+        }
+        if (isStaleRunningPart(part, pending, sessionStatus, now, runningSince[part.id])) {
+            keys.add(part.id)
+        }
+    }
+    runningSince.keys.retainAll(liveCandidates)
+    return keys
 }
 
 private fun logContextUsageUnavailable(reason: String): ContextUsage? {

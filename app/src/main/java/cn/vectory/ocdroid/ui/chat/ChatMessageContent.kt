@@ -55,9 +55,8 @@ import cn.vectory.ocdroid.ui.ScrollBehavior
 import cn.vectory.ocdroid.ui.currentSessionStatus
 import cn.vectory.ocdroid.ui.filterBeforeRevert
 import cn.vectory.ocdroid.ui.injectMetadataMarkers
-import cn.vectory.ocdroid.ui.isStaleQuestionPart
+import cn.vectory.ocdroid.ui.evaluateStaleRunningKeys
 import cn.vectory.ocdroid.ui.isInterruptedQuestionPart
-import cn.vectory.ocdroid.ui.isStaleRunningPart
 import cn.vectory.ocdroid.ui.theme.AppTextStyles
 import cn.vectory.ocdroid.ui.theme.CardWidthScope
 import cn.vectory.ocdroid.ui.theme.Dimens
@@ -147,20 +146,13 @@ internal fun ChatMessageList(
     val questionGraceTick = remember { mutableIntStateOf(0) }
     val staleQuestionPartKeys: Set<String> =
         remember(partsByMessage, pendingQuestions, currentSessionStatus, questionGraceTick.intValue) {
-            val now = System.currentTimeMillis()
-            val liveQuestionCandidates = HashSet<String>()
-            val keys = HashSet<String>()
-            for (part in partsByMessage.values.flatten()) {
-                if (isStaleQuestionPart(part, pendingQuestions)) {
-                    liveQuestionCandidates.add(part.id)
-                    questionRunningSince.putIfAbsent(part.id, now)
-                }
-                if (isStaleRunningPart(part, pendingQuestions, currentSessionStatus, now, questionRunningSince[part.id])) {
-                    keys.add(part.id)
-                }
-            }
-            questionRunningSince.keys.retainAll(liveQuestionCandidates)
-            keys
+            evaluateStaleRunningKeys(
+                parts = partsByMessage.values.flatten(),
+                pending = pendingQuestions,
+                sessionStatus = currentSessionStatus,
+                now = System.currentTimeMillis(),
+                runningSince = questionRunningSince,
+            )
         }
     val sessionCanInterrupt = currentSessionStatus?.isIdle == true
     val hasPendingGraceCandidates = sessionCanInterrupt &&

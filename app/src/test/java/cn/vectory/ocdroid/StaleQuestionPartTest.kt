@@ -7,7 +7,9 @@ import cn.vectory.ocdroid.ui.isStaleQuestionPart
 import cn.vectory.ocdroid.ui.isStaleRunningPart
 import cn.vectory.ocdroid.ui.isInterruptedQuestionPart
 import cn.vectory.ocdroid.ui.QUESTION_INTERRUPT_GRACE_MS
+import cn.vectory.ocdroid.ui.evaluateStaleRunningKeys
 import cn.vectory.ocdroid.data.model.SessionStatus
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -291,5 +293,81 @@ class StaleQuestionPartTest {
                 nowEpochMs = now, runningSinceEpochMs = 5_000L,
             )
         )
+    }
+
+    // ── §fix-thin-flicker: thin_placeholder grace 门控测试 ───────────────────
+
+    @Test
+    fun `thin placeholder grace not yet elapsed stays live`() {
+        val p = Part(id = "thin_placeholder_msg-1", type = "text")
+        val now = 100_000L
+        // runningSince = now - 1000 < grace (5000) → grace 未过 → 不中断（显示加载条）
+        assertFalse(
+            isStaleRunningPart(
+                p, pending = emptyList(), sessionStatus = SessionStatus("idle"),
+                nowEpochMs = now, runningSinceEpochMs = now - 1_000,
+            )
+        )
+    }
+
+    @Test
+    fun `thin placeholder grace elapsed shows interrupted`() {
+        val p = Part(id = "thin_placeholder_msg-1", type = "text")
+        val now = 100_000L
+        // runningSince = now - 6000 > grace (5000) → grace 已过 → 中断
+        assertTrue(
+            isStaleRunningPart(
+                p, pending = emptyList(), sessionStatus = SessionStatus("idle"),
+                nowEpochMs = now, runningSinceEpochMs = now - 6_000,
+            )
+        )
+    }
+
+    // ── §fix-thin-flicker: evaluateStaleRunningKeys 时序场景测试 ─────────────
+    // 模拟 ChatMessageList 跨 recompose 序列：共享一个 runningSince map，逐次
+    // 调用 evaluateStaleRunningKeys，断言 seed/prune/judge 在 Bug C idle 抖动
+    // 与真实中断下的行为。这是纯函数 isStaleRunningPart 测不到的集成语义。
+
+    private val thinInterruptId = "thin_placeholder_msg-1"
+
+    @Test
+    fun `evaluateStaleRunningKeys - busy streaming then idle flap does not interrupt`() {
+        val parts = listOf(Part(id = thinInterruptId, type = "text"))
+        val rs = mutableMapOf<String, Long>()
+
+        // T1: busy + placeholder 出现 → 不播种、不中断
+        var keys = evaluateStaleRunningKeys(parts, emptyList(), SessionStatus("busy"), now = 0L, runningSince = rs)
+        assertTrue("T1 busy: no interrupt", keys.isEmpty())
+        assertTrue("T1 busy: not seeded", rs.isEmpty())
+
+        // T2: idle 抖动 (now=30s) → 播种 30s、不中断（grace 内）
+        keys = evaluateStaleRunningKeys(parts, emptyList(), SessionStatus("idle"), now = 30_000L, runningSince = rs)
+        assertTrue("T2 idle flap: no interrupt", keys.isEmpty())
+        assertEquals("T2 idle flap: seeded at 30s", 30_000L, rs[thinInterruptId])
+
+        // T3: 回 busy → 种子被 prune
+        keys = evaluateStaleRunningKeys(parts, emptyList(), SessionStatus("busy"), now = 30_300L, runningSince = rs)
+        assertTrue("T3 busy: no interrupt", keys.isEmpty())
+        assertTrue("T3 busy: seed pruned", rs.isEmpty())
+
+        // T4: 再次 idle (now=40s) → 重新播种 40s、不中断（多次抖动重置 grace）
+        keys = evaluateStaleRunningKeys(parts, emptyList(), SessionStatus("idle"), now = 40_000L, runningSince = rs)
+        assertTrue("T4 second flap: no interrupt", keys.isEmpty())
+        assertEquals("T4 second flap: re-seeded at 40s", 40_000L, rs[thinInterruptId])
+
+        // T5: idle 持续 6s (now=46s) → 判中断（连续 idle ≥ grace）
+        keys = evaluateStaleRunningKeys(parts, emptyList(), SessionStatus("idle"), now = 46_000L, runningSince = rs)
+        assertTrue("T5 sustained idle: interrupted", keys.contains(thinInterruptId))
+    }
+
+    @Test
+    fun `evaluateStaleRunningKeys - cold-start stuck placeholder interrupts after grace`() {
+        // T6: 冷启动加载到 stuck placeholder（session 已 idle）→ 播种 +6s → 中断
+        val parts = listOf(Part(id = thinInterruptId, type = "text"))
+        val rs = mutableMapOf<String, Long>()
+        var keys = evaluateStaleRunningKeys(parts, emptyList(), SessionStatus("idle"), now = 100_000L, runningSince = rs)
+        assertTrue("T6 cold start t0: no interrupt", keys.isEmpty())
+        keys = evaluateStaleRunningKeys(parts, emptyList(), SessionStatus("idle"), now = 106_000L, runningSince = rs)
+        assertTrue("T6 cold start +6s: interrupted", keys.contains(thinInterruptId))
     }
 }
