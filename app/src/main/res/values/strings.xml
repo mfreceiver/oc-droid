@@ -204,7 +204,7 @@
          this single entry subsumes both "Edit & rerun" and "Revert" in
          this project (both point at RevertConversation.execute). -->
     <string name="message_actions_menu">Message actions</string>
-    <string name="message_action_copy">Copy</string>
+    <string name="message_action_copy">Copy full message</string>
     <string name="message_action_edit_rerun">Edit &amp; rerun from here</string>
     <string name="message_action_fork">Fork from here</string>
     <string name="message_revert_confirm_title">Rewind the conversation?</string>

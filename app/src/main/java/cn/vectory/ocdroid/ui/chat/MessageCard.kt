@@ -68,6 +68,10 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.text.contextmenu.builder.item
+import androidx.compose.foundation.text.contextmenu.data.TextContextMenuKeys
+import androidx.compose.foundation.text.contextmenu.modifier.appendTextContextMenuComponents
+import androidx.compose.foundation.text.contextmenu.modifier.filterTextContextMenuComponents
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
@@ -103,6 +107,10 @@ import cn.vectory.ocdroid.data.model.Part
 import cn.vectory.ocdroid.data.repository.FileVcsRepository
 import cn.vectory.ocdroid.ui.theme.AppConfirmDialog
 import cn.vectory.ocdroid.ui.theme.MenuItem
+
+/** §text-context-menu: stable keys for custom items injected into the selection toolbar. */
+private val CopyFullMessageKey = "ocdroid_copy_full_message"
+private val ForkFromHereKey = "ocdroid_fork_from_here"
 
 /**
  * §1C: the per-message card wrapping the existing [MessageRow]. Long-press
@@ -215,6 +223,26 @@ internal fun MessageCard(
     val hapticFeedback = LocalHapticFeedback.current
     val actionsLabel = stringResource(R.string.message_actions_menu)
 
+    // §text-context-menu: labels reused by the enriched selection toolbar.
+    val copyFullLabel = stringResource(R.string.message_action_copy)
+    val forkLabel = stringResource(R.string.message_action_fork)
+
+    // §text-context-menu: The enriched selection toolbar is injected via
+    // appendTextContextMenuComponents + filterTextContextMenuComponents on the
+    // Column below. When the user selects text (double-tap or drag), the default
+    // TextContextMenuToolbarProvider renders a floating toolbar showing:
+    //   Copy (selected text) + Copy full message + Fork from here
+    // Select All and system smart suggestions are filtered out.
+    //
+    // NOTE on DropdownMenu coexistence: A custom TextContextMenuProvider wrapper
+    // was attempted to dismiss the DropdownMenu when the selection toolbar shows
+    // (resolving the dual-trigger on long-press). However, wrapping the provider
+    // breaks the default toolbar rendering — the delegated showTextContextMenu()
+    // call produces no visible toolbar (verified on emulator). The modifiers alone
+    // work correctly with the unmodified default provider. The long-press overlap
+    // (DropdownMenu + selection toolbar both appearing briefly) is accepted as a
+    // known minor UX issue; double-tap is the primary text-selection entry point.
+
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -252,7 +280,34 @@ internal fun MessageCard(
                 contentDescription = actionsLabel
             }
     ) {
-        Column(modifier = Modifier.fillMaxWidth()) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                // §text-context-menu: inject custom items so the selection
+                // toolbar shows Copy-selected-text + Copy-full-message + Fork.
+                .appendTextContextMenuComponents {
+                    if (canCopy) {
+                        item(key = CopyFullMessageKey, label = copyFullLabel) {
+                            onCopy(collectMessageText(parts, streamingPartTexts, context))
+                            close()
+                        }
+                    }
+                    if (canFork) {
+                        item(key = ForkFromHereKey, label = forkLabel) {
+                            onFork(message.id)
+                            close()
+                        }
+                    }
+                }
+                // §text-context-menu: keep only Copy (framework CopyKey —
+                // copies the selected text) + our two custom items; strip
+                // SelectAll and system smart suggestions.
+                .filterTextContextMenuComponents {
+                    it.key === TextContextMenuKeys.CopyKey
+                        || it.key === CopyFullMessageKey
+                        || it.key === ForkFromHereKey
+                }
+        ) {
             // The existing per-part rendering — delegated verbatim.
             MessageRow(
                 message = message,
