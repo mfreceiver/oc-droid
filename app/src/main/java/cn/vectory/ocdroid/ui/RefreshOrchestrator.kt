@@ -235,7 +235,7 @@ class RefreshOrchestrator @Inject constructor(
         if (routeWasArchived || currentWasArchived) {
             store.dispatch(AppAction.CloseDetail)
             settingsManager.currentSessionId = null
-            settingsManager.lastRoute = NavRoute.Sessions.route
+            // F2: settingsManager.lastRoute write was redundant; deleted.
             store.mutateNav {
                 it.copy(
                     lastRoute = NavRoute.Sessions.route,

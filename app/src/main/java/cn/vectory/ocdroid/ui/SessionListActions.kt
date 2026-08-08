@@ -163,7 +163,8 @@ internal fun launchLoadSessionStatus(
     onComplete: (Boolean) -> Unit = {},
 ) = StatusPollOrchestrator.launchLoadSessionStatus(
     scope = scope,
-    repository = repository,
+    connectionRepository = repository,
+    sessionRepository = repository,
     slices = slices,
     trigger = trigger,
     onComplete = onComplete,

@@ -14,6 +14,10 @@ import android.content.SharedPreferences
  * Behavior byte-identical to pre-split [SettingsManager]: same ESP instance,
  * same key strings, same `workspace → files` and unknown-route → chat
  * rewrites, same first-read-and-write migration. NO key renames.
+ *
+ * F2 (archdebt follow-up): the persisted route is now READ-ONLY (migration/legacy
+ * source); production authority is in-memory [NavState.lastRoute]; the 10 write
+ * points were deleted in F2.
  */
 internal class NavigationPrefs(
     private val encryptedPrefs: SharedPreferences,
@@ -30,7 +34,7 @@ internal class NavigationPrefs(
      * migrates 0/1/2 to chat/sessions/settings and writes the route key.
      * The removed `workspace` route is explicitly migrated to Files.
      */
-    var lastRoute: String
+    val lastRoute: String
         get() {
             val stored = encryptedPrefs.getString(KEY_LAST_ROUTE, null)
             if (stored == "workspace") {
@@ -49,10 +53,6 @@ internal class NavigationPrefs(
             }
             encryptedPrefs.edit().putString(KEY_LAST_ROUTE, migrated).apply()
             return migrated
-        }
-        set(value) {
-            val route = value.takeIf { it in TOP_LEVEL_ROUTE_KEYS } ?: ROUTE_CHAT
-            encryptedPrefs.edit().putString(KEY_LAST_ROUTE, route).apply()
         }
 
     companion object {

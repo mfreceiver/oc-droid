@@ -397,16 +397,12 @@ class SettingsManagerTest {
 
     @Test
     fun `lastRoute accepts files and git`() {
-        settings.lastRoute = "files"
+        // F2: setter deleted — seed raw prefs directly; getter returns verbatim
+        // (TOP_LEVEL_ROUTE_KEYS passthrough coverage).
+        rawEncryptedPrefs().edit().putString("last_route", "files").commit()
         assertEquals("files", settings.lastRoute)
-        settings.lastRoute = "git"
+        rawEncryptedPrefs().edit().putString("last_route", "git").commit()
         assertEquals("git", settings.lastRoute)
-    }
-
-    @Test
-    fun `lastRoute setter rejects unknown route to chat`() {
-        settings.lastRoute = "unknown"
-        assertEquals("chat", settings.lastRoute)
     }
 
     @Test

@@ -118,7 +118,7 @@ object SlimFanOutRetrySchedulerModule {
                 // 404 detection is defeated under delegation (a missing item — really idle —
                 // is misjudged SessionMissing → EvictSession storm that never contracts the
                 // snapshot). The bulk runRefresh above already issues one full query per
-                // tick (StatusAggregatorImpl.refresh → getSlimapiSessionsStatus). Short-
+                // tick (the deleted `refresh` adapter → getSlimapiSessionsStatus). Short-
                 // circuit the per-session sweep until the per-session endpoint is
                 // independently available again. Status data flow is fully covered by bulk
                 // runRefresh; stale cleanup is driven independently by the session.deleted

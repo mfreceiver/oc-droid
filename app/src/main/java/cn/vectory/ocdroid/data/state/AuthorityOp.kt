@@ -106,9 +106,11 @@ sealed interface AuthorityOp {
     /** REST source failure → covered entries become fail-closed unknown (absent
      *  in the projection). [requestToken] carries the host/epoch guard.
      *
-     *  §P0-A Lane 2 (aggregator derivation): the aggregator's
-     *  `markRequestFailed` adapter dispatches this op. The reducer applies
-     *  MERGE TIMING — entries fresher than [monotonic] (the failure's effective
+     *  §P0-A Lane 2 / F1: the aggregator's `markRequestFailed` adapter (which
+     *  dispatched this op) was **retired** in the archdebt follow-up — the
+     *  adapter is deleted; the op + reducer branch are retained for the
+     *  authority path. The reducer applies MERGE TIMING — entries fresher than
+     *  [monotonic] (the failure's effective
      *  time) survive (a prior SSE `Busy`/`Retry` is NOT clobbered by a stale
      *  failure); entries with `updatedAtMs <= monotonic` are REMOVED
      *  (absence ≡ unknown, fail-closed). [registeredWorkdirs] is carried so the

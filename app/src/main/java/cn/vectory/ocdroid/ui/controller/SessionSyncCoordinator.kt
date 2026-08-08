@@ -11,7 +11,6 @@ import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.service.events.IdentifiedSseEvent
 import cn.vectory.ocdroid.service.identity.ConnectionIdentity
 import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
-import cn.vectory.ocdroid.service.status.StatusAggregatorInput
 import cn.vectory.ocdroid.service.status.StatusFanOutSummary
 import cn.vectory.ocdroid.ui.AppAction
 import cn.vectory.ocdroid.ui.BundleStamp
@@ -94,7 +93,6 @@ class SessionSyncCoordinator(
     override val effects: SharedEffectBus,
     internal val currentProfileId: () -> String,
     internal val identityStore: ConnectionIdentityStore? = null,
-    override val statusAggregatorInput: StatusAggregatorInput? = null,
     internal val clock: () -> Long = { clockOverride?.invoke() ?: System.currentTimeMillis() },
     private val supportsWatermarkResync: () -> Boolean = { false },
     override val repository: OpenCodeRepository? = null,

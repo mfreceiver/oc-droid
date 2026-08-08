@@ -312,7 +312,7 @@ class HostProfileController(
         settingsManager.sessionCache = emptyList()
         // §B4 / §10 host switch: force popToSessions so the detail pane
         // cannot stay on a prior host's chat/{id}.
-        settingsManager.lastRoute = NavRoute.Sessions.route
+        // F2: settingsManager.lastRoute write was redundant; deleted.
         slices.store.mutateNav {
             it.copy(
                 lastRoute = NavRoute.Sessions.route,

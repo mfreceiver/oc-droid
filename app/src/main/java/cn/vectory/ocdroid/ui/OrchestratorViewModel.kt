@@ -94,12 +94,14 @@ class OrchestratorViewModel @Inject constructor(
      * The short-circuit guard (`state.lastRoute == route.route → return`) is
      * retained: a redundant passive write (the mirror already matches) is a
      * no-op, avoiding a pointless CAS + StateFlow emission.
+     *
+     * F2: the `settingsManager.lastRoute` persistence write was a redundant
+     * mirror of the in-memory [NavState.lastRoute]; deleted (F2).
      */
     fun setLastRoute(route: NavRoute) {
         val state = core.store.navFlow.value
         // Authority is lastRoute only; §unified-nav: passive mirror — NO navEpoch bump here.
         if (state.lastRoute == route.route) return
-        core.settingsManager.lastRoute = route.route
         core.store.mutateNav { it.copy(lastRoute = route.route) }
     }
 
@@ -118,12 +120,11 @@ class OrchestratorViewModel @Inject constructor(
      *
      * Main-thread contract: nav commands originate from Compose callbacks
      * (Dispatchers.Main.immediate) or Activity onNewIntent (Main). The
-     * settingsManager.lastRoute write + the mutateNav CAS are both main-thread
-     * safe + serial.
+     * mutateNav CAS is main-thread safe + serial. F2: the redundant
+     * settingsManager.lastRoute persistence write was deleted.
      */
     @MainThread
     fun requestNavigate(route: NavRoute) {
-        core.settingsManager.lastRoute = route.route
         core.store.mutateNav {
             it.copy(
                 lastRoute = route.route,
@@ -228,8 +229,8 @@ class OrchestratorViewModel @Inject constructor(
     fun navigateToChat(sessionId: String?) {
         val sid = sessionId ?: return // chat/new path deferred.
         val route = "chat/$sid"
-        // Persist the parameterized route (safe — cold start ignores it per §5 P3).
-        core.settingsManager.lastRoute = route
+        // F2: the settingsManager.lastRoute persistence write was a redundant
+        // mirror (cold start ignores it per §5 P3); deleted in F2.
         // §unified-nav (A4 token-capture race): mint the token INSIDE the
         // mutateStateAndGet transform and read it back from the RETURNED
         // committed snapshot. The prior code did `mutateState { ... mint T ... }`
@@ -301,15 +302,19 @@ class OrchestratorViewModel @Inject constructor(
 
     // ── Permission / Question responses (orchestrator-domain) ───────────────
 
+    /**
+     * F4a: fork collapsed — both modes (slim/legacy) hit the same
+     * [core.repository.respondPermission] endpoint. [routeToken] param KEPT
+     * for call-site stability (ChatScaffold.kt passes `p.routeToken`); it is
+     * a client-side provenance signal only — upstream spec §7:231 deleted it
+     * from the wire.
+     */
     fun respondPermission(
         sessionId: String,
         permissionId: String,
         response: PermissionResponse,
-        // §Phase3b slim-branch: when the permission arrived via a slim SSE
-        // event the sidecar re-injects the directory from this HMAC token;
-        // legacy respondPermission relies on a global
-        // currentDirectory header which has no correct value on the slim
-        // cross-directory aggregation surface. Null = legacy single-dir path.
+        /** F4a: client-side provenance signal only; upstream spec §7:231
+         *  deleted it from the wire; both modes hit the same endpoint. */
         routeToken: String? = null,
     ) {
         // §R18 Phase 3 Wave 3 (drift #6 / P1-7): user-triggered ephemeral
@@ -317,11 +322,7 @@ class OrchestratorViewModel @Inject constructor(
         // call + a slice transform (never a VM `::ref`), so viewModelScope
         // cancels cleanly on navigation-away.
         viewModelScope.launch {
-            val result = if (routeToken != null) {
-                core.repository.respondSlimapiPermission(sessionId, permissionId, response, routeToken)
-            } else {
-                core.repository.respondPermission(sessionId, permissionId, response)
-            }
+            val result = core.repository.respondPermission(sessionId, permissionId, response)
             result
                 .onSuccess {
                     core.writeSessionList { it.copy(pendingPermissions = it.pendingPermissions.filter { p -> p.id != permissionId }) }
@@ -332,39 +333,32 @@ class OrchestratorViewModel @Inject constructor(
         }
     }
 
+    /**
+     * F4a: fork shrinks to directory resolution — slim reads the directory
+     * from the pending entry; legacy calls [core.resolveQuestionDirectory].
+     * Both modes hit the same [core.repository.replyQuestion] endpoint.
+     * [routeToken] param KEPT for call-site stability.
+     */
     fun replyQuestion(
         requestId: String,
         answers: List<List<String>>,
-        // §Phase3b slim-branch: see [respondPermission]'s routeToken doc.
-        // Slim path skips resolveQuestionDirectory — the sidecar derives
-        // the directory from the token, so the legacy directory resolution
-        // is both unnecessary and (on the aggregation surface) wrong.
+        /** F4a: client-side provenance signal only; see [respondPermission]. */
         routeToken: String? = null,
         onError: () -> Unit = {},
     ) {
         // §R18 Phase 3 Wave 3 (drift #6 / P1-7): same viewModelScope rationale
         // as respondPermission.
         viewModelScope.launch {
-            val result = if (routeToken != null) {
-                // §slimapi-questions: thread the originating directory (carried on
-                // the pending entry from SlimapiQuestionEntry.directory) so the
-                // sidecar routes the write to the owning opencode instance. Falls
-                // back to null if the entry has no directory (legacy fallback).
-                val entryDir = core.sessionListFlow.value.pendingQuestions
+            // Directory resolution: slim reads from the pending entry's directory;
+            // legacy resolves via AppCore's question-directory resolve.
+            val directory = if (routeToken != null) {
+                core.sessionListFlow.value.pendingQuestions
                     .firstOrNull { it.id == requestId }?.directory
-                DebugLog.d("Question", "replyQuestion slim req=$requestId token=$routeToken dir=${entryDir ?: "null"}")
-                core.repository.replySlimapiQuestion(requestId, answers, routeToken, entryDir)
             } else {
-                // §R18 Phase 2-E step 1: explicit directory now required by the
-                // API. Resolve from the question's parent session if possible
-                // (handles cross-workdir routing); fall back to the persisted
-                // workdir. Was the global currentDirectory before — currentWorkdir
-                // was always its source on the main path.
-                val directory = core.resolveQuestionDirectory(requestId)
-                // §Phase1a instrumentation (Issue 1): the directory actually sent on the reply.
-                DebugLog.d("Question", "replyQuestion req=$requestId dir=${directory ?: "null"}")
-                core.repository.replyQuestion(requestId, answers, directory)
+                core.resolveQuestionDirectory(requestId)
             }
+            DebugLog.d("Question", "replyQuestion req=$requestId dir=${directory ?: "null"}")
+            val result = core.repository.replyQuestion(requestId, answers, directory)
             result
                 .onSuccess {
                     DebugLog.d("Question", "replyQuestion OK req=$requestId")
@@ -380,27 +374,26 @@ class OrchestratorViewModel @Inject constructor(
         }
     }
 
+    /**
+     * F4a: same collapse as [replyQuestion] — directory resolution only;
+     * single [core.repository.rejectQuestion] call.
+     */
     fun rejectQuestion(
         requestId: String,
-        // §Phase3b slim-branch: see [respondPermission]'s routeToken doc.
+        /** F4a: client-side provenance signal only; see [respondPermission]. */
         routeToken: String? = null,
         onError: () -> Unit = {},
     ) {
-        // §R18 Phase 3 Wave 3 (drift #6 / P1-7): same viewModelScope rationale
-        // as respondPermission.
+        // §R18 Phase 3 Wave 3 (drift #6 / P1-7): same viewModelScope rationale.
         viewModelScope.launch {
-            val result = if (routeToken != null) {
-                // §slimapi-questions: see replyQuestion — thread the entry directory.
-                val entryDir = core.sessionListFlow.value.pendingQuestions
+            val directory = if (routeToken != null) {
+                core.sessionListFlow.value.pendingQuestions
                     .firstOrNull { it.id == requestId }?.directory
-                DebugLog.d("Question", "rejectQuestion slim req=$requestId token=$routeToken dir=${entryDir ?: "null"}")
-                core.repository.rejectSlimapiQuestion(requestId, routeToken, entryDir)
             } else {
-                val directory = core.resolveQuestionDirectory(requestId)
-                // §Phase1a instrumentation (Issue 1): the directory actually sent on the reject.
-                DebugLog.d("Question", "rejectQuestion req=$requestId dir=${directory ?: "null"}")
-                core.repository.rejectQuestion(requestId, directory)
+                core.resolveQuestionDirectory(requestId)
             }
+            DebugLog.d("Question", "rejectQuestion req=$requestId dir=${directory ?: "null"}")
+            val result = core.repository.rejectQuestion(requestId, directory)
             result
                 .onSuccess {
                     DebugLog.d("Question", "rejectQuestion OK req=$requestId")
@@ -411,12 +404,6 @@ class OrchestratorViewModel @Inject constructor(
                 .onFailure { error ->
                     DebugLog.w("Question", "rejectQuestion FAIL req=$requestId err=${error.message}")
                     android.util.Log.w(TAG, "Failed to reject question: ${error.message}")
-                    // §issue-1 Fix C / Phase 2 gate 🔴1: reject failure surfaces via the
-                    // card's onError callback → in-card errorText, symmetric with
-                    // replyQuestion (which also only calls onError, no global Snackbar).
-                    // The Phase 2a VM-level UiEvent.Error was removed: the card is always
-                    // visible for the current session's question (it owns isRejecting +
-                    // errorText), so the Snackbar was a redundant double-display.
                     onError()
                 }
         }

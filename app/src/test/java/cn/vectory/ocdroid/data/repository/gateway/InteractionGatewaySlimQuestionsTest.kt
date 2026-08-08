@@ -12,6 +12,8 @@ import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.mockk
 import kotlinx.coroutines.test.runTest
+import cn.vectory.ocdroid.data.api.PermissionResponseRequest
+import cn.vectory.ocdroid.data.model.PermissionResponse
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.Assert.assertFalse
@@ -223,6 +225,38 @@ class InteractionGatewaySlimQuestionsTest {
         assertTrue("items carried through", outcome.items == items)
         assertTrue("authoritativeDirectories == setOf(/a)", outcome.authoritativeDirectories == setOf("/a"))
         assertTrue("bit marked supported", profile.supportsSlimQuestions)
+    }
+
+    // ── F4a micro-fix: legacy respondPermission isSuccessful check ──────────
+    //
+    // The F4a collapse aligned legacy respondPermission with the (deleted) slim
+    // variant: both now check isSuccessful. This test pins that HTTP 500 →
+    // Result.failure (was silent success before the fix).
+
+    private fun gatewayWithMutationApi(
+        profile: ServerCompatProfile = ServerCompatProfile().apply { setSlimConnection(true) },
+        mutationApi: OpenCodeApi,
+    ): InteractionGateway {
+        val bundle = mockk<ClientBundle>(relaxed = true)
+        every { bundle.mutationApi } returns mutationApi
+        return InteractionGateway(
+            bundleProvider = { bundle },
+            serverCompatProfile = profile,
+        )
+    }
+
+    @Test
+    fun `respondPermission HTTP 500 returns failure (F4a micro-fix)`() = runTest {
+        val api = mockk<OpenCodeApi>(relaxed = true)
+        coEvery { api.respondPermission(any(), any(), any()) } returns Response.error(
+            500,
+            "Internal".toResponseBody("text/plain".toMediaTypeOrNull()),
+        )
+
+        val result = gatewayWithMutationApi(mutationApi = api)
+            .respondPermission("s1", "p1", PermissionResponse.ONCE)
+
+        assertTrue("must surface as Result.failure on HTTP 500", result.isFailure)
     }
 
     @Test

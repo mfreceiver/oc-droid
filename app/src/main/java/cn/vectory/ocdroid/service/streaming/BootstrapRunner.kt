@@ -37,8 +37,8 @@ sealed interface BootstrapResult {
 
     /**
      * Bootstrap succeeded; [identity] is the bound identity for the caller
-     * to feed into
-     * [cn.vectory.ocdroid.service.status.StatusAggregatorInput.refresh].
+     * to feed into the aggregator's read side (via the authority derivation
+     * pipeline, now that [StatusAggregatorInput] is retired).
      */
     data class Success(val identity: ConnectionIdentity) : BootstrapResult
 

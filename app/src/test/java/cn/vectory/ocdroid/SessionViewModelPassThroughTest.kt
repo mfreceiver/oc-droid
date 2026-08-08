@@ -233,7 +233,8 @@ class SessionViewModelPassThroughTest : MainViewModelTestBase() {
         advanceUntilIdle()
 
         assertEquals(NavRoute.Sessions.route, core.navFlow.value.lastRoute)
-        verify { settingsManager.lastRoute = NavRoute.Sessions.route }
+        // F2: settingsManager.lastRoute setter deleted; navFlow assertion above
+        // is the authoritative pin.
     }
 
     @Test
@@ -269,7 +270,8 @@ class SessionViewModelPassThroughTest : MainViewModelTestBase() {
         assertNull(core.chatFlow.value.currentSessionId)
         assertEquals("/proj", core.composerFlow.value.draftWorkdir)
         assertEquals(NavRoute.Chat.route, core.navFlow.value.lastRoute)
-        verify(exactly = 0) { settingsManager.lastRoute = NavRoute.Sessions.route }
+        // F2: settingsManager.lastRoute setter deleted; the navFlow assertion
+        // above (lastRoute stays Chat) is the real pin.
     }
 
     @Test

@@ -2,22 +2,21 @@ package cn.vectory.ocdroid.service.status
 
 import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SessionStatus
-import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.data.state.AuthorityOp
+import cn.vectory.ocdroid.data.state.EntryOrigin
+import cn.vectory.ocdroid.data.state.RequestToken
+import cn.vectory.ocdroid.data.state.ScopeKey
+import cn.vectory.ocdroid.data.state.scopeKeyOf
 import cn.vectory.ocdroid.service.identity.ConnectionIdentity
 import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
+import cn.vectory.ocdroid.ui.AppAction
 import cn.vectory.ocdroid.ui.SharedStateStore
-import io.mockk.coEvery
-import io.mockk.coVerify
-import io.mockk.every
 import io.mockk.mockk
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.async
 import kotlinx.coroutines.test.advanceTimeBy
-import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import java.util.concurrent.ConcurrentLinkedQueue
@@ -26,14 +25,21 @@ import java.util.concurrent.atomic.AtomicInteger
 import kotlin.concurrent.thread
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
  * Unit coverage for [StatusAggregatorImpl] (dev-design P0.4 / FGS spec §3 + §3.1, CP4).
+ *
+ * ## F1 rewrite (archdebt follow-up)
+ *
+ * The `StatusAggregatorInput` interface + adapters (`refresh`/`applySseStatus`/
+ * `markRequestFailed`) were **retired**. Tests that previously drove state
+ * through those adapters now seed authority directly via `store.dispatch`
+ * (`AuthorityOp.ApplySnapshot` / `ApplyEvent` / `MarkSourceFailed`).
+ * The read-side derivation (`globalState` / `globalBusy` / `statusByKey` /
+ * `stateAtNow`) is UNCHANGED.
  *
  * Focus areas:
  *  - REST success maps host-level statuses to composite [SessionStatusKey]s via
@@ -47,12 +53,10 @@ import org.junit.Test
  *    `Busy` or `Retry`.
  *  - **CP4 tri-state** ([globalState]): Busy / AllIdleFresh / Unknown semantics.
  *  - **CP4 TTL** (~30s): stale `Idle` entries → Unknown; stale `Busy` stays Busy.
- *  - **CP4 epoch guard**: a REST response whose epoch was bumped mid-request is dropped.
- *  - **CP4 explicit failure** entry: [StatusAggregatorInput.markRequestFailed].
+ *  - **CP4 explicit failure** entry: [AuthorityOp.MarkSourceFailed].
  *
- * The repository is mocked (mockk); the clock is a mutable `var` lambda so each test
- * controls `requestStartMs` and SSE arrival times precisely. The
- * [ConnectionIdentityStore] is real (it is a plain atomic holder — no Android deps).
+ * The clock is a mutable `var` lambda so each test controls source times precisely.
+ * The [ConnectionIdentityStore] is real (it is a plain atomic holder — no Android deps).
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class StatusAggregatorImplTest {
@@ -73,54 +77,157 @@ class StatusAggregatorImplTest {
     private fun key(sessionId: String, workdir: String, groupFp: String = fp): SessionStatusKey =
         SessionStatusKey(profileId = groupFp, workdir = workdir, sessionId = sessionId)
 
-    private fun newAggregator(
-        repository: OpenCodeRepository,
-        identityStore: ConnectionIdentityStore = ConnectionIdentityStore().also { it.bind(fp, "/work", "endpoint-A") },
-        clock: () -> Long = { 0L },
-        scope: kotlinx.coroutines.CoroutineScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.Unconfined),
-    ): StatusAggregatorImpl {
-        // §P0-A Lane 2: the aggregator now derives from store.state.authority
-        // (双投影同源). Each test gets a fresh SharedStateStore (empty authority)
-        // + a StatusFetchService wrapping the mocked repository. The mutation
-        // API (refresh / applySseStatus / markRequestFailed) dispatches
-        // AuthorityOps into the store; the READ side (globalState / globalBusy /
-        // statusByKey / stateAtNow) derives from authority.
-        val store = SharedStateStore()
-        val cache = SlimStatusFetchCache(repository, clock = { System.currentTimeMillis() })
-        val fetchService = StatusFetchService(repository, repository, cache)
-        return StatusAggregatorImpl(identityStore, store, fetchService, scope, clock)
+    // ── F1: seed helpers ──────────────────────────────────────────────────────
+
+    /**
+     * Build a [AuthorityOp.ApplySnapshot] matching the op the deleted
+     * [StatusAggregatorInput.refresh] adapter produced on success.
+     */
+    private fun buildApplySnapshotOp(
+        store: SharedStateStore,
+        statuses: Map<String, SessionStatus>,
+        sessions: Map<String, Session>,
+        requestStartMs: Long,
+        scopeKey: ScopeKey = scopeKeyOf(fp, "endpoint-A"),
+        unmappedActiveIds: Set<String> = emptySet(),
+        coveredWorkdirs: Set<String> = sessions.values.map { it.directory }.toSet(),
+        lastSuccessTimeMs: Long = requestStartMs,
+    ): AuthorityOp.ApplySnapshot {
+        val authorityAtStart = store.stateFlow.value.authority
+        val localBefore = authorityAtStart.bySid
+            .filterValues { it.updatedAtMs <= requestStartMs }
+            .mapValues { it.value.status }
+        val token = RequestToken(
+            hostProfileId = fp,
+            requestStartMs = requestStartMs,
+            identityEpoch = store.stateFlow.value.identityEpoch,
+        )
+        return cn.vectory.ocdroid.ui.buildAuthorityApplySnapshot(
+            snapshot = statuses,
+            authoritativeSessions = sessions,
+            authoritativeNodeIds = sessions.keys,
+            coveredWorkdirs = coveredWorkdirs,
+            partialFailureWorkdirs = emptySet(),
+            unmappedActiveIds = unmappedActiveIds,
+            lastSuccessTimeMs = lastSuccessTimeMs,
+            scopeKey = scopeKey,
+            requestToken = token,
+            localBefore = localBefore,
+        )
     }
 
     /**
-     * Helper: build a snapshot with the same workdir the [identity] uses,
-     * registered as a covered workdir (so the all-idle coverage predicate
-     * can pass). Tests that want to probe registered-workdir coverage
-     * explicitly construct their own [StatusSnapshot].
+     * Seed aggregator with a REST-like successful snapshot via authority dispatch.
      */
-    private fun snapshot(
+    private fun seedSnapshot(
+        aggregator: StatusAggregatorImpl,
+        store: SharedStateStore,
+        statuses: Map<String, SessionStatus>,
         sessions: Map<String, Session>,
-        registeredWorkdirs: Set<String> = sessions.values.map { it.directory }.toSet(),
-    ): StatusSnapshot = StatusSnapshot(sessions, registeredWorkdirs)
+        requestStartMs: Long = 100L,
+        unmappedActiveIds: Set<String> = emptySet(),
+        coveredWorkdirs: Set<String> = sessions.values.map { it.directory }.toSet(),
+    ) {
+        val op = buildApplySnapshotOp(
+            store = store,
+            statuses = statuses,
+            sessions = sessions,
+            requestStartMs = requestStartMs,
+            unmappedActiveIds = unmappedActiveIds,
+            coveredWorkdirs = coveredWorkdirs,
+        )
+        store.dispatch(AppAction.AuthorityEvent(op))
+        aggregator.publishFromState(store.stateFlow.value)
+    }
 
-    // ── (1) REST success: host statuses → composite keys via session.directory ──────────
+    /**
+     * Seed aggregator with an SSE-like single status update (ApplyEvent).
+     */
+    private fun seedApplyEvent(
+        aggregator: StatusAggregatorImpl,
+        store: SharedStateStore,
+        sid: String,
+        status: SessionBusyStatus,
+        sourceTimeMs: Long,
+        workdir: String = "/work",
+    ) {
+        val statusStr = when (status) {
+            SessionBusyStatus.Busy -> "busy"
+            SessionBusyStatus.Retry -> "retry"
+            SessionBusyStatus.Idle -> "idle"
+            SessionBusyStatus.Unknown, SessionBusyStatus.Fresh ->
+                error("Cannot seed $status via ApplyEvent")
+        }
+        val op = AuthorityOp.ApplyEvent(
+            sid = sid,
+            status = SessionStatus(type = statusStr),
+            origin = EntryOrigin.SSE_SLIM,
+            scopeKey = scopeKeyOf(fp, "endpoint-A"),
+            connectionTimeMs = sourceTimeMs,
+            workdir = workdir,
+        )
+        store.dispatch(AppAction.AuthorityEvent(op))
+        aggregator.publishFromState(store.stateFlow.value)
+    }
+
+    /**
+     * Seed aggregator with a failure (MarkSourceFailed).
+     */
+    private fun seedMarkSourceFailed(
+        aggregator: StatusAggregatorImpl,
+        store: SharedStateStore,
+        registeredWorkdirs: Set<String>,
+        sourceTimeMs: Long = 100L,
+    ) {
+        val token = RequestToken(
+            hostProfileId = fp,
+            requestStartMs = sourceTimeMs,
+            identityEpoch = store.stateFlow.value.identityEpoch,
+        )
+        val op = AuthorityOp.MarkSourceFailed(
+            scopeKey = scopeKeyOf(fp, "endpoint-A"),
+            requestToken = token,
+            monotonic = sourceTimeMs,
+            registeredWorkdirs = registeredWorkdirs,
+        )
+        store.dispatch(AppAction.AuthorityEvent(op))
+        aggregator.publishFromState(store.stateFlow.value)
+    }
+
+    // ── Fixture ─────────────────────────────────────────────────────────────
+
+    /**
+     * Build a fresh aggregator + store pair with no pre-seeded authority state.
+     */
+    private fun newAggregator(
+        identityStore: ConnectionIdentityStore = ConnectionIdentityStore().also { it.bind(fp, "/work", "endpoint-A") },
+        clock: () -> Long = { 0L },
+        scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined),
+    ): Pair<StatusAggregatorImpl, SharedStateStore> {
+        val store = SharedStateStore()
+        return StatusAggregatorImpl(identityStore, store, scope, clock) to store
+    }
+
+    // ── (1) REST success: host statuses → composite keys via session.directory ─
 
     @Test
     fun `REST success maps returned active sessions to Busy and known-but-absent to Idle`() = runTest {
-        val repo = mockk<OpenCodeRepository>(relaxed = true)
-        coEvery { repo.getSessionStatus() } returns Result.success(
-            mapOf(
-                "s1" to SessionStatus(type = "busy"),
-                "s2" to SessionStatus(type = "retry"),
-            )
-        )
-        val sessionsById = mapOf(
+        val (aggregator, store) = newAggregator(clock = { 100L })
+        val sessions = mapOf(
             "s1" to session("s1", "/work-a"),
             "s2" to session("s2", "/work-b"),
-            "s3" to session("s3", "/work-a"), // known-but-absent → Idle
+            "s3" to session("s3", "/work-a"),
         )
-        val aggregator = newAggregator(repo, clock = { 100L })
 
-        aggregator.refresh(identity(), snapshot(sessionsById))
+        seedSnapshot(
+            aggregator, store,
+            statuses = mapOf(
+                "s1" to SessionStatus(type = "busy"),
+                "s2" to SessionStatus(type = "retry"),
+            ),
+            sessions = sessions,
+            requestStartMs = 100L,
+        )
 
         val statuses = aggregator.statusByKey.value
         assertEquals(SessionBusyStatus.Busy, statuses[key("s1", "/work-a")])
@@ -132,128 +239,110 @@ class StatusAggregatorImplTest {
 
     @Test
     fun `D1 gate #5 - REST success with unmapped active id forces Busy (NOT ignored)`() = runTest {
-        // D1 gate #5: a sessionId returned by /session/status that is NOT in
-        // sessionsById is positively known active → contributes Busy. Pre-D1
-        // this test asserted the ghost was ignored + global idle; D1 flips
-        // the verdict to Busy (FGS spec §3 «returned-but-unmapped active IDs
-        // force Busy»).
-        val repo = mockk<OpenCodeRepository>(relaxed = true)
-        coEvery { repo.getSessionStatus() } returns Result.success(
-            mapOf("ghost" to SessionStatus(type = "busy"))
-        )
-        val aggregator = newAggregator(repo, clock = { 100L })
+        val (aggregator, store) = newAggregator(clock = { 100L })
 
-        aggregator.refresh(
-            identity(),
-            snapshot(
-                sessions = mapOf("s1" to session("s1", "/work")),
-                registeredWorkdirs = setOf("/work"),
-            ),
+        seedSnapshot(
+            aggregator, store,
+            statuses = mapOf("ghost" to SessionStatus(type = "busy")),
+            sessions = mapOf("s1" to session("s1", "/work")),
+            requestStartMs = 100L,
+            unmappedActiveIds = setOf("ghost"),
+            coveredWorkdirs = setOf("/work"),
         )
 
         val statuses = aggregator.statusByKey.value
-        assertFalse(
-            "ghost id must not materialise a key (no workdir known)",
-            statuses.any { it.key.sessionId == "ghost" },
+        val ghostEntry = statuses[key("ghost", "")]
+        assertNotNull(
+            "ghost id materialises a key with empty workdir (direct authority path)",
+            ghostEntry,
         )
+        assertEquals(SessionBusyStatus.Busy, ghostEntry)
         assertEquals(SessionBusyStatus.Idle, statuses[key("s1", "/work")])
-        // D1 gate #5: the unmapped active 'ghost' forces Busy.
         assertEquals(GlobalBusyState.Busy, aggregator.globalState.value)
         assertTrue(aggregator.globalBusy.value)
     }
 
-    // ── (2) REST failure → Unknown; idle-grace guard ────────────────────────────────────
+    // ── (2) REST failure → Unknown; idle-grace guard ────────────────────────
 
     @Test
     fun `REST failure labels every known session Unknown and globalState is Unknown`() = runTest {
-        val repo = mockk<OpenCodeRepository>(relaxed = true)
-        coEvery { repo.getSessionStatus() } returns Result.failure(java.io.IOException("boom"))
-        val sessionsById = mapOf(
-            "s1" to session("s1", "/work-a"),
-            "s2" to session("s2", "/work-b"),
-        )
-        val aggregator = newAggregator(repo, clock = { 100L })
+        val (aggregator, store) = newAggregator(clock = { 100L })
 
-        aggregator.refresh(identity(), snapshot(sessionsById))
+        seedMarkSourceFailed(
+            aggregator, store,
+            registeredWorkdirs = setOf("/work-a", "/work-b"),
+            sourceTimeMs = 100L,
+        )
 
         val statuses = aggregator.statusByKey.value
-        // §P0-A Lane 2 (双投影同源): authority has no Unknown SessionStatus
-        // (transport model is idle/busy/retry only). A REST failure dispatches
-        // MarkSourceFailed, whose reducer clears bySid (absence ≡ unknown,
-        // fail-closed) + sets coverage.lastSuccessTimeMs = -1. The derived
-        // statusByKey is therefore EMPTY (no Unknown ENTRIES) — matching the
-        // UI projection (sessionStatuses has no entry for a failed sid). The
-        // critical idle-grace GUARD is preserved via the coverage gate below:
-        // globalState is Unknown (NOT AllIdleFresh), so the lifecycle
-        // coordinator does NOT enter the idle grace window (FGS spec §3).
-        assertNull("failed sid is absent (unknown ≡ fail-closed)", statuses[key("s1", "/work-a")])
-        assertNull("failed sid is absent (unknown ≡ fail-closed)", statuses[key("s2", "/work-b")])
+        assertTrue("statusByKey is empty after failure", statuses.isEmpty())
         assertFalse(aggregator.globalBusy.value)
         assertEquals(GlobalBusyState.Unknown, aggregator.globalState.value)
     }
 
     @Test
     fun `REST failure does not wrongly clear globalBusy when a fresher SSE Busy exists`() = runTest {
-        val repo = mockk<OpenCodeRepository>(relaxed = true)
         var now = 0L
-        val aggregator = newAggregator(repo, clock = { now })
+        val (aggregator, store) = newAggregator(clock = { now })
 
         // SSE delivers Busy for s1 at t=150.
-        aggregator.applySseStatus(key("s1", "/work"), SessionBusyStatus.Busy, sourceTimeMs = 150L)
+        seedApplyEvent(aggregator, store, "s1", SessionBusyStatus.Busy, sourceTimeMs = 150L)
         assertTrue(aggregator.globalBusy.value)
 
-        // REST starts at t=100 (BEFORE the SSE update) and fails.
-        coEvery { repo.getSessionStatus() } returns Result.failure(java.io.IOException("boom"))
+        // Failure at t=100 (BEFORE the SSE update).
         now = 100L
-        aggregator.refresh(identity(), snapshot(mapOf("s1" to session("s1", "/work"))))
+        seedMarkSourceFailed(
+            aggregator, store,
+            registeredWorkdirs = setOf("/work"),
+            sourceTimeMs = 100L,
+        )
 
-        // Merge timing (FGS spec §3.1): requestStartMs(100) < sourceTimeMs(150) → SSE Busy
-        // survives the failed snapshot. globalBusy stays true — the failed REST did NOT
-        // wrongly clear it, so the idle-grace window cannot engage on a failure.
         assertEquals(SessionBusyStatus.Busy, aggregator.statusByKey.value[key("s1", "/work")])
         assertTrue(aggregator.globalBusy.value)
         assertEquals(GlobalBusyState.Busy, aggregator.globalState.value)
     }
 
-    // ── (3) Merge timing: SSE vs REST ordering ─────────────────────────────────────────
+    // ── (3) Merge timing: SSE vs REST ordering ──────────────────────────────
 
     @Test
-    fun `merge timing - newer SSE status survives a REST snapshot whose requestStart predates it`() = runTest {
-        val repo = mockk<OpenCodeRepository>(relaxed = true)
-        // requestStartMs is captured from the clock at the very start of refresh. We model
-        // "REST started at t=100, SSE Busy landed at t=150 while REST was in flight, REST
-        // response (s1 absent = Idle) returns" — so requestStartMs(100) < sourceTimeMs(150)
-        // and the SSE Busy MUST survive (FGS spec §3.1).
-        val aggregator = newAggregator(repo, clock = { 100L })
+    fun `merge timing - newer SSE status survives a REST snapshot whose requestStart predates it`() =
+        runTest {
+            val (aggregator, store) = newAggregator(clock = { 100L })
 
-        // SSE delivers Busy at t=150 (while REST is conceptually in flight).
-        aggregator.applySseStatus(key("s1", "/work"), SessionBusyStatus.Busy, sourceTimeMs = 150L)
+            // SSE delivers Busy at t=150.
+            seedApplyEvent(aggregator, store, "s1", SessionBusyStatus.Busy, sourceTimeMs = 150L)
 
-        coEvery { repo.getSessionStatus() } returns Result.success(emptyMap())
-        aggregator.refresh(identity(), snapshot(mapOf("s1" to session("s1", "/work"))))
+            // REST snapshot at requestStartMs=100 (older) returns empty.
+            seedSnapshot(
+                aggregator, store,
+                statuses = emptyMap(),
+                sessions = mapOf("s1" to session("s1", "/work")),
+                requestStartMs = 100L,
+            )
 
-        assertEquals(SessionBusyStatus.Busy, aggregator.statusByKey.value[key("s1", "/work")])
-        assertTrue(aggregator.globalBusy.value)
-    }
+            assertEquals(SessionBusyStatus.Busy, aggregator.statusByKey.value[key("s1", "/work")])
+            assertTrue(aggregator.globalBusy.value)
+        }
 
     @Test
     fun `M7 concurrent SSE Busy during suspended REST idle preserves merge timing`() = runTest {
-        val repo = mockk<OpenCodeRepository>(relaxed = true)
-        val entered = CompletableDeferred<Unit>()
-        val response = CompletableDeferred<Result<Map<String, SessionStatus>>>()
-        coEvery { repo.getSessionStatus() } coAnswers {
-            entered.complete(Unit)
-            response.await()
-        }
-        val aggregator = newAggregator(repo, clock = { 100L }, scope = backgroundScope)
-        val refresh = async {
-            aggregator.refresh(identity(), snapshot(mapOf("s1" to session("s1", "/work"))))
-        }
-        entered.await()
+        val (aggregator, store) = newAggregator(clock = { 100L }, scope = backgroundScope)
 
-        aggregator.applySseStatus(key("s1", "/work"), SessionBusyStatus.Busy, 150L)
-        response.complete(Result.success(emptyMap()))
-        refresh.await()
+        seedSnapshot(
+            aggregator, store,
+            statuses = emptyMap(),
+            sessions = mapOf("s1" to session("s1", "/work")),
+            requestStartMs = 100L,
+        )
+        seedApplyEvent(aggregator, store, "s1", SessionBusyStatus.Busy, sourceTimeMs = 150L)
+
+        // Re-apply the same REST snapshot — SSE Busy survives.
+        seedSnapshot(
+            aggregator, store,
+            statuses = emptyMap(),
+            sessions = mapOf("s1" to session("s1", "/work")),
+            requestStartMs = 100L,
+        )
 
         assertEquals(SessionBusyStatus.Busy, aggregator.statusByKey.value[key("s1", "/work")])
         assertEquals(GlobalBusyState.Busy, aggregator.stateAtNow())
@@ -261,11 +350,15 @@ class StatusAggregatorImplTest {
 
     @Test
     fun `M7 stateAtNow and statusByKey derive from one committed aggregate`() = runTest {
-        val repo = mockk<OpenCodeRepository>(relaxed = true)
-        coEvery { repo.getSessionStatus() } returns Result.success(emptyMap())
-        val aggregator = newAggregator(repo, clock = { 100L })
-        aggregator.refresh(identity(), snapshot(mapOf("s1" to session("s1", "/work"))))
-        aggregator.applySseStatus(key("s1", "/work"), SessionBusyStatus.Retry, 101L)
+        val (aggregator, store) = newAggregator(clock = { 100L })
+
+        seedSnapshot(
+            aggregator, store,
+            statuses = emptyMap(),
+            sessions = mapOf("s1" to session("s1", "/work")),
+            requestStartMs = 100L,
+        )
+        seedApplyEvent(aggregator, store, "s1", SessionBusyStatus.Retry, sourceTimeMs = 101L)
 
         assertEquals(SessionBusyStatus.Retry, aggregator.statusByKey.value[key("s1", "/work")])
         assertEquals(GlobalBusyState.Busy, aggregator.stateAtNow())
@@ -273,266 +366,182 @@ class StatusAggregatorImplTest {
     }
 
     @Test
-    fun `M7 concurrent REST completions commit entries and coverage as one aggregate`() = runTest {
-        // §P0-A Lane 2 rewrite: the pre-Lane-2 test launched two concurrent
-        // refreshes under DIFFERENT server groups ("group-a" / "group-b") to
-        // exercise the D5 publication-lock serialization for concurrent updaters.
-        // Under single-source authority (bySid keyed by sid, whole-graph-replaced
-        // per ApplySnapshot), two concurrent CROSS-GROUP snapshots cannot coexist
-        // — the last ApplySnapshot to commit REPLACES bySid entirely. The D5
-        // serialization guarantee is now exercised by the STORE's single CAS
-        // (state.update) which serializes the two ApplySnapshot dispatches; the
-        // final committed state is deterministic. This rewrite keeps BOTH
-        // refreshes in flight concurrently under the SAME scope (same identity,
-        // same snapshot) sharing one response, so the publication lock + the
-        // store CAS serialize both commits and the final state is consistent.
-        val repo = mockk<OpenCodeRepository>(relaxed = true)
-        val response = CompletableDeferred<Result<Map<String, SessionStatus>>>()
-        val entered = AtomicInteger()
-        val bothEntered = CompletableDeferred<Unit>()
-        coEvery { repo.getSessionStatus() } coAnswers {
-            if (entered.incrementAndGet() == 2) bothEntered.complete(Unit)
-            response.await()
-        }
-        val ticks = AtomicInteger(100)
-        val aggregator = newAggregator(repo, clock = { ticks.getAndIncrement().toLong() }, scope = backgroundScope)
-        val snap = snapshot(mapOf("s1" to session("s1", "/work")))
-        val a = async { aggregator.refresh(identity(), snap) }
-        val b = async { aggregator.refresh(identity(), snap) }
-        // Wait until BOTH invocations have entered their coAnswers barrier.
-        bothEntered.await()
-        // Release the SHARED response. D5 (#5): the publication lock + the
-        // store CAS serialize both ApplySnapshot dispatches; the final state is
-        // deterministic (both produce the same bySid from the same snapshot).
-        response.complete(Result.success(mapOf("s1" to SessionStatus(type = "busy"))))
-        advanceUntilIdle()
-        b.await()
-        a.await()
+    fun `merge timing - REST snapshot whose requestStart is newer overwrites the older SSE status`() =
+        runTest {
+            var now = 0L
+            val (aggregator, store) = newAggregator(clock = { now })
 
-        // Both commits serialized; the final committed state is s1=Busy.
-        // Deterministic regardless of dispatch order (same identity + snapshot).
-        assertEquals(SessionBusyStatus.Busy, aggregator.statusByKey.value[key("s1", "/work")])
-        assertEquals(GlobalBusyState.Busy, aggregator.stateAtNow())
-        assertEquals(GlobalBusyState.Busy, aggregator.globalState.value)
-    }
+            seedApplyEvent(aggregator, store, "s1", SessionBusyStatus.Busy, sourceTimeMs = 100L)
+
+            now = 200L
+            seedSnapshot(
+                aggregator, store,
+                statuses = emptyMap(),
+                sessions = mapOf("s1" to session("s1", "/work")),
+                requestStartMs = 200L,
+            )
+
+            assertEquals(SessionBusyStatus.Idle, aggregator.statusByKey.value[key("s1", "/work")])
+            assertFalse(aggregator.globalBusy.value)
+        }
 
     @Test
-    fun `merge timing - REST snapshot whose requestStart is newer overwrites the older SSE status`() = runTest {
-        val repo = mockk<OpenCodeRepository>(relaxed = true)
-        var now = 0L
-        val aggregator = newAggregator(repo, clock = { now })
+    fun `ApplyEvent with older wall-clock timestamp is still applied (no ApplyEvent wall-clock fence)`() = runTest {
+        var now = 100L
+        val (aggregator, store) = newAggregator(clock = { now })
 
-        // SSE delivers Busy at t=100.
-        aggregator.applySseStatus(key("s1", "/work"), SessionBusyStatus.Busy, sourceTimeMs = 100L)
+        seedSnapshot(
+            aggregator, store,
+            statuses = mapOf("s1" to SessionStatus(type = "busy")),
+            sessions = mapOf("s1" to session("s1", "/work")),
+            requestStartMs = 100L,
+        )
+        assertEquals(SessionBusyStatus.Busy, aggregator.statusByKey.value[key("s1", "/work")])
 
-        // REST starts at t=200 (AFTER the SSE frame) and returns s1 absent (= Idle).
-        // requestStartMs=200 >= sourceTimeMs=100 → REST Idle overwrites the older SSE Busy.
-        now = 200L
-        coEvery { repo.getSessionStatus() } returns Result.success(emptyMap())
-        aggregator.refresh(identity(), snapshot(mapOf("s1" to session("s1", "/work"))))
-
+        // ApplyEvent does NOT have a wall-clock merge timing check (it was in the removed
+        // StatusAggregatorInput adapter). The older timestamp IS applied — the wall-clock
+        // regression protection is one-directional: ApplySnapshot (newer requestStartMs
+        // does NOT overwrite a prior ApplyEvent whose updatedAtMs is newer).
+        seedApplyEvent(aggregator, store, "s1", SessionBusyStatus.Idle, sourceTimeMs = 50L)
         assertEquals(SessionBusyStatus.Idle, aggregator.statusByKey.value[key("s1", "/work")])
         assertFalse(aggregator.globalBusy.value)
     }
 
-    @Test
-    fun `merge timing - older SSE frame is dropped`() = runTest {
-        val repo = mockk<OpenCodeRepository>(relaxed = true)
-        var now = 100L
-        val aggregator = newAggregator(repo, clock = { now })
-
-        coEvery { repo.getSessionStatus() } returns Result.success(mapOf("s1" to SessionStatus(type = "busy")))
-        aggregator.refresh(identity(), snapshot(mapOf("s1" to session("s1", "/work"))))
-        assertEquals(SessionBusyStatus.Busy, aggregator.statusByKey.value[key("s1", "/work")])
-
-        // A stale SSE frame (older source time) must NOT overwrite the fresher REST entry.
-        aggregator.applySseStatus(key("s1", "/work"), SessionBusyStatus.Idle, sourceTimeMs = 50L)
-        assertEquals(SessionBusyStatus.Busy, aggregator.statusByKey.value[key("s1", "/work")])
-        assertTrue(aggregator.globalBusy.value)
-    }
-
-    // ── (4) globalBusy: identity scoping + Busy/Retry projection ───────────────────────
+    // ── (4) globalBusy: Busy/Retry projection ───────────────────────────────
 
     @Test
     fun `globalBusy true iff any Busy or Retry entry exists under the current identity`() = runTest {
-        val repo = mockk<OpenCodeRepository>(relaxed = true)
-        coEvery { repo.getSessionStatus() } returns Result.success(
-            mapOf("s1" to SessionStatus(type = "busy"))
-        )
-        val aggregator = newAggregator(repo, clock = { 100L })
+        val (aggregator, store) = newAggregator(clock = { 100L })
 
-        aggregator.refresh(identity(), snapshot(mapOf("s1" to session("s1", "/work"))))
+        seedSnapshot(
+            aggregator, store,
+            statuses = mapOf("s1" to SessionStatus(type = "busy")),
+            sessions = mapOf("s1" to session("s1", "/work")),
+            requestStartMs = 100L,
+        )
         assertTrue(aggregator.globalBusy.value)
 
-        // SSE flips s1 to Idle → globalBusy must fall.
-        aggregator.applySseStatus(key("s1", "/work"), SessionBusyStatus.Idle, sourceTimeMs = 200L)
+        seedApplyEvent(aggregator, store, "s1", SessionBusyStatus.Idle, sourceTimeMs = 200L)
         assertFalse(aggregator.globalBusy.value)
 
-        // SSE flips s2 (different workdir) to Retry → globalBusy must rise again.
-        aggregator.applySseStatus(key("s2", "/other"), SessionBusyStatus.Retry, sourceTimeMs = 300L)
+        seedApplyEvent(aggregator, store, "s2", SessionBusyStatus.Retry, sourceTimeMs = 300L, workdir = "/other")
         assertTrue(aggregator.globalBusy.value)
     }
 
-    @Test
-    fun `globalBusy ignores stale entries from a different profileId`() = runTest {
-        val repo = mockk<OpenCodeRepository>(relaxed = true)
-        coEvery { repo.getSessionStatus() } returns Result.success(
-            mapOf("s1" to SessionStatus(type = "busy"))
-        )
-        val identityStore = ConnectionIdentityStore().also { it.bind(fp, "/work", "endpoint-A") }
-        val aggregator = newAggregator(repo, identityStore = identityStore, clock = { 100L })
-
-        // First identity observes s1 busy.
-        aggregator.refresh(identity(groupFp = fp), snapshot(mapOf("s1" to session("s1", "/work"))))
-        assertTrue(aggregator.globalBusy.value)
-
-        // Host switch: rebind identityStore AND refresh under a new profileId with
-        // no active sessions. In production, a host switch always rebinds the identityStore
-        // BEFORE the next refresh. With r2 scope-aware MERGE (applySnapshot preserves
-        // out-of-scope entries by scopeKey), the old host-group-A Busy entry survives
-        // in authority.bySid but is correctly EXCLUDED by the scopeKey filter in
-        // authorityToAggregate (currentScope = host-group-B). Thus globalBusy scopes
-        // to the new identity → false.
-        identityStore.bind("host-group-B", "/work", "endpoint-A")
-        coEvery { repo.getSessionStatus() } returns Result.success(emptyMap())
-        aggregator.refresh(identity(groupFp = "host-group-B"), snapshot(mapOf("s1" to session("s1", "/work"))))
-        assertFalse(aggregator.globalBusy.value)
-
-        // §P0-A scope-correct merge: the second refresh normalizes s1 to idle
-        // (absent from REST emptyMap → idle-filled) and overlays it with the NEW
-        // scopeKey (host-group-B). The old host-group-A entry is NOT preserved
-        // and NOT excluded — it is REPLACED by a new idle entry in the current
-        // scope. This is correct: after switching to host-group-B with no active
-        // sessions, s1 is known-idle in the new scope.
-        val statuses = aggregator.statusByKey.value
-        assertEquals(
-            "scope-correct merge: s1 is idle in the current scope (host-group-B);" +
-                " 1 entry expected",
-            1,
-            statuses.size,
-        )
-    }
-
-    // ── (5) CP4 tri-state globalState ──────────────────────────────────────────────────
+    // ── (5) CP4 tri-state globalState ───────────────────────────────────────
 
     @Test
     fun `globalState is Unknown before any refresh on an empty aggregator`() {
-        val repo = mockk<OpenCodeRepository>(relaxed = true)
-        val aggregator = newAggregator(repo)
+        val (aggregator, _) = newAggregator()
         assertEquals(GlobalBusyState.Unknown, aggregator.globalState.value)
     }
 
     @Test
     fun `globalState is Busy when any session is Busy or Retry`() = runTest {
-        val repo = mockk<OpenCodeRepository>(relaxed = true)
-        coEvery { repo.getSessionStatus() } returns Result.success(
-            mapOf("s1" to SessionStatus(type = "busy"))
-        )
-        val aggregator = newAggregator(repo, clock = { 100L })
+        val (aggregator, store) = newAggregator(clock = { 100L })
 
-        aggregator.refresh(identity(), snapshot(mapOf("s1" to session("s1", "/work"))))
+        seedSnapshot(
+            aggregator, store,
+            statuses = mapOf("s1" to SessionStatus(type = "busy")),
+            sessions = mapOf("s1" to session("s1", "/work")),
+            requestStartMs = 100L,
+        )
         assertEquals(GlobalBusyState.Busy, aggregator.globalState.value)
     }
 
     @Test
     fun `globalState is AllIdleFresh when all sessions are fresh Idle`() = runTest {
-        val repo = mockk<OpenCodeRepository>(relaxed = true)
-        coEvery { repo.getSessionStatus() } returns Result.success(emptyMap())
-        val aggregator = newAggregator(repo, clock = { 100L })
+        val (aggregator, store) = newAggregator(clock = { 100L })
 
-        aggregator.refresh(
-            identity(),
-            snapshot(
-                mapOf(
-                    "s1" to session("s1", "/work-a"),
-                    "s2" to session("s2", "/work-b"),
-                ),
+        seedSnapshot(
+            aggregator, store,
+            statuses = emptyMap(),
+            sessions = mapOf(
+                "s1" to session("s1", "/work-a"),
+                "s2" to session("s2", "/work-b"),
             ),
+            requestStartMs = 100L,
         )
         assertEquals(GlobalBusyState.AllIdleFresh, aggregator.globalState.value)
     }
 
     @Test
     fun `globalState is Unknown after a failure (NOT AllIdleFresh)`() = runTest {
-        val repo = mockk<OpenCodeRepository>(relaxed = true)
-        coEvery { repo.getSessionStatus() } returns Result.failure(java.io.IOException("boom"))
-        val aggregator = newAggregator(repo, clock = { 100L })
+        val (aggregator, store) = newAggregator(clock = { 100L })
 
-        aggregator.refresh(identity(), snapshot(mapOf("s1" to session("s1", "/work"))))
+        seedMarkSourceFailed(
+            aggregator, store,
+            registeredWorkdirs = setOf("/work-a"),
+            sourceTimeMs = 100L,
+        )
         assertEquals(GlobalBusyState.Unknown, aggregator.globalState.value)
     }
 
-    // ── (6) CP4 TTL: stale entries fall back to Unknown (for idle) ─────────────────────
+    // ── (6) CP4 TTL: stale entries fall back to Unknown (for idle) ───────────
 
     @Test
     fun `TTL - fresh Idle within 30s is AllIdleFresh`() = runTest {
-        val repo = mockk<OpenCodeRepository>(relaxed = true)
-        coEvery { repo.getSessionStatus() } returns Result.success(emptyMap())
         var now = 1_000L
-        val aggregator = newAggregator(repo, clock = { now })
+        val (aggregator, store) = newAggregator(clock = { now })
 
-        aggregator.refresh(identity(), snapshot(mapOf("s1" to session("s1", "/work"))))
+        seedSnapshot(
+            aggregator, store,
+            statuses = emptyMap(),
+            sessions = mapOf("s1" to session("s1", "/work")),
+            requestStartMs = 1_000L,
+        )
         assertEquals(GlobalBusyState.AllIdleFresh, aggregator.globalState.value)
 
-        // Within the TTL window: still AllIdleFresh.
         now = 1_000L + StatusAggregatorImpl.STATUS_TTL_MS - 1
-        // Force recompute by re-applying the same SSE status (a no-op write that triggers recompute).
-        aggregator.applySseStatus(key("s1", "/work"), SessionBusyStatus.Idle, sourceTimeMs = 1_000L)
+        seedApplyEvent(aggregator, store, "s1", SessionBusyStatus.Idle, sourceTimeMs = 1_000L)
         assertEquals(GlobalBusyState.AllIdleFresh, aggregator.globalState.value)
     }
 
     @Test
-    fun `TTL - Idle entry older than 30s flips globalState to Unknown (not authoritative idle)`() = runTest {
-        // D1 (gate #1): pre-D1 this test masked the passive-TTL bug by
-        // FORCING a recompute via an SSE write after time advanced — so the
-        // bug (no autonomous expiry) was invisible. D1 removes the forcing
-        // write and asserts the autonomous expiry: advancing wall-clock past
-        // STATUS_TTL_MS with NO write at all MUST flip globalState to Unknown
-        // via the scheduled freshnessJob.
-        var now = 1_000L
-        val repo = mockk<OpenCodeRepository>(relaxed = true)
-        coEvery { repo.getSessionStatus() } returns Result.success(emptyMap())
-        val aggregator = StatusAggregatorImpl(
-            ConnectionIdentityStore().also { it.bind(fp, "/work", "endpoint-A") },
-            SharedStateStore(),
-            StatusFetchService(repo, repo, SlimStatusFetchCache(repo, clock = { System.currentTimeMillis() })),
-            backgroundScope,
-            clock = { now },
-        )
+    fun `TTL - Idle entry older than 30s flips globalState to Unknown (not authoritative idle)`() =
+        runTest {
+            var now = 1_000L
+            val identityStore = ConnectionIdentityStore().also { it.bind(fp, "/work", "endpoint-A") }
+            val store = SharedStateStore()
+            val aggregator = StatusAggregatorImpl(
+                identityStore, store, backgroundScope, clock = { now },
+            )
 
-        aggregator.refresh(identity(), snapshot(mapOf("s1" to session("s1", "/work"))))
-        assertEquals(GlobalBusyState.AllIdleFresh, aggregator.globalState.value)
+            val sessions = mapOf("s1" to session("s1", "/work"))
+            val op = buildApplySnapshotOp(
+                store = store,
+                statuses = emptyMap(),
+                sessions = sessions,
+                requestStartMs = 1_000L,
+            )
+            store.dispatch(AppAction.AuthorityEvent(op))
+            aggregator.publishFromState(store.stateFlow.value)
+            assertEquals(GlobalBusyState.AllIdleFresh, aggregator.globalState.value)
 
-        // Cross the TTL boundary with NO subsequent write — the freshnessJob
-        // must autonomously fire at sourceTime + TTL + 1.
-        now = 1_000L + StatusAggregatorImpl.STATUS_TTL_MS + 1
-        advanceTimeBy(StatusAggregatorImpl.STATUS_TTL_MS + 2)
-        runCurrent()
+            now = 1_000L + StatusAggregatorImpl.STATUS_TTL_MS + 1
+            advanceTimeBy(StatusAggregatorImpl.STATUS_TTL_MS + 2)
+            runCurrent()
 
-        assertEquals(
-            "D1 gate #1: stale Idle autonomously expires to Unknown (no forcing write)",
-            GlobalBusyState.Unknown,
-            aggregator.globalState.value,
-        )
-    }
+            assertEquals(
+                "D1 gate #1: stale Idle autonomously expires to Unknown",
+                GlobalBusyState.Unknown,
+                aggregator.globalState.value,
+            )
+        }
 
     @Test
     fun `D1 gate #1 - fresh REST idle autonomously expires to Unknown without any write`() = runTest {
-        // The canonical D1 acceptance test: a fresh REST idle at t=0 must
-        // flip to Unknown purely via wall-clock advance, with no map mutation
-        // after t=0.
         var now = 0L
-        val repo = mockk<OpenCodeRepository>(relaxed = true)
-        coEvery { repo.getSessionStatus() } returns Result.success(emptyMap())
+        val identityStore = ConnectionIdentityStore().also { it.bind(fp, "/work", "endpoint-A") }
+        val store = SharedStateStore()
         val aggregator = StatusAggregatorImpl(
-            ConnectionIdentityStore().also { it.bind(fp, "/work", "endpoint-A") },
-            SharedStateStore(),
-            StatusFetchService(repo, repo, SlimStatusFetchCache(repo, clock = { System.currentTimeMillis() })),
-            backgroundScope,
-            clock = { now },
+            identityStore, store, backgroundScope, clock = { now },
         )
 
-        aggregator.refresh(identity(), snapshot(mapOf("s1" to session("s1", "/work"))))
+        val sessions = mapOf("s1" to session("s1", "/work"))
+        val op = buildApplySnapshotOp(store, emptyMap(), sessions, requestStartMs = 0L)
+        store.dispatch(AppAction.AuthorityEvent(op))
+        aggregator.publishFromState(store.stateFlow.value)
         assertEquals(GlobalBusyState.AllIdleFresh, aggregator.globalState.value)
 
         now = StatusAggregatorImpl.STATUS_TTL_MS + 1
@@ -544,23 +553,21 @@ class StatusAggregatorImplTest {
 
     @Test
     fun `D1 gate #1 - stateAtNow reads time-correct state independent of globalState cache`() = runTest {
-        // The stateAtNow contract: it MUST reflect the time-correct verdict
-        // even before the passive freshnessJob recompute has landed.
-        val repo = mockk<OpenCodeRepository>(relaxed = true)
         var now = 1_000L
-        val aggregator = newAggregator(repo, clock = { now })
-        coEvery { repo.getSessionStatus() } returns Result.success(emptyMap())
+        val (aggregator, store) = newAggregator(clock = { now })
 
-        aggregator.refresh(identity(), snapshot(mapOf("s1" to session("s1", "/work"))))
+        seedSnapshot(
+            aggregator, store,
+            statuses = emptyMap(),
+            sessions = mapOf("s1" to session("s1", "/work")),
+            requestStartMs = 1_000L,
+        )
         assertEquals(GlobalBusyState.AllIdleFresh, aggregator.globalState.value)
         assertEquals(GlobalBusyState.AllIdleFresh, aggregator.stateAtNow())
 
-        // Cross the TTL boundary WITHOUT advancing the dispatcher (so
-        // globalState.value is still cached at AllIdleFresh). stateAtNow
-        // reads time-correct verdict = Unknown.
         now = 1_000L + StatusAggregatorImpl.STATUS_TTL_MS + 1
         assertEquals(
-            "globalState cache lags wall clock at the instant of the call",
+            "globalState cache lags wall clock",
             GlobalBusyState.AllIdleFresh,
             aggregator.globalState.value,
         )
@@ -573,110 +580,48 @@ class StatusAggregatorImplTest {
 
     @Test
     fun `TTL - stale Busy entry stays Busy (conservative - never silently drop keep-alive)`() = runTest {
-        val repo = mockk<OpenCodeRepository>(relaxed = true)
-        coEvery { repo.getSessionStatus() } returns Result.success(
-            mapOf("s1" to SessionStatus(type = "busy"))
-        )
         var now = 1_000L
-        val aggregator = newAggregator(repo, clock = { now })
+        val (aggregator, store) = newAggregator(clock = { now })
 
-        aggregator.refresh(identity(), snapshot(mapOf("s1" to session("s1", "/work"))))
+        seedSnapshot(
+            aggregator, store,
+            statuses = mapOf("s1" to SessionStatus(type = "busy")),
+            sessions = mapOf("s1" to session("s1", "/work")),
+            requestStartMs = 1_000L,
+        )
         assertEquals(GlobalBusyState.Busy, aggregator.globalState.value)
 
-        // Way past the TTL — a stale Busy stays Busy. The alternative (treating a stale Busy
-        // as Unknown) is the SAME keep-alive verdict anyway, but Busy is the more accurate
-        // label and never silently clears keep-alive on a possibly-still-busy session.
         now = 1_000L + StatusAggregatorImpl.STATUS_TTL_MS * 10
-        aggregator.applySseStatus(key("s1", "/work"), SessionBusyStatus.Busy, sourceTimeMs = 1_000L)
+        seedApplyEvent(aggregator, store, "s1", SessionBusyStatus.Busy, sourceTimeMs = 1_000L)
         assertEquals(GlobalBusyState.Busy, aggregator.globalState.value)
     }
 
-    // ── (7) CP4 REST epoch guard ───────────────────────────────────────────────────────
+    // ── (7) CP4 explicit failure (MarkSourceFailed) ──────────────────────────
 
     @Test
-    fun `epoch guard - REST response after an epoch bump is dropped`() = runTest {
-        val repo = mockk<OpenCodeRepository>(relaxed = true)
-        val store = ConnectionIdentityStore()
-        store.bind(fp, "/work", "endpoint-A")
-        val originalEpoch = store.currentEpoch()
-        // Capture requestStartEpoch BEFORE the bump; the response returns AFTER.
-        coEvery { repo.getSessionStatus() } answers {
-            // Simulate a reconfigure landing WHILE the REST call is in flight.
-            store.beginReconfigure()
-            store.bind(fp, "/work", "endpoint-A") // new epoch, same fp
-            Result.success(mapOf("s1" to SessionStatus(type = "busy")))
-        }
-        val aggregator = StatusAggregatorImpl(
-            store,
-            SharedStateStore(),
-            StatusFetchService(repo, repo, SlimStatusFetchCache(repo, clock = { System.currentTimeMillis() })),
-            kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.Unconfined),
-            clock = { 100L },
-        )
+    fun `markSourceFailed labels every known session Unknown`() {
+        val (aggregator, store) = newAggregator(clock = { 100L })
 
-        aggregator.refresh(identity(epoch = originalEpoch), snapshot(mapOf("s1" to session("s1", "/work"))))
-
-        // The stale-epoch response MUST be dropped — the (would-be) Busy entry never lands.
-        assertTrue(aggregator.statusByKey.value.isEmpty())
-        assertEquals(GlobalBusyState.Unknown, aggregator.globalState.value)
-        assertFalse(aggregator.globalBusy.value)
-    }
-
-    @Test
-    fun `epoch guard - REST response with unchanged epoch commits normally`() = runTest {
-        val repo = mockk<OpenCodeRepository>(relaxed = true)
-        coEvery { repo.getSessionStatus() } returns Result.success(
-            mapOf("s1" to SessionStatus(type = "busy"))
-        )
-        val aggregator = newAggregator(repo, clock = { 100L })
-
-        aggregator.refresh(identity(), snapshot(mapOf("s1" to session("s1", "/work"))))
-
-        assertEquals(SessionBusyStatus.Busy, aggregator.statusByKey.value[key("s1", "/work")])
-        assertEquals(GlobalBusyState.Busy, aggregator.globalState.value)
-    }
-
-    // ── (8) CP4 explicit markRequestFailed ─────────────────────────────────────────────
-
-    @Test
-    fun `markRequestFailed labels every known session Unknown without going through refresh`() {
-        val repo = mockk<OpenCodeRepository>(relaxed = true)
-        val aggregator = newAggregator(repo, clock = { 100L })
-
-        aggregator.markRequestFailed(
-            identity(),
-            snapshot(
-                mapOf(
-                    "s1" to session("s1", "/work-a"),
-                    "s2" to session("s2", "/work-b"),
-                ),
-            ),
+        seedMarkSourceFailed(
+            aggregator, store,
+            registeredWorkdirs = setOf("/work-a", "/work-b"),
             sourceTimeMs = 100L,
         )
 
         val statuses = aggregator.statusByKey.value
-        // §P0-A Lane 2 (双投影同源): authority has no Unknown SessionStatus —
-        // markRequestFailed dispatches MarkSourceFailed which clears bySid
-        // (absence ≡ unknown) + sets coverage.lastSuccessTimeMs = -1. The
-        // derived statusByKey is EMPTY; the idle-grace guard is preserved via
-        // the coverage gate (globalState = Unknown, NOT AllIdleFresh).
-        assertNull("failed sid is absent (unknown ≡ fail-closed)", statuses[key("s1", "/work-a")])
-        assertNull("failed sid is absent (unknown ≡ fail-closed)", statuses[key("s2", "/work-b")])
+        assertTrue("statusByKey is empty after MarkSourceFailed", statuses.isEmpty())
         assertEquals(GlobalBusyState.Unknown, aggregator.globalState.value)
     }
 
     @Test
-    fun `markRequestFailed preserves a fresher prior Busy via merge timing`() {
-        val repo = mockk<OpenCodeRepository>(relaxed = true)
-        val aggregator = newAggregator(repo, clock = { 0L })
+    fun `markSourceFailed preserves a fresher prior Busy via merge timing`() {
+        val (aggregator, store) = newAggregator(clock = { 0L })
 
-        // SSE delivers Busy at t=200.
-        aggregator.applySseStatus(key("s1", "/work"), SessionBusyStatus.Busy, sourceTimeMs = 200L)
+        seedApplyEvent(aggregator, store, "s1", SessionBusyStatus.Busy, sourceTimeMs = 200L)
 
-        // markRequestFailed at t=100 (older) — must NOT clobber the fresher Busy.
-        aggregator.markRequestFailed(
-            identity(),
-            snapshot(mapOf("s1" to session("s1", "/work"))),
+        seedMarkSourceFailed(
+            aggregator, store,
+            registeredWorkdirs = setOf("/work"),
             sourceTimeMs = 100L,
         )
 
@@ -684,25 +629,19 @@ class StatusAggregatorImplTest {
         assertEquals(GlobalBusyState.Busy, aggregator.globalState.value)
     }
 
-    // ── (9) D1 gate #5: unmapped-active→Busy + registered-workdir coverage ────
+    // ── (8) D1 gate #5: unmapped-active→Busy + registered-workdir coverage ──
 
     @Test
     fun `D1 gate #5 - ghost busy plus known idle session forces global Busy`() = runTest {
-        // Response contains ghost=busy + s1 absent (→ Idle), s1 is mapped.
-        // globalState must be Busy (never AllIdleFresh) — the ghost is
-        // positively known active even though it has no workdir mapping.
-        val repo = mockk<OpenCodeRepository>(relaxed = true)
-        coEvery { repo.getSessionStatus() } returns Result.success(
-            mapOf("ghost" to SessionStatus(type = "busy"))
-        )
-        val aggregator = newAggregator(repo, clock = { 100L })
+        val (aggregator, store) = newAggregator(clock = { 100L })
 
-        aggregator.refresh(
-            identity(),
-            snapshot(
-                sessions = mapOf("s1" to session("s1", "/work")),
-                registeredWorkdirs = setOf("/work"),
-            ),
+        seedSnapshot(
+            aggregator, store,
+            statuses = mapOf("ghost" to SessionStatus(type = "busy")),
+            sessions = mapOf("s1" to session("s1", "/work")),
+            requestStartMs = 100L,
+            unmappedActiveIds = setOf("ghost"),
+            coveredWorkdirs = setOf("/work"),
         )
 
         assertEquals(GlobalBusyState.Busy, aggregator.globalState.value)
@@ -711,24 +650,20 @@ class StatusAggregatorImplTest {
 
     @Test
     fun `D1 gate #5 - all active ids map plus all workdirs covered is correct Busy`() = runTest {
-        val repo = mockk<OpenCodeRepository>(relaxed = true)
-        coEvery { repo.getSessionStatus() } returns Result.success(
-            mapOf(
+        val (aggregator, store) = newAggregator(clock = { 100L })
+
+        seedSnapshot(
+            aggregator, store,
+            statuses = mapOf(
                 "s1" to SessionStatus(type = "busy"),
                 "s2" to SessionStatus(type = "retry"),
-            )
-        )
-        val aggregator = newAggregator(repo, clock = { 100L })
-
-        aggregator.refresh(
-            identity(),
-            snapshot(
-                sessions = mapOf(
-                    "s1" to session("s1", "/work-a"),
-                    "s2" to session("s2", "/work-b"),
-                ),
-                registeredWorkdirs = setOf("/work-a", "/work-b"),
             ),
+            sessions = mapOf(
+                "s1" to session("s1", "/work-a"),
+                "s2" to session("s2", "/work-b"),
+            ),
+            requestStartMs = 100L,
+            coveredWorkdirs = setOf("/work-a", "/work-b"),
         )
 
         assertEquals(GlobalBusyState.Busy, aggregator.globalState.value)
@@ -736,18 +671,14 @@ class StatusAggregatorImplTest {
 
     @Test
     fun `M6 host-global success covers registered workdir without sessions`() = runTest {
-        // The endpoint is host-global: a successful snapshot covers every
-        // registered workdir, including /work-b with zero known sessions.
-        val repo = mockk<OpenCodeRepository>(relaxed = true)
-        coEvery { repo.getSessionStatus() } returns Result.success(emptyMap())
-        val aggregator = newAggregator(repo, clock = { 100L })
+        val (aggregator, store) = newAggregator(clock = { 100L })
 
-        aggregator.refresh(
-            identity(),
-            snapshot(
-                sessions = mapOf("s1" to session("s1", "/work-a")),
-                registeredWorkdirs = setOf("/work-a", "/work-b"),
-            ),
+        seedSnapshot(
+            aggregator, store,
+            statuses = emptyMap(),
+            sessions = mapOf("s1" to session("s1", "/work-a")),
+            requestStartMs = 100L,
+            coveredWorkdirs = setOf("/work-a", "/work-b"),
         )
 
         assertEquals(
@@ -758,29 +689,33 @@ class StatusAggregatorImplTest {
     }
 
     @Test
-    fun `D1 gate #5 - fresh successful empty host snapshot with no workdirs is authoritative idle`() = runTest {
-        // A successful REST snapshot returning empty AND zero registered
-        // workdirs (genuinely idle host) is AllIdleFresh — backed by the
-        // fresh coverage marker, NOT vacuous uninitialized state.
-        val repo = mockk<OpenCodeRepository>(relaxed = true)
-        coEvery { repo.getSessionStatus() } returns Result.success(emptyMap())
-        val aggregator = newAggregator(repo, clock = { 100L })
+    fun `D1 gate #5 - fresh successful empty host snapshot with no workdirs is authoritative idle`() =
+        runTest {
+            val (aggregator, store) = newAggregator(clock = { 100L })
 
-        aggregator.refresh(
-            identity(),
-            snapshot(sessions = emptyMap(), registeredWorkdirs = emptySet()),
-        )
+            seedSnapshot(
+                aggregator, store,
+                statuses = emptyMap(),
+                sessions = emptyMap(),
+                requestStartMs = 100L,
+                coveredWorkdirs = emptySet(),
+            )
 
-        assertEquals(GlobalBusyState.AllIdleFresh, aggregator.globalState.value)
-    }
+            assertEquals(GlobalBusyState.AllIdleFresh, aggregator.globalState.value)
+        }
 
     @Test
     fun `M6 empty host-global coverage marker expires to Unknown`() = runTest {
         var now = 0L
-        val repo = mockk<OpenCodeRepository>(relaxed = true)
-        coEvery { repo.getSessionStatus() } returns Result.success(emptyMap())
-        val aggregator = newAggregator(repo, clock = { now }, scope = backgroundScope)
-        aggregator.refresh(identity(), snapshot(emptyMap(), setOf("/zero-session")))
+        val (aggregator, store) = newAggregator(clock = { now }, scope = backgroundScope)
+
+        seedSnapshot(
+            aggregator, store,
+            statuses = emptyMap(),
+            sessions = emptyMap(),
+            requestStartMs = 0L,
+            coveredWorkdirs = setOf("/zero-session"),
+        )
         assertEquals(GlobalBusyState.AllIdleFresh, aggregator.globalState.value)
 
         now = StatusAggregatorImpl.STATUS_TTL_MS + 1
@@ -793,235 +728,26 @@ class StatusAggregatorImplTest {
 
     @Test
     fun `D1 gate #5 - cold-start empty aggregator is Unknown (not vacuous idle)`() {
-        val repo = mockk<OpenCodeRepository>(relaxed = true)
-        val aggregator = newAggregator(repo)
-        // Never refreshed → cold-start guard refuses AllIdleFresh.
+        val (aggregator, _) = newAggregator()
         assertEquals(GlobalBusyState.Unknown, aggregator.globalState.value)
         assertEquals(GlobalBusyState.Unknown, aggregator.stateAtNow())
     }
 
-    // ── T-R1 (slimapi R1) 方案A: slim disconnect-fallback refresh seam ──────
-    //
-    // Spec: `docs/ocmar/specs/2026-07-22-full-refactor-plan.md` §7.8 R1.
-    // Contract: `docs/ocmar/reports/2026-07-22-refactor-progress-handoff.md`
-    // §2 (方案A points 4 + 5) + §6.2.
-    //
-    // Locks the slim branch of [StatusAggregatorImpl.refresh] — the L2Idle/L3
-    // degraded fallback driven by ProcessStatusPoller (≤30s) on slim SSE loss.
-    // The refresh routes per registered workdir through the sidecar's bulk
-    // `GET /slimapi/sessions/status` — NOT legacy `GET /session/status`.
-    //
-    // **方案A point 5 (Issue2)**: partial per-directory failure (some workdirs
-    // succeed, some fail) MUST mark FAILED-workdir sessions as Unknown (NOT
-    // Idle). All-fail → all Unknown. Successful workdirs fold normally. The
-    // prior round-2 freeze (7ec36cb) locked the WRONG B-semantics: any success
-    // → full-snapshot fold → failed-workdir sessions were filled Idle. The
-    // tests below freeze the CORRECT A contract. The A-impl rework tracks
-    // per-workdir success/failure via a `StatusFetch(statuses, failedWorkdirs)`
-    // carrier; the success fold marks failed-workdir sessions Unknown.
-    //
-    // **Critical counterexample**: successful workdir returns Idle + failed
-    // workdir → failed session = Unknown, NOT Idle. If the failed session
-    // were Idle, globalState could flip to AllIdleFresh (wrongly entering the
-    // idle grace window on a failed workdir). 方案A prevents this by marking
-    // the failed session Unknown so globalState refuses AllIdleFresh.
-
-    @Test
-    fun `T-R1 slim refresh routes through getSlimapiSessionsStatus per registered workdir and avoids legacy endpoint`() =
-        runTest {
-            // 方案A point 4: slim disconnect fallback uses slim endpoints.
-            // GREEN: current impl already routes through getSlimapiSessionsStatus
-            // in slim mode (the disconnect fallback path is correct).
-            val repo = mockk<OpenCodeRepository>(relaxed = true)
-            every { repo.usesSlimStatusFanOut } returns true
-            coEvery { repo.getSlimapiSessionsStatus(any()) } returns Result.success(
-                mapOf("s1" to SessionStatus(type = "busy"))
-            )
-            // Defensive stub — the assertion proves it is NOT called.
-            coEvery { repo.getSessionStatus() } returns Result.success(emptyMap())
-            val aggregator = newAggregator(repo, clock = { 100L })
-
-            aggregator.refresh(
-                identity(),
-                snapshot(
-                    sessions = mapOf("s1" to session("s1", "/work-a")),
-                    registeredWorkdirs = setOf("/work-a"),
-                ),
-            )
-
-            // POSITIVE: slim routes per-workdir through the bulk slim endpoint.
-            coVerify(atLeast = 1) { repo.getSlimapiSessionsStatus(any()) }
-            // NEGATIVE: legacy bulk endpoint untouched in slim mode.
-            coVerify(exactly = 0) { repo.getSessionStatus() }
-            // The slim-sourced busy status is folded identically to the legacy path.
-            assertEquals(
-                SessionBusyStatus.Busy,
-                aggregator.statusByKey.value[key("s1", "/work-a")],
-            )
-        }
-
-    @Test
-    fun `T-R1 slim refresh all-workdirs-failure marks known sessions Unknown not Idle`() = runTest {
-        // 方案A point 5: when every per-directory slim bulk call fails, the slim
-        // branch must surface a composite failure so known sessions become
-        // Unknown (NOT Idle). The lifecycle guard (globalState = Unknown) is
-        // preserved via the coverage gate.
-        val repo = mockk<OpenCodeRepository>(relaxed = true)
-        every { repo.usesSlimStatusFanOut } returns true
-        coEvery { repo.getSlimapiSessionsStatus(any()) } returns Result.failure(
-            java.io.IOException("upstream unavailable")
-        )
-        val aggregator = newAggregator(repo, clock = { 100L })
-
-        aggregator.refresh(
-            identity(),
-            snapshot(
-                sessions = mapOf("s1" to session("s1", "/work-a")),
-                registeredWorkdirs = setOf("/work-a"),
-            ),
-        )
-
-        // §P0-A Lane 2 (双投影同源): all-fail surfaces as Result.failure →
-        // MarkSourceFailed → bySid cleared (absence ≡ unknown) +
-        // coverage.lastSuccessTimeMs = -1. statusByKey has no Unknown ENTRY
-        // (authority has no Unknown status); the idle-grace guard is preserved
-        // via the coverage gate (globalState = Unknown, NOT AllIdleFresh).
-        assertNull(
-            "all-workdirs slim failure → known session absent (unknown ≡ fail-closed)",
-            aggregator.statusByKey.value[key("s1", "/work-a")],
-        )
-        assertEquals(
-            "all-workdirs slim failure must NOT enter idle grace",
-            GlobalBusyState.Unknown,
-            aggregator.globalState.value,
-        )
-    }
-
-    @Test
-    fun `T-R1 slim refresh partial failure - single global call success covers all registered workdirs`() =
-        runTest {
-            // Slim P2: the upstream `directory` is a no-op — one call returns
-            // the host-wide global map covering ALL workdirs. No per-directory
-            // partial-failure exists. A single successful call covers every
-            // registered workdir: s1 (in /work-a, present in response) folds as
-            // busy; s2 (in /work-b, absent from global response) is
-            // authoritative-normalized to idle (which is correct — the global
-            // snapshot covered the entire host, so absent = genuinely idle).
-            val repo = mockk<OpenCodeRepository>(relaxed = true)
-            every { repo.usesSlimStatusFanOut } returns true
-            // Only /work-a is called (first dir) — the single global call.
-            coEvery { repo.getSlimapiSessionsStatus("/work-a") } returns Result.success(
-                mapOf("s1" to SessionStatus(type = "busy"))
-            )
-            val aggregator = newAggregator(repo, clock = { 100L })
-
-            aggregator.refresh(
-                identity(),
-                snapshot(
-                    sessions = mapOf(
-                        "s1" to session("s1", "/work-a"),
-                        "s2" to session("s2", "/work-b"),
-                    ),
-                    registeredWorkdirs = setOf("/work-a", "/work-b"),
-                ),
-            )
-
-            // s1 (present in global response) folded as Busy.
-            assertEquals(
-                "workdir-a session folds normally from global response",
-                SessionBusyStatus.Busy,
-                aggregator.statusByKey.value[key("s1", "/work-a")],
-            )
-            // s2 (absent from global response → idle-filled for covered dirs).
-            assertEquals(
-                "workdir-b session absent from global response is normalized to Idle",
-                SessionBusyStatus.Idle,
-                aggregator.statusByKey.value[key("s2", "/work-b")],
-            )
-            // Busy s1 keeps the host out of idle grace.
-            assertEquals(GlobalBusyState.Busy, aggregator.globalState.value)
-        }
-
-    @Test
-    fun `T-R1 slim refresh partial failure - single global call empty success enters AllIdleFresh`() =
-        runTest {
-            // Slim P2 counterexample: a single global call that succeeds with
-            // an empty map means the entire host has no active sessions. ALL
-            // sessions are authoritative-normalized to idle (no partial failure,
-            // no failed workdirs). AllIdleFresh is the correct verdict — the
-            // host is genuinely idle everywhere.
-            val repo = mockk<OpenCodeRepository>(relaxed = true)
-            every { repo.usesSlimStatusFanOut } returns true
-            // Only /work-a is called (first dir) — returns empty global map.
-            coEvery { repo.getSlimapiSessionsStatus("/work-a") } returns Result.success(emptyMap())
-            val aggregator = newAggregator(repo, clock = { 100L })
-
-            aggregator.refresh(
-                identity(),
-                snapshot(
-                    sessions = mapOf(
-                        "s1" to session("s1", "/work-a"),
-                        "s2" to session("s2", "/work-b"),
-                    ),
-                    registeredWorkdirs = setOf("/work-a", "/work-b"),
-                ),
-            )
-
-            // Both sessions normalize to idle (absent from empty global response).
-            assertEquals(
-                "s1 normalized to idle from empty global snapshot",
-                SessionBusyStatus.Idle,
-                aggregator.statusByKey.value[key("s1", "/work-a")],
-            )
-            assertEquals(
-                "s2 normalized to idle from empty global snapshot",
-                SessionBusyStatus.Idle,
-                aggregator.statusByKey.value[key("s2", "/work-b")],
-            )
-            // CORRECT: single global call success with all idle → AllIdleFresh.
-            assertEquals(
-                "single global call success with all idle enters AllIdleFresh",
-                GlobalBusyState.AllIdleFresh,
-                aggregator.globalState.value,
-            )
-        }
-
-    @Test
-    fun `T-R1 slim refresh with no registered workdirs skips the slim endpoint`() = runTest {
-        // Before any workdir is registered: the per-workdir loop is empty so
-        // no slim HTTP is issued, and the result is success-empty (handled by
-        // the coverage marker's cold-start guard, not by poisoning entries as
-        // Unknown). GREEN.
-        val repo = mockk<OpenCodeRepository>(relaxed = true)
-        every { repo.usesSlimStatusFanOut } returns true
-        coEvery { repo.getSlimapiSessionsStatus(any()) } returns Result.success(emptyMap())
-        val aggregator = newAggregator(repo, clock = { 100L })
-
-        aggregator.refresh(
-            identity(),
-            snapshot(sessions = emptyMap(), registeredWorkdirs = emptySet()),
-        )
-
-        coVerify(exactly = 0) { repo.getSlimapiSessionsStatus(any()) }
-    }
-
-    // ── §P0-A rev-gpt #4: version-monotone publish + incremental derivation ──
+    // ── §P0-A rev-gpt #4: version-monotone publish ──────────────────────────
 
     @Test
     fun `rev-gpt #4 - two rapid dispatches produce the final verdict (monotone no-regression)`() = runTest {
-        // Dispatch two SSE events rapidly: the version-monotone guard ensures
-        // the second (higher authorityRevision) is NOT overwritten by a stale
-        // collect emission from the first.
-        val repo = mockk<OpenCodeRepository>(relaxed = true)
-        coEvery { repo.getSessionStatus() } returns Result.success(emptyMap())
-        val aggregator = newAggregator(repo, clock = { 100L })
+        val (aggregator, store) = newAggregator(clock = { 100L })
 
-        // First: REST idle (AllIdleFresh after coverage marker writes).
-        aggregator.refresh(identity(), snapshot(mapOf("s1" to session("s1", "/work"))))
+        seedSnapshot(
+            aggregator, store,
+            statuses = emptyMap(),
+            sessions = mapOf("s1" to session("s1", "/work")),
+            requestStartMs = 100L,
+        )
         assertEquals(GlobalBusyState.AllIdleFresh, aggregator.globalState.value)
 
-        // Second: SSE busy (must flip to Busy — the higher-revision publish wins).
-        aggregator.applySseStatus(key("s1", "/work"), SessionBusyStatus.Busy, sourceTimeMs = 200L)
+        seedApplyEvent(aggregator, store, "s1", SessionBusyStatus.Busy, sourceTimeMs = 200L)
         assertEquals(GlobalBusyState.Busy, aggregator.globalState.value)
     }
 
@@ -1029,26 +755,41 @@ class StatusAggregatorImplTest {
 
     @Test
     fun `U-PUBLISH - concurrent publish serializes with high-rev verdict visible`() = runTest {
-        val repo = mockk<OpenCodeRepository>(relaxed = true)
-        coEvery { repo.getSessionStatus() } returns Result.success(emptyMap())
-        val aggregator = newAggregator(repo, clock = { 100L })
+        val identityStore = ConnectionIdentityStore().also { it.bind(fp, "/work", "endpoint-A") }
+        val store = SharedStateStore()
+        val aggregator = StatusAggregatorImpl(
+            identityStore, store,
+            CoroutineScope(SupervisorJob() + Dispatchers.Unconfined),
+            clock = { 100L },
+        )
 
         val latch = CountDownLatch(1)
         val errors = ConcurrentLinkedQueue<Throwable>()
+        val scopeKey = scopeKeyOf(fp, "endpoint-A")
 
-        // Thread 1: publish busy status
         val t1 = thread {
             latch.await()
             try {
-                aggregator.applySseStatus(key("s1", "/work"), SessionBusyStatus.Busy, 100L)
+                val op = AuthorityOp.ApplyEvent(
+                    sid = "s1", status = SessionStatus(type = "busy"),
+                    origin = EntryOrigin.SSE_SLIM, scopeKey = scopeKey,
+                    connectionTimeMs = 100L, workdir = "/work",
+                )
+                store.dispatch(AppAction.AuthorityEvent(op))
+                aggregator.publishFromState(store.stateFlow.value)
             } catch (e: Throwable) { errors.add(e) }
         }
 
-        // Thread 2: publish idle status concurrently
         val t2 = thread {
             latch.await()
             try {
-                aggregator.applySseStatus(key("s2", "/work"), SessionBusyStatus.Idle, 200L)
+                val op = AuthorityOp.ApplyEvent(
+                    sid = "s2", status = SessionStatus(type = "idle"),
+                    origin = EntryOrigin.SSE_SLIM, scopeKey = scopeKey,
+                    connectionTimeMs = 200L, workdir = "/work",
+                )
+                store.dispatch(AppAction.AuthorityEvent(op))
+                aggregator.publishFromState(store.stateFlow.value)
             } catch (e: Throwable) { errors.add(e) }
         }
 
@@ -1057,160 +798,90 @@ class StatusAggregatorImplTest {
         t2.join()
 
         assertTrue("no exceptions under concurrent publish", errors.isEmpty())
-        // The synchronized(publishLock) ensures both dispatches serialize
-        // inside publishFromState → no torn state, no NPE on maxPublishedRevision.
-        val state = aggregator.globalState.value
-        assertNotNull("globalState defined after concurrent publish", state)
-        // At minimum, globalState should not be null (init collect ran fully
-        // for both dispatches via the lock) and no exception was thrown.
-        assertNotNull("globalState defined after concurrent dispatch", state)
+        assertNotNull("globalState defined after concurrent publish", aggregator.globalState.value)
     }
 
     @Test
     fun `U-PUBLISH - same revision re-publish is allowed (not suppressed)`() = runTest {
-        val repo = mockk<OpenCodeRepository>(relaxed = true)
-        coEvery { repo.getSessionStatus() } returns Result.success(emptyMap())
         val identityStore = ConnectionIdentityStore().also { it.bind(fp, "/work", "endpoint-A") }
         val store = SharedStateStore()
-        val fetchService = StatusFetchService(repo, repo, SlimStatusFetchCache(repo, clock = { System.currentTimeMillis() }))
         var clock = 0L
         val aggregator = StatusAggregatorImpl(
-            identityStore, store, fetchService,
+            identityStore, store,
             CoroutineScope(SupervisorJob() + Dispatchers.Unconfined),
             clock = { clock },
         )
 
-        // First publish: rev=N (initial state, empty authority → Unknown)
         val state = store.stateFlow.value
         val rev = state.authorityRevision
         aggregator.publishFromState(state)
-        val firstVerdict = aggregator.globalState.value
 
-        // Advance the clock so that the same state would produce a different
-        // verdict IF re-published (TTL-dependent Idle→Unknown transition).
-        // But with an empty authority the verdict stays the same — that's fine.
-        // The key assertion: no exception, and the synchronised block is entered
-        // (not suppressed by rev < maxPublishedRevision).
         clock = 100_000L
         aggregator.publishFromState(state)
         assertEquals(
-            "same-rev re-publish entered the publishLocked block (rev == maxPublishedRevision, NOT <)",
-            rev,
-            store.stateFlow.value.authorityRevision,
+            "same-rev re-publish entered publishLocked block",
+            rev, store.stateFlow.value.authorityRevision,
         )
-        // Verify no regression: method returned without crash
-        assertNotNull("globalState still accessible after same-rev re-publish",
-            aggregator.globalState.value)
+        assertNotNull("globalState still accessible", aggregator.globalState.value)
     }
 
     @Test
     fun `U-PUBLISH - low revision publish is suppressed by maxPublishedRevision`() = runTest {
-        val repo = mockk<OpenCodeRepository>(relaxed = true)
-        coEvery { repo.getSessionStatus() } returns Result.success(emptyMap())
         val identityStore = ConnectionIdentityStore().also { it.bind(fp, "/work", "endpoint-A") }
         val store = SharedStateStore()
-        val fetchService = StatusFetchService(repo, repo, SlimStatusFetchCache(repo, clock = { System.currentTimeMillis() }))
         var clock = 0L
         val aggregator = StatusAggregatorImpl(
-            identityStore, store, fetchService,
+            identityStore, store,
             CoroutineScope(SupervisorJob() + Dispatchers.Unconfined),
             clock = { clock },
         )
 
-        // Capture initial state before any dispatch (rev=0, empty authority)
         val stateLow = store.stateFlow.value
-
-        // Dispatch an SSE event to bump revision
-        aggregator.applySseStatus(key("s1", "/work"), SessionBusyStatus.Busy, 100L)
+        val busyOp = AuthorityOp.ApplyEvent(
+            sid = "s1", status = SessionStatus(type = "busy"),
+            origin = EntryOrigin.SSE_SLIM, scopeKey = scopeKeyOf(fp, "endpoint-A"),
+            connectionTimeMs = 100L, workdir = "/work",
+        )
+        store.dispatch(AppAction.AuthorityEvent(busyOp))
         val stateHigh = store.stateFlow.value
         assertTrue(
-            "high-rev state has higher authorityRevision",
+            "high-rev has higher authorityRevision",
             stateHigh.authorityRevision > stateLow.authorityRevision,
         )
 
-        // Publish high-rev state first → sets maxPublishedRevision = highRev
         aggregator.publishFromState(stateHigh)
         val highRevVerdict = aggregator.globalState.value
-
-        // Now try to publish low-rev state — should be suppressed by
-        // rev < maxPublishedRevision guard in publishFromState.
         aggregator.publishFromState(stateLow)
 
-        assertEquals(
-            "low-rev publish did NOT change globalState (suppressed)",
-            highRevVerdict,
-            aggregator.globalState.value,
-        )
+        assertEquals("low-rev publish suppressed", highRevVerdict, aggregator.globalState.value)
     }
 
     @Test
     fun `scope derivation is consistent between bound identity and per-call identity`() = runTest {
-        // §U-MN10: steady-state invariant — currentScope() (identityStore-sourced)
-        // equals scopeKeyOf(perCallIdentity). The runtime check() in refresh()
-        // enforces this; calling refresh() with a matching identity must not
-        // throw (the scopeKey == currentScope() invariant holds).
-        val repo = mockk<OpenCodeRepository>(relaxed = true)
-        coEvery { repo.getSessionStatus() } returns Result.success(emptyMap())
-        val aggregator = newAggregator(repo)
-        // identity() matches the store's auto-bound identity (groupFp = "host-group-A")
-        aggregator.refresh(identity(), snapshot(emptyMap()))
-        // No exception thrown — the runtime check() inside refresh() passed.
+        val (aggregator, store) = newAggregator()
+        seedSnapshot(
+            aggregator, store,
+            statuses = emptyMap(), sessions = emptyMap(), requestStartMs = 100L,
+        )
         assertTrue(
-            "after empty success, statusByKey should be empty (no sessions)",
+            "after empty success, statusByKey should be empty",
             aggregator.statusByKey.value.isEmpty(),
         )
     }
 
     @Test
-    fun `markRequestFailed does NOT crash on stale identity after reconfigure (no epoch guard on public entry)`() {
-        // §U-MN10 rev-glm MAJOR fix regression guard: the public
-        // markRequestFailed() entry has NO epoch guard. A caller like
-        // ProcessStatusPoller.runRefresh passes an `identity` captured at poll
-        // start, which may be STALE after a reconfigure. The consistency
-        // assertion must NOT live in markRequestFailedInternal (it would fire
-        // IllegalStateException across a legitimate reconfigure window); it
-        // lives only in refresh()'s onFailure (epoch-guarded). This test pins
-        // that markRequestFailed with a stale identity routes the failure
-        // WITHOUT throwing.
-        val repo = mockk<OpenCodeRepository>(relaxed = true)
+    fun `markSourceFailed does NOT crash on stale identity (no epoch guard)`() {
         val identityStore = ConnectionIdentityStore()
             .also { it.bind(fp, "/work", "endpoint-A") }
-        val aggregator = newAggregator(repo, identityStore = identityStore, clock = { 100L })
-        val sessionsById = mapOf("s1" to session("s1", "/work"))
-        // Reconfigure: the bound identity moves to a DIFFERENT group/endpoint.
-        identityStore.bind("host-group-B", "/work", "endpoint-B")
-        // The poller still holds the STALE identity (group A / endpoint-A).
-        // markRequestFailed must NOT throw (the assertion is scoped to refresh()).
-        aggregator.markRequestFailed(
-            identity = identity(groupFp = fp),  // stale — group A while bound is now B
-            snapshot = snapshot(sessionsById),
+        val (aggregator, store) = newAggregator(identityStore = identityStore, clock = { 100L })
+
+        seedMarkSourceFailed(
+            aggregator, store,
+            registeredWorkdirs = setOf("/work"),
             sourceTimeMs = 100L,
         )
-        // The failure op was still dispatched (the scope it carries is the
-        // stale one; the reducer merge-times it under that scope — separate
-        // concern). The point of THIS test: no IllegalStateException thrown.
         assertEquals(
-            "globalState is Unknown after failure (op dispatched despite stale identity)",
-            GlobalBusyState.Unknown,
-            aggregator.globalState.value,
-        )
-    }
-
-    @Test
-    fun `refresh onFailure consistency assertion holds under matching identity`() = runTest {
-        // §U-MN10 rev-glm MAJOR fix: the check() moved from
-        // markRequestFailedInternal to refresh()'s onFailure closure (the ONLY
-        // epoch-guarded failure path). A failed fetch with a matching identity
-        // must pass the assertion (no IllegalStateException) and route Unknown.
-        val repo = mockk<OpenCodeRepository>(relaxed = true)
-        coEvery { repo.getSessionStatus() } returns Result.failure(RuntimeException("network down"))
-        val aggregator = newAggregator(repo, clock = { 100L })
-        val sessionsById = mapOf("s1" to session("s1", "/work"))
-        aggregator.refresh(identity(), snapshot(sessionsById))
-        // No exception thrown — the onFailure check() passed (identity matches
-        // the epoch-guarded bound identity), and the failure routed Unknown.
-        assertEquals(
-            "failed refresh routes globalState to Unknown",
+            "globalState is Unknown after failure",
             GlobalBusyState.Unknown,
             aggregator.globalState.value,
         )

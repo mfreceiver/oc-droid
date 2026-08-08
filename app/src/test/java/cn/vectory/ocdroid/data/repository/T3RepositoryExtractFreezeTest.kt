@@ -500,7 +500,8 @@ class T3RepositoryExtractFreezeTest {
                     "revertSession", "getPendingPermissions", "respondPermission",
                     "getPendingQuestions", "replyQuestion", "rejectQuestion", "executeCommand",
                     "getSlimapiQuestions", "getSlimapiPermissions",
-                    "replySlimapiQuestion", "rejectSlimapiQuestion", "respondSlimapiPermission",
+                    // F4a: replySlimapiQuestion / rejectSlimapiQuestion / respondSlimapiPermission
+                    // collapsed into the legacy methods.
                 ),
             ),
             IfaceSpec(

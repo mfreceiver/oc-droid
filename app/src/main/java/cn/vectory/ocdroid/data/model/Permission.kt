@@ -16,9 +16,10 @@ data class PermissionRequest(
     /**
      * Slimapi HMAC the sidecar validates on the permission response POST
      * (~1h TTL). Present only when the permission arrived via slim SSE;
-     * legacy/standard paths leave this null. The slim respond path
-     * ([OpenCodeRepository.respondSlimapiPermission]) threads it back on
-     * the write endpoint.
+     * legacy/standard paths leave this null. F4a: the slim respond path
+     * was collapsed into [InteractionRepository.respondPermission]; the
+     * routeToken is now a client-side provenance signal only (upstream
+     * spec §7:231 deleted it from the wire).
      */
     @SerialName("routeToken") val routeToken: String? = null,
 ) {

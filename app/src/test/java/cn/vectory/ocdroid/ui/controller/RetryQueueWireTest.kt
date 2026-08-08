@@ -65,7 +65,6 @@ class RetryQueueWireTest {
             effects = effects,
             currentProfileId = { profileId },
             identityStore = cn.vectory.ocdroid.service.identity.ConnectionIdentityStore(),
-            statusAggregatorInput = null,
             clock = { clockNow },
         )
     }

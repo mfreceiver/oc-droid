@@ -1375,25 +1375,8 @@ class OpenCodeRepository @Inject constructor(
     ): Result<SlimAggregationOutcome<SlimapiPermissionEntry>> =
         interactionGateway.getSlimapiPermissions(directories)
 
-    override suspend fun replySlimapiQuestion(
-        questionId: String,
-        answers: List<List<String>>,
-        @Suppress("UNUSED_PARAMETER") routeToken: String?,
-        directory: String?,
-    ): Result<Unit> = interactionGateway.replySlimapiQuestion(questionId, answers, routeToken, directory)
-
-    override suspend fun rejectSlimapiQuestion(
-        questionId: String,
-        @Suppress("UNUSED_PARAMETER") routeToken: String?,
-        directory: String?,
-    ): Result<Unit> = interactionGateway.rejectSlimapiQuestion(questionId, routeToken, directory)
-
-    override suspend fun respondSlimapiPermission(
-        sessionId: String,
-        permissionId: String,
-        response: PermissionResponse,
-        @Suppress("UNUSED_PARAMETER") routeToken: String?
-    ): Result<Unit> = interactionGateway.respondSlimapiPermission(sessionId, permissionId, response, routeToken)
+    // F4a: replySlimapiQuestion / rejectSlimapiQuestion / respondSlimapiPermission
+    // forwarders were identity-equivalent to the legacy methods; collapsed in F4a.
 
     // ── Cluster A slim state / drain methods: RETIRED (lite-v2-dev plan §4.1) ─
     // coldStartSlimSync + bumpSlimBookmarkFromItems + getSlimSessionState +

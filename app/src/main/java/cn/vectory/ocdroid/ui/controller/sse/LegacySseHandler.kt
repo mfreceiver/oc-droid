@@ -103,7 +103,7 @@ class LegacySseHandler(private val host: SseDispatchHost) : SseEventHandler {
                 if (routeId == updated.id || currentId == updated.id) {
                     host.slices.store.dispatch(AppAction.CloseDetail)
                     host.settingsManager.currentSessionId = null
-                    host.settingsManager.lastRoute = NavRoute.Sessions.route
+                    // F2: settingsManager.lastRoute write was redundant; deleted.
                     host.slices.store.mutateNav {
                         it.copy(
                             lastRoute = NavRoute.Sessions.route,
