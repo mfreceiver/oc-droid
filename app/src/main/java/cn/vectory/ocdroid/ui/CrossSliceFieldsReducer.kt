@@ -584,8 +584,8 @@ internal fun ChatState.clearLoadedChatPayload(): ChatState = copy(
  * §P0-A r2: derive the REAL authority [ScopeKey] from [StoreState] alone
  * (pure — no identityStore dependency). Combines the current host profile's
  * [profileId] with the live [endpointFp] maintained by [BundlePublished].
- * Mirrors the derivation in [SharedStateStore.authorityScope] and
- * [StatusAggregatorImpl.currentScope] so prune operations
+ * Mirrors the derivation in [SharedStateStore.authorityScope] so prune
+ * operations
  * ([PruneSessions]) carry a scope that correctly represents the active
  * connection identity.
  *

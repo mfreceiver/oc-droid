@@ -7,9 +7,6 @@ import cn.vectory.ocdroid.data.repository.ServerCompatProfile
 import cn.vectory.ocdroid.data.repository.StatusOutcome
 import cn.vectory.ocdroid.service.identity.ConnectionIdentity
 import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
-import cn.vectory.ocdroid.service.status.GlobalBusyState
-import cn.vectory.ocdroid.service.status.SessionBusyStatus
-import cn.vectory.ocdroid.service.status.SessionStatusKey
 import cn.vectory.ocdroid.service.status.SlimStatusFanOut
 import cn.vectory.ocdroid.service.status.StatusFanOutSummary
 import cn.vectory.ocdroid.service.status.StatusSnapshot

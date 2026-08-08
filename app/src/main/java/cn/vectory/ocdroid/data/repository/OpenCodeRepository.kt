@@ -436,7 +436,7 @@ class OpenCodeRepository @Inject constructor(
      *  features.tokenStream）；本 forwarder 直接读 slimConnection（语义等价）。 */
     override val supportsTokenStreamResync: Boolean get() = connectionGateway.supportsTokenStreamResync
 
-    /** ι-A / lite-v2-dev: StatusAggregator 是否走 slim 扇出（vs legacy bulk
+    /** ι-A / lite-v2-dev: session status 是否走 slim 扇出（vs legacy bulk
      *  `/session/status`）。lite-v2 起等价于 slimConnection（plan §4.4）。 */
     override val usesSlimStatusFanOut: Boolean get() = connectionGateway.usesSlimStatusFanOut
 
@@ -997,8 +997,7 @@ class OpenCodeRepository @Inject constructor(
      * through the sidecar's `GET /slimapi/sessions/status?directory=` and
      * returns the SAME `Map<String, SessionStatus>` shape (forwarded verbatim
      * from upstream `/session/status`), so callers ([launchLoadSessionStatus]
-     * slim cold-start + [cn.vectory.ocdroid.service.status.StatusAggregatorImpl]
-     * L2Idle/L3 disconnect fallback) consume it identically to the legacy map.
+     * slim cold-start) consume it identically to the legacy map.
      *
      * `directory` is REQUIRED by the sidecar (see [OpenCodeApi.getSlimapiSessionsStatus]);
      * callers pass one registered workdir per call and merge. Non-2xx (incl.
@@ -1056,7 +1055,7 @@ class OpenCodeRepository @Inject constructor(
     /**
      * §slimapi-client-impl-v1 §6 G2 (Task 4) — per-session status fetch
      * (`GET /slimapi/sessions/{sid}/status`), boundary-normalised into a
-     * [StatusOutcome] so the caller (T7 reconcile / T11 StatusAggregator)
+     * [StatusOutcome] so the caller (T7 reconcile / slim status fan-out)
      * never pattern-matches on `retrofit2.Response` / HTTP status / error
      * code strings. Mirrors the [expandMessagesFullBatch] outcome discipline.
      *

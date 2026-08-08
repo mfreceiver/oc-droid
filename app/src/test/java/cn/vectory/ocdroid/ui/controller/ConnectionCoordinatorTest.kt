@@ -1,7 +1,6 @@
 package cn.vectory.ocdroid.ui.controller
 
 import cn.vectory.ocdroid.service.StreamingOwnershipGate
-import cn.vectory.ocdroid.service.status.StatusAggregator
 import cn.vectory.ocdroid.service.streaming.BootstrapRetryPolicy
 import cn.vectory.ocdroid.service.streaming.ConnectionBootstrapEngine
 import cn.vectory.ocdroid.service.streaming.ConnectionBootstrapOutcome

@@ -21,9 +21,10 @@ package cn.vectory.ocdroid.service.streaming
  * **D4-B M3 — transport readiness vs status authority**: [Ready] now means
  * **transport-ready** (the SSE collector delivered at least one valid
  * current-identity frame; the poller completed its immediate first poll) —
- * NOT a status verdict. The coordinator consults
- * [cn.vectory.ocdroid.service.status.StatusAggregator.stateAtNow] at handoff
- * commit to decide the layer transition (Busy/AllIdleFresh vs Unknown). This
+ * NOT a status verdict. The coordinator consults the status authority at handoff
+ * commit to decide the layer transition (Busy/AllIdleFresh vs Unknown). (D4-B
+ * M3's `StatusAggregator.stateAtNow` consumer was retired in F6 — the read side
+ * had no production consumer.) This
  * separates «can we prove the transport works» from «is the host busy» so
  * that a host whose REST status snapshot is Unknown (failed / not yet fresh)
  * no longer hangs the SSE bootstrap — the transport commits + a supplemental
@@ -44,9 +45,8 @@ sealed interface SourceActivation {
     /**
      * **D4-B M3**: the source is transport-ready — at least one verifiable,
      * current-identity observation proved the transport works (SSE first
-     * frame / poller first poll). The coordinator consults
-     * [cn.vectory.ocdroid.service.status.StatusAggregator.stateAtNow] at
-     * commit to decide the layer transition + whether to retire the
+     * frame / poller first poll). The coordinator consults the status authority
+     * at commit to decide the layer transition + whether to retire the
      * supplemental poller.
      */
     data object Ready : SourceActivation

@@ -14,7 +14,7 @@ import kotlinx.coroutines.sync.withPermit
  * §slimapi-client-impl-v1 §G2 (Task 13) — slim on-demand per-session status
  * fan-out use-case (L3 layer, slim-mode ONLY).
  *
- * Differs from [StatusAggregatorImpl.refresh] (the host-wide bulk L3 path):
+ * Differs from the host-wide bulk L3 path (`StatusPollOrchestrator.launchLoadSessionStatus`; the former `StatusAggregatorImpl.refresh` was retired in F1):
  * the bulk path issues ONE `GET /slimapi/sessions/status` (host-wide) and
  * folds every returned id into the global busy projection. This use-case
  * is invoked on-demand for a SUBSET of session ids, issuing one per-session
@@ -33,7 +33,7 @@ import kotlinx.coroutines.sync.withPermit
  *
  * This use-case is invoked ONLY from slim on-demand paths. The legacy
  * non-slim path (`!repository.usesSlimStatusFanOut`) never reaches this use-case;
- * [StatusAggregatorImpl.refresh] stays byte-for-byte unchanged.
+ * the legacy bulk path (`StatusPollOrchestrator.launchLoadSessionStatus`) stays byte-for-byte unchanged.
  *
  * # Fake-idle cross-check (T13-C5 + round-2 M1)
  *
