@@ -24,6 +24,14 @@ import cn.vectory.ocdroid.data.repository.SlimAggregationOutcome
 import cn.vectory.ocdroid.util.DebugLog
 import cn.vectory.ocdroid.util.runSuspendCatching
 import java.io.IOException
+import kotlinx.coroutines.delay
+
+// §transient-send-retry: prompt_async 非幂等，仅对"连接建立期失败"（请求
+// 字节确定未发出）重试一次。UnknownHostException(DNS)/ConnectException(TCP
+// refused) 是请求未到达服务端的确定性信号；其余（超时/SSL/reset/EOF/HTTP
+// 错误）无法证明请求未落盘，盲目重试有双重 turn 风险，一律不重试。
+private const val SEND_MAX_ATTEMPTS = 2
+private const val SEND_RETRY_DELAY_MS = 100L
 
 /**
  * Gateway for write-style interaction operations: send, abort, summarize,
@@ -46,7 +54,7 @@ internal class InteractionGateway(
         agent: String? = null,
         model: Message.ModelInfo? = null,
         attachments: List<ComposerImageAttachment> = emptyList(),
-    ): Result<Unit> = runSuspendCatching {
+    ): Result<Unit> {
         val parts = buildList {
             if (text.isNotBlank()) add(PromptRequest.PartInput(type = "text", text = text))
             attachments.forEach { attachment ->
@@ -63,6 +71,23 @@ internal class InteractionGateway(
             agent = agent,
             model = model?.let { PromptRequest.ModelInput(it.providerId, it.modelId) }
         )
+        // §transient-send-retry: prompt_async 非幂等，仅对"连接建立期失败"（请求
+        // 字节确定未发出）重试一次。UnknownHostException(DNS)/ConnectException(TCP
+        // refused) 是请求未到达服务端的确定性信号；其余（超时/SSL/reset/EOF/HTTP
+        // 错误）无法证明请求未落盘，盲目重试有双重 turn 风险，一律不重试。
+        var lastOutcome: Result<Unit>? = null
+        for (attempt in 0 until SEND_MAX_ATTEMPTS) {
+            lastOutcome = runSuspendCatching { doPromptAsync(sessionId, request) }
+            if (lastOutcome.isSuccess) return lastOutcome
+            val err = lastOutcome.exceptionOrNull()
+            val connectPhase = err is java.net.UnknownHostException || err is java.net.ConnectException
+            if (!connectPhase || attempt == SEND_MAX_ATTEMPTS - 1) return lastOutcome
+            delay(SEND_RETRY_DELAY_MS)
+        }
+        return lastOutcome ?: Result.failure(Exception("send: no attempt ran"))
+    }
+
+    private suspend fun doPromptAsync(sessionId: String, request: PromptRequest) {
         val response = mutationApi.promptAsync(sessionId, request)
         if (!response.isSuccessful) {
             val errorBody = response.errorBody()?.string() ?: response.message()

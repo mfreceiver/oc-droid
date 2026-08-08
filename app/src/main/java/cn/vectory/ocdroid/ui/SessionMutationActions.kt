@@ -471,7 +471,7 @@ internal fun launchSendMessage(
                 // §streaming-state-sync-diag: POST failed.
                 cn.vectory.ocdroid.util.DebugLog.w(
                     "SendDiag",
-                    "POST onFailure sid=$sessionId err=${error.message}",
+                    "POST onFailure sid=$sessionId err=${error.message} type=${error::class.qualifiedName}",
                 )
                 // §R-17 M3: read composer slice for the restore-decision; error
                 // → UiEvent, inputText → composer slice.
