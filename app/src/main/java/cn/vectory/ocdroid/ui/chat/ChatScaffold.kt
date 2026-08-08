@@ -562,26 +562,30 @@ fun ChatScaffold(
                             // this route instance can become transcript UI.
                             val routeContent = routeOwnedContent
                             if (routeContent != null) {
-                                ChatMessageList(
-                                    chatVM = chatVM,
-                                    composerVM = composerVM,
-                                    sessionVM = sessionVM,
-                                    orchestratorVM = orchestratorVM,
-                                    onFileClick = onChatFileClick,
-                                    onOpenChanges = onOpenGitChanges,
-                                    onCopyMessage = { _, text -> copyToSystemClipboard(context, text) },
-                                    onEditAndRerun = { messageId -> chatVM.editFromMessage(messageId) },
-                                    onFork = { messageId -> sessionVM.forkSession(routeSessionId, messageId) },
-                                    isCurrentSessionSending = isCurrentSessionSending,
-                                    routeSessionId = routeSessionId,
-                                    routeContent = routeContent,
-                                    // §chat-list-detail §11 / G6 (B5): the
-                                    // openSubAgent callback that persists the
-                                    // captured checkpoint on the parent route
-                                    // entry's SavedStateHandle BEFORE route-aware
-                                    // navigation to the child.
-                                    onOpenSubAgentNavigate = onOpenSubAgentNavigate,
-                                )
+                                // §text-context-menu: wrap ChatMessageList with
+                                // the self-rendering selection toolbar provider.
+                                // This installs our custom TextContextMenuProvider
+                                // (which renders a Compose Popup) for all
+                                // SelectionContainers in the message list, and
+                                // provides LocalSelectionToolbarVisible so
+                                // MessageCards can dismiss their DropdownMenu.
+                                ChatSelectionToolbarHost {
+                                    ChatMessageList(
+                                        chatVM = chatVM,
+                                        composerVM = composerVM,
+                                        sessionVM = sessionVM,
+                                        orchestratorVM = orchestratorVM,
+                                        onFileClick = onChatFileClick,
+                                        onOpenChanges = onOpenGitChanges,
+                                        onCopyMessage = { _, text -> copyToSystemClipboard(context, text) },
+                                        onEditAndRerun = { messageId -> chatVM.editFromMessage(messageId) },
+                                        onFork = { messageId -> sessionVM.forkSession(routeSessionId, messageId) },
+                                        isCurrentSessionSending = isCurrentSessionSending,
+                                        routeSessionId = routeSessionId,
+                                        routeContent = routeContent,
+                                        onOpenSubAgentNavigate = onOpenSubAgentNavigate,
+                                    )
+                                }
                             } else {
                                 ChatDetailSlice(
                                     routeId = routeSessionId,

@@ -85,6 +85,7 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -226,6 +227,14 @@ internal fun MessageCard(
     // §text-context-menu: labels reused by the enriched selection toolbar.
     val copyFullLabel = stringResource(R.string.message_action_copy)
     val forkLabel = stringResource(R.string.message_action_fork)
+
+    // §text-context-menu: when the self-rendering selection toolbar (from
+    // ChatSelectionToolbarHost in ChatScaffold) becomes visible, dismiss
+    // the DropdownMenu to avoid dual-popups on long-press.
+    val selectionToolbarVisible = LocalSelectionToolbarVisible.current
+    LaunchedEffect(selectionToolbarVisible) {
+        if (selectionToolbarVisible) overflowOpen = false
+    }
 
     // §text-context-menu: The enriched selection toolbar is injected via
     // appendTextContextMenuComponents + filterTextContextMenuComponents on the
