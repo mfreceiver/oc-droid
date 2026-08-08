@@ -85,7 +85,6 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -94,6 +93,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -107,6 +107,7 @@ import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.Part
 import cn.vectory.ocdroid.data.repository.FileVcsRepository
 import cn.vectory.ocdroid.ui.theme.AppConfirmDialog
+import cn.vectory.ocdroid.ui.theme.Dimens
 import cn.vectory.ocdroid.ui.theme.MenuItem
 
 /** §text-context-menu: stable keys for custom items injected into the selection toolbar. */
@@ -228,33 +229,24 @@ internal fun MessageCard(
     val copyFullLabel = stringResource(R.string.message_action_copy)
     val forkLabel = stringResource(R.string.message_action_fork)
 
-    // §text-context-menu: when the self-rendering selection toolbar (from
-    // ChatSelectionToolbarHost in ChatScaffold) becomes visible, dismiss
-    // the DropdownMenu to avoid dual-popups on long-press.
-    val selectionToolbarVisible = LocalSelectionToolbarVisible.current
-    LaunchedEffect(selectionToolbarVisible) {
-        if (selectionToolbarVisible) overflowOpen = false
-    }
-
-    // §text-context-menu: The enriched selection toolbar is injected via
-    // appendTextContextMenuComponents + filterTextContextMenuComponents on the
-    // Column below. When the user selects text (double-tap or drag), the default
-    // TextContextMenuToolbarProvider renders a floating toolbar showing:
-    //   Copy (selected text) + Copy full message + Fork from here
-    // Select All and system smart suggestions are filtered out.
+    // §dropdown-gating: position-based mutual exclusion between the DropdownMenu
+    // and text selection. The native ActionMode (system floating toolbar) handles
+    // text operations; the DropdownMenu handles message-level actions (Edit &
+    // rerun etc.). They are separated by press POSITION: long-pressing the gutter
+    // (non-content area beside the card) opens the DropdownMenu; long-pressing
+    // the content area lets SelectionContainer start text selection + show the
+    // native ActionMode (with our injected Copy full message + Fork items).
     //
-    // NOTE on DropdownMenu coexistence: A custom TextContextMenuProvider wrapper
-    // was attempted to dismiss the DropdownMenu when the selection toolbar shows
-    // (resolving the dual-trigger on long-press). However, wrapping the provider
-    // breaks the default toolbar rendering — the delegated showTextContextMenu()
-    // call produces no visible toolbar (verified on emulator). The modifiers alone
-    // work correctly with the unmodified default provider. The long-press overlap
-    // (DropdownMenu + selection toolbar both appearing briefly) is accepted as a
-    // known minor UX issue; double-tap is the primary text-selection entry point.
+    // CardWidthScope (in MessageRow) limits content to cardMax = min(2/3 avail,
+    // 480dp) with 16dp horizontal padding. User messages are right-aligned (left
+    // gutter); assistant messages are left-aligned (right gutter). We compute the
+    // gutter boundary from boxCoords.width and the same formula.
+    var boxCoords by remember { mutableStateOf<androidx.compose.ui.layout.LayoutCoordinates?>(null) }
 
     Box(
         modifier = Modifier
             .fillMaxWidth()
+            .onGloballyPositioned { boxCoords = it }
             // §press-anchor (Q7 gating-fix pattern): a NON-CONSUMING pointerInput
             // records the last DOWN position (px) WITHOUT consuming it and WITHOUT
             // waitForUpOrCancellation — so combinedClickable below still owns
@@ -274,11 +266,33 @@ internal fun MessageCard(
                 onClick = { /* tap = select (no-op), per E.5 */ },
                 onLongClick = {
                     hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
-                    // §press-anchor: snapshot the press point so the menu opens
-                    // at the finger; the snapshot stays stable while the menu is
-                    // open even if a later DOWN updates pressPositionPx.
-                    menuAnchorPx = pressPositionPx
-                    overflowOpen = true
+                    // §dropdown-gating: position-based mutual exclusion. Only
+                    // open the DropdownMenu when the press lands in the gutter
+                    // (non-content area beside the card). CardWidthScope limits
+                    // content to 2/3 of available width with Dimens.spacing4
+                    // (16dp) horizontal padding. User messages are right-aligned
+                    // (left gutter); assistant messages left-aligned (right
+                    // gutter). When the press is on content, skip the
+                    // DropdownMenu and let SelectionContainer handle selection.
+                    val coords = boxCoords
+                    val shouldOpen = if (coords != null) {
+                        val boxWidthPx = coords.size.width.toFloat()
+                        val padPx = with(density) { Dimens.spacing4.toPx() }
+                        val availablePx = boxWidthPx - 2 * padPx
+                        if (message.isUser) {
+                            // Right-aligned: left gutter = 1/3 of available width
+                            pressPositionPx.x < padPx + availablePx / 3f
+                        } else {
+                            // Left-aligned: right gutter beyond 2/3 of available
+                            pressPositionPx.x > padPx + availablePx * 2f / 3f
+                        }
+                    } else {
+                        true // Fallback: open if bounds unknown
+                    }
+                    if (shouldOpen) {
+                        menuAnchorPx = pressPositionPx
+                        overflowOpen = true
+                    }
                 },
             )
             // §a11y-B5: 告知屏幕阅读器用户长按可触发消息操作菜单。复用现有
