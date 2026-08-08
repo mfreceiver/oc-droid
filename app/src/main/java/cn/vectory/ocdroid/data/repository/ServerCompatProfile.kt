@@ -112,6 +112,11 @@ class ServerCompatProfile @Inject constructor() {
         // serving it is re-discovered (a prior 404 from an older sidecar is sticky
         // only within one connection incarnation).
         supportsSlimQuestions = true
+        // §slimapi-directories: /slimapi/directories is additive — re-probe on
+        // every reconfigure so a newly-deployed sidecar serving it is
+        // re-discovered (a prior 404 from an older sidecar is sticky only
+        // within one connection incarnation).
+        supportsSlimDirectories = true
     }
 
     /**
@@ -290,6 +295,38 @@ class ServerCompatProfile @Inject constructor() {
      *  from an old sidecar). Sticky until [setSlimConnection] resets on
      *  reconfigure. */
     internal fun markSlimQuestionsUnsupported() { supportsSlimQuestions = false }
+
+    /**
+     * §slimapi-directories: whether the connected oc-slimapi sidecar serves the
+     * `GET /slimapi/directories` endpoint.
+     *
+     * **Why a separate bit** (vs [slimConnection] / [supportsSlimStatus]):
+     * the /slimapi/directories route is additive — an older sidecar that
+     * predates it returns 404 `thin_route_not_found`, and the client must
+     * fall back to a degraded MRU-only view instead of a server-provided
+     * directory list.
+     *
+     * **Fail-open model**: default `true` — attempt the new endpoint first
+     * when [slimConnection] is on. On the first observed 404 (old sidecar
+     * predating the route), flip to `false` (cached, sticky) and subsequent
+     * calls short-circuit to the degraded MRU fallback. Transport errors
+     * (5xx / timeout) do NOT flip the flag (transient — would double traffic
+     * + mask outages). [setSlimConnection] resets it to `true` on every
+     * reconfigure so a newly-deployed sidecar is re-probed.
+     *
+     * Irrelevant in legacy (non-slim) mode — the directories branch in
+     * [OpenCodeRepository] gates on [slimConnection] first.
+     */
+    @Volatile var supportsSlimDirectories: Boolean = true
+        internal set
+
+    /** Mark /slimapi/directories supported (first 200). Sticky. */
+    internal fun markSlimDirectoriesSupported() { supportsSlimDirectories = true }
+
+    /** Mark /slimapi/directories unsupported (first 404 `thin_route_not_found`
+     *  from an old sidecar). Sticky until [setSlimConnection] resets on
+     *  reconfigure. */
+    internal fun markSlimDirectoriesUnsupported() { supportsSlimDirectories = false }
 
     /** 落库 [SlimapiHealthPayload] 的版本契约业务字段。 */
     fun updateSlimapi(payload: SlimapiHealthPayload) {

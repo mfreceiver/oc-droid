@@ -150,4 +150,37 @@ class ServerCompatProfileTest {
         p.setSlimConnection(true)
         assertTrue("reset to true on reconfigure", p.supportsSlimQuestions)
     }
+
+    // ── §slimapi-directories: /slimapi/directories capability flag ─────────
+
+    @Test
+    fun `supportsSlimDirectories defaults true (fail-open so the endpoint is attempted first)`() {
+        // Critical contract: a fresh profile MUST attempt the endpoint before
+        // falling back to degraded MRU, otherwise a slim client connecting to
+        // a sidecar that DOES serve /slimapi/directories would silently
+        // regress to the MRU view.
+        assertTrue(ServerCompatProfile().supportsSlimDirectories)
+    }
+
+    @Test
+    fun `markSlimDirectoriesUnsupported flips the bit sticky-false`() {
+        val p = ServerCompatProfile()
+        assertTrue("default true", p.supportsSlimDirectories)
+        p.markSlimDirectoriesUnsupported()
+        assertFalse("flipped false after 404", p.supportsSlimDirectories)
+        // markSlimDirectoriesSupported flips it back (first 200 after a re-probe).
+        p.markSlimDirectoriesSupported()
+        assertTrue("flipped true on 200", p.supportsSlimDirectories)
+    }
+
+    @Test
+    fun `setSlimConnection resets supportsSlimDirectories to true so a newly-deployed sidecar is re-probed`() {
+        val p = ServerCompatProfile()
+        p.markSlimDirectoriesUnsupported()
+        assertFalse("sticky-false after 404", p.supportsSlimDirectories)
+        // A reconfigure (newly-deployed sidecar that now serves the route)
+        // MUST re-probe — the bit resets to true.
+        p.setSlimConnection(true)
+        assertTrue("reset to true on reconfigure", p.supportsSlimDirectories)
+    }
 }

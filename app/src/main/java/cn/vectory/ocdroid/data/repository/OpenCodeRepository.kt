@@ -1182,6 +1182,123 @@ class OpenCodeRepository @Inject constructor(
 
     override suspend fun getCommands(): Result<List<CommandInfo>> = catalogGateway.getCommands()
 
+    // ── §slimapi-directories: GET /slimapi/directories (global directory catalog) ──────
+
+    /**
+     * §slimapi-directories: fetch the global directory catalog for the
+     * "past projects" picker. Returns [DirectoriesResult] pairing the outcome
+     * with the [ConnectionCapture] validated during the call — the caller (VM)
+     * commits its UI state write inside [commitIfConnectionCaptureCurrent] so
+     * check-and-write is atomic (closes the repo-return → VM-write TOCTOU, incl.
+     * bundle-generation rotation).
+     *
+     * **Fallback discipline**: only HTTP 404 `thin_route_not_found` (old sidecar)
+     * or non-slim → [DirectoriesOutcome.Degraded] (VM shows MRU). 503
+     * `transform_busy` retries (≤3×, honoring `Retry-After`); other 4xx/5xx /
+     * timeout → [DirectoriesOutcome.Error] (VM retains previous + retries). The
+     * capability-flag mark is guarded by [commitIfConnectionCaptureCurrent] so a
+     * stale 404 cannot pollute [ServerCompatProfile.supportsSlimDirectories].
+     *
+     * The two early returns (identity-null / non-slim-or-flag-false) happen
+     * before any suspend; the returned `cap` still travels so the VM commits
+     * every outcome through the SAME atomic gate uniformly.
+     */
+    internal suspend fun getDirectories(): DirectoriesResult {
+        // §ogpt-code-review blocker fix: capture connection + mode ATOMICALLY
+        // under the repo monitor. setSlimConnection() — which resets
+        // supportsSlimDirectories — runs under this same monitor inside
+        // configure(); reading the flags outside it could snapshot a stale
+        // capability during a bundle-generation-only rotation (new generation +
+        // old flag → wrong Degraded that the 4-field commit would still accept).
+        // The snapshot travels in DirectoriesResult.modeSnap and is re-validated
+        // by [commitDirectoriesIfCurrent]. synchronized(this) is reentrant, so
+        // captureConnection()'s identityStore read (nested lock, same order as
+        // commitIfConnectionCaptureCurrent: repo → identityStore) is safe.
+        val (cap, modeSnap) = synchronized(this) {
+            captureConnection() to ModeSnapshot(
+                slim = serverCompatProfile.slimConnection,
+                supportsDirectories = serverCompatProfile.supportsSlimDirectories,
+            )
+        }
+        val outcome: DirectoriesOutcome = when {
+            cap.identity == null -> DirectoriesOutcome.Dropped
+            !modeSnap.slim || !modeSnap.supportsDirectories -> DirectoriesOutcome.Degraded
+            else -> fetchDirectories(cap)
+        }
+        return DirectoriesResult(outcome, cap, modeSnap)
+    }
+
+    /**
+     * §ogpt-code-review rev-2 fix: atomic commit for directories results.
+     *
+     * Rejects ONLY when the capability flag was OFF at capture
+     * ([DirectoriesResult.modeSnap].supportsDirectories == false → the outcome is
+     * a Degraded-without-HTTP) but an external `setSlimConnection` reset has
+     * since turned it ON — that makes the captured Degraded stale (the new
+     * endpoint may serve the route, so the user should get a re-probe, not MRU).
+     *
+     * A SELF-INDUCED capability change does NOT match this predicate:
+     *  - The first valid 404 path captures modeSnap.supportsDirectories=true
+     *    (HTTP proceeded), then fetchDirectories' own `markUnsupported` flips the
+     *    flag to false and returns Degraded. At commit `!true` is false → the
+     *    reject is skipped → the legit Degraded commits. (The symmetric check in
+     *    rev-1's fix wrongly rejected this — rev-2's blocker.)
+     *  - `slimConnection` is intentionally NOT re-checked: it changes only inside
+     *    `configure`, which rotates the bundle generation → already caught by the
+     *    4-field [commitIfConnectionCaptureCurrent] below.
+     */
+    internal fun commitDirectoriesIfCurrent(result: DirectoriesResult, commit: () -> Unit): Boolean = synchronized(this) {
+        if (!result.modeSnap.supportsDirectories && serverCompatProfile.supportsSlimDirectories) {
+            return@synchronized false
+        }
+        commitIfConnectionCaptureCurrent(result.cap, commit)
+    }
+
+    private suspend fun fetchDirectories(cap: ConnectionCapture): DirectoriesOutcome {
+        var attempt = 0
+        while (true) {
+            attempt++
+            val resp = try {
+                api.getSlimapiDirectories()
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                return DirectoriesOutcome.Error(DirectoriesErrorCause.Transient(e))
+            }
+            if (resp.isSuccessful) {
+                // Note: no markSlimDirectoriesSupported() here — a 200 can only
+                // occur when supportsSlimDirectories was already true at capture
+                // (else fetchDirectories is never called), so re-affirming true is
+                // a no-op AND a concurrent late-200 could wrongly re-true a
+                // sticky-false flag (rev-2 🟠). The flag's lifecycle is driven
+                // solely by 404→markUnsupported + setSlimConnection reset.
+                val body = resp.body()
+                return if (body != null) DirectoriesOutcome.ServerList(body.items, body.discoveryComplete)
+                else DirectoriesOutcome.Error(DirectoriesErrorCause.MalformedBody)
+            }
+            val errorCode = parseErrorCode(resp)
+            val http = resp.code()
+            if (http == 503 && errorCode == SlimapiErrorCodes.TRANSFORM_BUSY && attempt < 3) {
+                val retryAfterMs = retryAfterHeaderToMs(resp.headers()["Retry-After"])
+                val delayMs = if (retryAfterMs > 0L) retryAfterMs
+                else exponentialBackoffMs(attempt - 1, baseMs = 200L, maxShift = 3)
+                delay(delayMs)
+                continue
+            }
+            if (http == 404 && errorCode == SlimapiErrorCodes.THIN_ROUTE_NOT_FOUND) {
+                commitIfConnectionCaptureCurrent(cap) {
+                    serverCompatProfile.markSlimDirectoriesUnsupported()
+                }
+                DebugLog.w(
+                    "OpenCodeRepository",
+                    "slimapi /slimapi/directories 404 thin_route_not_found (old sidecar) → Degraded",
+                )
+                return DirectoriesOutcome.Degraded
+            }
+            return DirectoriesOutcome.Error(DirectoriesErrorCause.Http(http))
+        }
+    }
+
     override suspend fun executeCommand(
         sessionId: String,
         command: String,

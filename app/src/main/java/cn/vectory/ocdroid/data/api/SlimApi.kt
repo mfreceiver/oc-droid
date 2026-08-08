@@ -118,6 +118,25 @@ interface SlimApi {
     suspend fun getSlimapiCommands(): retrofit2.Response<List<CommandInfo>>
 
     /**
+     * Global directory catalog (oc-slimapi thin route). Returns
+     * [DirectoriesEnvelope] — the list of directories known to the sidecar,
+     * each described by a [DirectoryEntry] with activity metadata.
+     *
+     * Additive route: an old sidecar predating this endpoint returns 404
+     * `thin_route_not_found` — the caller
+     * ([cn.vectory.ocdroid.data.repository.OpenCodeRepository.getDirectories])
+     * caches that via
+     * [cn.vectory.ocdroid.data.repository.ServerCompatProfile.supportsSlimDirectories]
+     * and falls back to degraded (MRU-only) mode. `X-Opencode-Skip-Dir: 1`
+     * — the directory catalog is global, not scoped by the directory-header
+     * interceptor. `X-Slimapi-Version` is injected by
+     * [cn.vectory.ocdroid.data.repository.http.SlimapiVersionInterceptor].
+     */
+    @Headers("X-Opencode-Skip-Dir: 1")
+    @GET("slimapi/directories")
+    suspend fun getSlimapiDirectories(): retrofit2.Response<DirectoriesEnvelope>
+
+    /**
      * Catalog skeleton — global agent list (oc-slimapi thin route). Returns
      * the whitelist `{name, description, mode, hidden?, native?}`; dropped
      * fields (`prompt`/`permission`/`topP`/`temperature`/`color`/`variant`/

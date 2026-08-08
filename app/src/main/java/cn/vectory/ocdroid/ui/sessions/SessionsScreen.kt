@@ -17,6 +17,10 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.ui.draw.alpha
+import androidx.hilt.navigation.compose.hiltViewModel
+import android.text.format.DateUtils
+import cn.vectory.ocdroid.data.model.DirectoryEntry
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -154,6 +158,10 @@ fun SessionsScreen(
     val unreadSessions by remember { viewModel.unreadFlow.map { it.unreadSessions }.distinctUntilChanged() }
         .collectAsStateWithLifecycle(initialValue = emptySet())
     val recentWorkdirs by settingsVM.recentWorkdirs.collectAsStateWithLifecycle()
+    // §slimapi-directories: past-projects picker VM + sheet state.
+    val pastProjectsVM: PastProjectsViewModel = hiltViewModel()
+    val pastProjectsState by pastProjectsVM.state.collectAsStateWithLifecycle()
+    var showPastProjectsSheet by remember { mutableStateOf(false) }
 
     // home-hub T3: connection / traffic / host slices for the top-right
     // ServerStatusIconButton. When the VMs are not yet wired (pre-T7 AppShell
@@ -528,12 +536,30 @@ fun SessionsScreen(
                         text = stringResource(R.string.home_section_projects),
                         modifier = Modifier.clickable { projectsExpanded = !projectsExpanded },
                         trailing = {
-                            IconButton(onClick = { showAddProjectSheet = true }) {
-                                Icon(
-                                    Icons.Default.CreateNewFolder,
-                                    contentDescription = stringResource(R.string.files_add_project),
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
+                            // §slimapi-directories: "browse past projects" icon
+                            // (FolderOpen) sits LEFT of CreateNewFolder; shown
+                            // only when a slim connection is active. Tapping it
+                            // opens GET /slimapi/directories in an AppBottomSheet.
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                if (connection.isSlimActive) {
+                                    IconButton(onClick = {
+                                        pastProjectsVM.onSheetVisible(true)
+                                        showPastProjectsSheet = true
+                                    }) {
+                                        Icon(
+                                            Icons.Default.FolderOpen,
+                                            contentDescription = stringResource(R.string.past_projects_icon_cd),
+                                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                                }
+                                IconButton(onClick = { showAddProjectSheet = true }) {
+                                    Icon(
+                                        Icons.Default.CreateNewFolder,
+                                        contentDescription = stringResource(R.string.files_add_project),
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
                             }
                         },
                     )
@@ -649,7 +675,32 @@ fun SessionsScreen(
                 // internally; the directorySessions key then matches the
                 // recentWorkdirs stored form that buildWorkdirGroups looks up).
                 viewModel.refreshDirectorySessions(path)
-            }
+            },
+        )
+    }
+
+    // ── Past projects (GET /slimapi/directories): Tier-B AppBottomSheet ──────
+    // Lists server-known directories by lastUpdated DESC; already-connected
+    // (recentWorkdirs ∪ draftWorkdir) are marked "Added" + disabled to prevent
+    // duplicate add. Non-slim never reaches here (icon hidden); slim + old
+    // sidecar degrades to MRU (labeled "Recent on this device").
+    if (showPastProjectsSheet) {
+        PastProjectsSheet(
+            state = pastProjectsState,
+            connectedKeys = (recentWorkdirs + listOfNotNull(composerState.draftWorkdir))
+                .map { WorkdirPaths.normalize(it) }
+                .toSet(),
+            onSelect = { dir ->
+                showPastProjectsSheet = false
+                pastProjectsVM.onSheetVisible(false)
+                settingsVM.connectWorkdir(dir)
+                viewModel.refreshDirectorySessions(dir)
+            },
+            onDismiss = {
+                showPastProjectsSheet = false
+                pastProjectsVM.onSheetVisible(false)
+            },
+            onRetry = { pastProjectsVM.loadPastDirectories() },
         )
     }
 
@@ -1048,6 +1099,112 @@ internal fun EmptyWorkdirPlaceholder(onClick: () -> Unit) {
  * @return list of (displayDirectory, liveSessionsSortedByUpdatedDesc) pairs,
  *   one per visible workdir, sorted by normalized directory.
  */
+/**
+ * §slimapi-directories — "past projects" picker sheet. Renders
+ * [DirectoriesUiState] (Loading / Success / Degraded / Error / Empty) inside an
+ * [AppBottomSheet]; already-connected entries (key ∈ [connectedKeys]) are marked
+ * "Added" and non-clickable to prevent duplicate registration.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun PastProjectsSheet(
+    state: DirectoriesUiState,
+    connectedKeys: Set<String>,
+    onSelect: (String) -> Unit,
+    onDismiss: () -> Unit,
+    onRetry: () -> Unit,
+) {
+    AppBottomSheet(
+        onDismissRequest = onDismiss,
+        title = stringResource(R.string.past_projects_title),
+    ) {
+        when (state) {
+            is DirectoriesUiState.Loading -> {
+                if (!state.previousItems.isNullOrEmpty()) {
+                    DirectoryEntryList(state.previousItems, connectedKeys, onSelect, stale = true)
+                } else {
+                    Box(
+                        modifier = Modifier.fillMaxWidth().padding(Dimens.spacing7),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        CircularProgressIndicator(modifier = Modifier.size(Dimens.iconXl))
+                    }
+                }
+            }
+            is DirectoriesUiState.Success -> DirectoryEntryList(
+                state.items, connectedKeys, onSelect, stale = state.stale,
+            )
+            is DirectoriesUiState.Degraded -> Column(Modifier.fillMaxWidth()) {
+                Text(
+                    stringResource(R.string.past_projects_degraded_label),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = Dimens.spacing4, vertical = Dimens.spacing2),
+                )
+                DirectoryEntryList(state.items, connectedKeys, onSelect, stale = state.stale)
+            }
+            is DirectoriesUiState.Error -> Column(Modifier.fillMaxWidth()) {
+                if (!state.previousItems.isNullOrEmpty()) {
+                    DirectoryEntryList(state.previousItems, connectedKeys, onSelect, stale = true)
+                }
+                TextButton(onClick = onRetry, modifier = Modifier.padding(horizontal = Dimens.spacing4)) {
+                    Text(stringResource(R.string.past_projects_error_retry))
+                }
+            }
+            DirectoriesUiState.Empty -> Text(
+                stringResource(R.string.past_projects_empty),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(Dimens.spacing6),
+            )
+        }
+    }
+}
+
+/**
+ * §slimapi-directories — row list for [PastProjectsSheet]. Each row shows the
+ * directory basename + full path; connected rows are disabled with an "Added"
+ * trailing label. [stale] dims the list (incomplete / dropped recovery).
+ */
+@Composable
+private fun DirectoryEntryList(
+    items: List<DirectoryEntry>,
+    connectedKeys: Set<String>,
+    onSelect: (String) -> Unit,
+    stale: Boolean,
+) {
+    LazyColumn(Modifier.fillMaxWidth()) {
+        items(items, key = { it.directory }) { entry ->
+            val connected = WorkdirPaths.normalize(entry.directory) in connectedKeys
+            val basename = entry.directory.workdirBasename() ?: entry.directory
+            ListItem(
+                headlineContent = { Text(basename) },
+                supportingContent = {
+                    // Append a relative "last active" time when the server
+                    // provided lastUpdated (MRU-synthesized entries carry null →
+                    // no timestamp, per the "do not fake lastUpdated" contract).
+                    val relTime = entry.lastUpdated?.let {
+                        DateUtils.getRelativeTimeSpanString(
+                            it, System.currentTimeMillis(), DateUtils.MINUTE_IN_MILLIS,
+                        ).toString()
+                    }
+                    Text(
+                        if (relTime != null) "${entry.directory} · $relTime" else entry.directory,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                },
+                trailingContent = if (connected) {
+                    { Text(stringResource(R.string.past_projects_added)) }
+                } else null,
+                modifier = Modifier
+                    .alpha(if (stale) 0.6f else 1f)
+                    .then(if (connected) Modifier else Modifier.clickable { onSelect(entry.directory) }),
+            )
+        }
+    }
+}
+
 internal fun buildWorkdirGroups(
     allSessions: List<Session>,
     recentWorkdirs: List<String>,

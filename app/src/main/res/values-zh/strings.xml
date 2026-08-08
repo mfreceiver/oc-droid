@@ -222,6 +222,14 @@
     <string name="files_tab_projects">项目</string>
     <string name="files_project_browse">浏览文件</string>
     <string name="files_add_project">添加项目</string>
+
+    <!-- §slimapi-directories: past-projects picker (GET /slimapi/directories) -->
+    <string name="past_projects_icon_cd">浏览既往项目</string>
+    <string name="past_projects_title">既往项目</string>
+    <string name="past_projects_degraded_label">本机最近项目</string>
+    <string name="past_projects_empty">暂无既往项目</string>
+    <string name="past_projects_added">已添加</string>
+    <string name="past_projects_error_retry">重试</string>
     <!-- 主页枢纽（session-home-hub）：主页 section、项目行操作、响应式 Chat 导航。 -->
     <string name="home_section_recent">近期会话</string>
     <string name="recent_sessions_title">最近会话</string>

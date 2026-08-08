@@ -233,6 +233,14 @@
     <string name="files_tab_projects">Projects</string>
     <string name="files_project_browse">Browse files</string>
     <string name="files_add_project">Add project</string>
+
+    <!-- §slimapi-directories: past-projects picker (GET /slimapi/directories) -->
+    <string name="past_projects_icon_cd">Browse past projects</string>
+    <string name="past_projects_title">Past projects</string>
+    <string name="past_projects_degraded_label">Recent on this device</string>
+    <string name="past_projects_empty">No past projects</string>
+    <string name="past_projects_added">Added</string>
+    <string name="past_projects_error_retry">Retry</string>
     <!-- Home hub (session-home-hub): home sections, project-row actions, responsive chat nav. -->
     <string name="home_section_recent">Recently</string>
     <string name="recent_sessions_title">Recent sessions</string>
