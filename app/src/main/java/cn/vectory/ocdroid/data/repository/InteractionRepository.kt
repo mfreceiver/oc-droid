@@ -40,23 +40,8 @@ interface InteractionRepository {
     suspend fun getSlimapiPermissions(
         directories: List<String>? = null,
     ): Result<SlimAggregationOutcome<SlimapiPermissionEntry>>
-    suspend fun replySlimapiQuestion(
-        questionId: String,
-        answers: List<List<String>>,
-        routeToken: String?,
-        directory: String? = null,
-    ): Result<Unit>
-    suspend fun rejectSlimapiQuestion(
-        questionId: String,
-        routeToken: String?,
-        directory: String? = null,
-    ): Result<Unit>
-    suspend fun respondSlimapiPermission(
-        sessionId: String,
-        permissionId: String,
-        response: PermissionResponse,
-        routeToken: String?,
-    ): Result<Unit>
+    // F4a: replySlimapiQuestion / rejectSlimapiQuestion / respondSlimapiPermission
+    // were identity-equivalent to the legacy methods; collapsed in F4a.
 
     /**
      * §rev-ds ISSUE 2: whether this connection supports a single global

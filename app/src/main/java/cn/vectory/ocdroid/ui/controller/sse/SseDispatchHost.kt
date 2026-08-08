@@ -2,7 +2,6 @@ package cn.vectory.ocdroid.ui.controller.sse
 
 import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.service.identity.ConnectionIdentity
-import cn.vectory.ocdroid.service.status.StatusAggregatorInput
 import cn.vectory.ocdroid.ui.SharedEffectBus
 import cn.vectory.ocdroid.ui.SliceFlows
 import cn.vectory.ocdroid.ui.AppAction
@@ -32,14 +31,6 @@ interface SseDispatchHost {
     val settingsManager: SettingsManager
     val scope: CoroutineScope
     val repository: OpenCodeRepository?
-
-    /**
-     * CP4 (notify Phase-0): the authoritative status aggregator's INPUT
-     * surface. The `session.status` SSE branch feeds it via
-     * [StatusAggregatorInput.applySseStatus] BEFORE the unread/badge fold.
-     * Null in test/legacy constructions that wire [handleEvent] directly.
-     */
-    val statusAggregatorInput: StatusAggregatorInput?
 
     // ── Helpers exposed from SSC ────────────────────────────────────────────
 
@@ -79,8 +70,8 @@ interface SseDispatchHost {
     fun bumpUnknownEventCounter(type: String)
 
     /**
-     * The coordinator's clock (wall-clock millis; test-overridable). Used by
-     * the `session.status` aggregator feed branch (for [StatusAggregatorInput]).
+     * The coordinator's clock (wall-clock millis; test-overridable). Used as
+     * connectionTimeMs for authority ApplyEvent, TTL/tie-break.
      */
     fun sseClock(): Long
 
@@ -170,7 +161,7 @@ internal fun SseDispatchHost.applyStatusViaAuthority(
     // §P0-A rev-gpt #3: resolve the session's workdir from the merged session
     // tree (sessions + directorySessions + childSessions) so the authority
     // entry carries the correct workdir for the composite key + coverage. The
-    // old LSH code did this lookup before calling applySseStatus; now it's
+    // old LSH code did this lookup before the Lane-2 authority rework; now it's
     // consolidated here (single dispatch point).
     val workdir = cn.vectory.ocdroid.ui.controller.allSessionsById(
         slices.sessionList.value.sessions,

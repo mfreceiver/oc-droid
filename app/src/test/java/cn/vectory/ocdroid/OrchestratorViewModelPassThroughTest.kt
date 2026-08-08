@@ -74,8 +74,9 @@ class OrchestratorViewModelPassThroughTest : MainViewModelTestBase() {
         advanceUntilIdle()
         // CRITICAL: no emission → the synchronizer has nothing to react to.
         assertEquals(emptyList<String>(), emitted)
-        // And no persistence write either.
-        verify(exactly = 0) { settingsManager.lastRoute = any() }
+        // F2: settingsManager.lastRoute setter deleted; the persistence write
+        // was a redundant mirror — the in-memory navFlow assertion above is the
+        // real pin.
 
         collectorJob.cancel()
     }
@@ -104,7 +105,8 @@ class OrchestratorViewModelPassThroughTest : MainViewModelTestBase() {
         // original T7 wiring but Files/Git (whose entry didn't touch
         // navState) did not.
         assertEquals(listOf(NavRoute.Sessions.route), emitted)
-        verify(exactly = 1) { settingsManager.lastRoute = NavRoute.Sessions.route }
+        // F2: settingsManager.lastRoute setter deleted; navFlow emission above
+        // is the authoritative pin.
 
         collectorJob.cancel()
     }
@@ -221,24 +223,19 @@ class OrchestratorViewModelPassThroughTest : MainViewModelTestBase() {
         assertTrue(true)
     }
 
-    // ── §Phase3b slim routeToken dispatch ─────────────────────────────────
+    // ── F4a: routeToken directory resolution tests ─────────────────────────
     //
-    // When routeToken != null (slim SSE / slimapi surface), the VM must
-    // dispatch through the slimapi repository methods; legacy
-    // /question/{id}/reply + /permission/.../respond rely on a global
-    // currentDirectory header that has no correct value on the slim
-    // cross-directory aggregation surface. These tests pin the seam.
-    //
-    // The legacy (routeToken == null) regression guard lives here too so
-    // both branches are next to each other; the legacy regression is also
-    // implicitly covered by the four tests above (they never pass a
-    // routeToken), but the explicit `coVerify(exactly = 0) { slimapi }`
-    // assertion below is what catches a future bug that wires slimapi
-    // unconditionally.
+    // The slim/legacy fork collapsed in F4a: both modes now hit the same
+    // repository methods (replyQuestion / rejectQuestion / respondPermission).
+    // routeToken != null means directory is read from the pending entry
+    // (slim SSE provenance); routeToken == null means it is resolved via
+    // AppCore.resolveQuestionDirectory (legacy). Both converge to the same
+    // endpoint. These tests pin the retained directory-resolution fork and
+    // the directory value threaded through.
 
     @Test
-    fun `replyQuestion with routeToken dispatches through replySlimapiQuestion`() = runTest {
-        coEvery { repository.replySlimapiQuestion(any(), any(), any(), any()) } returns Result.success(Unit)
+    fun `replyQuestion with routeToken reads directory from pending entry`() = runTest {
+        coEvery { repository.replyQuestion(any(), any(), any()) } returns Result.success(Unit)
         val core = createCore()
         val vm = OrchestratorViewModel(core)
         val q = QuestionRequest(
@@ -252,17 +249,16 @@ class OrchestratorViewModelPassThroughTest : MainViewModelTestBase() {
         vm.replyQuestion("q-slim", answers, routeToken = "tok-reply")
         advanceUntilIdle()
 
-        coVerify(exactly = 1) { repository.replySlimapiQuestion("q-slim", answers, "tok-reply", "/workdir-slim") }
-        // Legacy MUST NOT fire when routeToken present.
-        coVerify(exactly = 0) { repository.replyQuestion(any(), any(), any()) }
-        // Slim path skips directory resolution entirely.
+        // F4a: all modes hit replyQuestion — directory comes from pending entry.
+        coVerify(exactly = 1) { repository.replyQuestion("q-slim", answers, "/workdir-slim") }
+        // No directory resolution call (entry-directory is authoritative).
         coVerify(exactly = 0) { repository.getSession(any()) }
         assertTrue(core.sessionListFlow.value.pendingQuestions.isEmpty())
     }
 
     @Test
     fun `replyQuestion failure on slim path still invokes onError`() = runTest {
-        coEvery { repository.replySlimapiQuestion(any(), any(), any(), any()) } returns Result.failure(
+        coEvery { repository.replyQuestion(any(), any(), any()) } returns Result.failure(
             java.io.IOException("slim 403"),
         )
         val core = createCore()
@@ -281,7 +277,7 @@ class OrchestratorViewModelPassThroughTest : MainViewModelTestBase() {
         val core = createCore()
         val vm = OrchestratorViewModel(core)
         val q = QuestionRequest(
-            id = "q-legacy", sessionId = "s1", // routeToken defaults null
+            id = "q-legacy", sessionId = "s1",
             questions = listOf(QuestionInfo(question = "q", header = "h", options = emptyList())),
         )
         core.writeSessionList { it.copy(pendingQuestions = listOf(q)) }
@@ -290,12 +286,11 @@ class OrchestratorViewModelPassThroughTest : MainViewModelTestBase() {
         advanceUntilIdle()
 
         coVerify(exactly = 1) { repository.replyQuestion(any(), any(), any()) }
-        coVerify(exactly = 0) { repository.replySlimapiQuestion(any(), any(), any()) }
     }
 
     @Test
-    fun `rejectQuestion with routeToken dispatches through rejectSlimapiQuestion`() = runTest {
-        coEvery { repository.rejectSlimapiQuestion(any(), any()) } returns Result.success(Unit)
+    fun `rejectQuestion with routeToken reads directory from pending entry`() = runTest {
+        coEvery { repository.rejectQuestion(any(), any()) } returns Result.success(Unit)
         val core = createCore()
         val vm = OrchestratorViewModel(core)
         val q = QuestionRequest(
@@ -307,8 +302,8 @@ class OrchestratorViewModelPassThroughTest : MainViewModelTestBase() {
         vm.rejectQuestion("q-slim", routeToken = "tok-reject")
         advanceUntilIdle()
 
-        coVerify(exactly = 1) { repository.rejectSlimapiQuestion("q-slim", "tok-reject") }
-        coVerify(exactly = 0) { repository.rejectQuestion(any(), any()) }
+        // F4a: all modes hit rejectQuestion — directory null (no dir on entry).
+        coVerify(exactly = 1) { repository.rejectQuestion("q-slim", null) }
         coVerify(exactly = 0) { repository.getSession(any()) }
         assertTrue(core.sessionListFlow.value.pendingQuestions.isEmpty())
     }
@@ -328,12 +323,11 @@ class OrchestratorViewModelPassThroughTest : MainViewModelTestBase() {
         advanceUntilIdle()
 
         coVerify(exactly = 1) { repository.rejectQuestion(any(), any()) }
-        coVerify(exactly = 0) { repository.rejectSlimapiQuestion(any(), any()) }
     }
 
     @Test
-    fun `respondPermission with routeToken dispatches through respondSlimapiPermission`() = runTest {
-        coEvery { repository.respondSlimapiPermission(any(), any(), any(), any()) } returns Result.success(Unit)
+    fun `respondPermission with routeToken still hits respondPermission`() = runTest {
+        coEvery { repository.respondPermission(any(), any(), any()) } returns Result.success(Unit)
         val core = createCore()
         val vm = OrchestratorViewModel(core)
         val req = PermissionRequest(id = "p-slim", sessionId = "s-slim", routeToken = "tok-perm")
@@ -342,15 +336,15 @@ class OrchestratorViewModelPassThroughTest : MainViewModelTestBase() {
         vm.respondPermission("s-slim", "p-slim", PermissionResponse.ONCE, routeToken = "tok-perm")
         advanceUntilIdle()
 
+        // F4a: routeToken no longer forks — all modes hit respondPermission.
         coVerify(exactly = 1) {
-            repository.respondSlimapiPermission("s-slim", "p-slim", PermissionResponse.ONCE, "tok-perm")
+            repository.respondPermission("s-slim", "p-slim", PermissionResponse.ONCE)
         }
-        coVerify(exactly = 0) { repository.respondPermission(any(), any(), any()) }
         assertTrue(core.sessionListFlow.value.pendingPermissions.isEmpty())
     }
 
     @Test
-    fun `respondPermission without routeToken dispatches through legacy respondPermission (regression guard)`() = runTest {
+    fun `respondPermission without routeToken dispatches through respondPermission`() = runTest {
         coEvery { repository.respondPermission(any(), any(), any()) } returns Result.success(Unit)
         val core = createCore()
         val vm = OrchestratorViewModel(core)
@@ -363,7 +357,6 @@ class OrchestratorViewModelPassThroughTest : MainViewModelTestBase() {
         coVerify(exactly = 1) {
             repository.respondPermission("s-legacy", "p-legacy", PermissionResponse.ALWAYS)
         }
-        coVerify(exactly = 0) { repository.respondSlimapiPermission(any(), any(), any(), any()) }
     }
 
     // ── File browser ────────────────────────────────────────────────────────

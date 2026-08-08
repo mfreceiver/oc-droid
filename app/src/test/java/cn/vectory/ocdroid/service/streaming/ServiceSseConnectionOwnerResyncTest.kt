@@ -7,12 +7,7 @@ import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.service.events.SseEventStream
 import cn.vectory.ocdroid.service.identity.ConnectionIdentity
 import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
-import cn.vectory.ocdroid.service.status.GlobalBusyState
-import cn.vectory.ocdroid.service.status.SessionBusyStatus
-import cn.vectory.ocdroid.service.status.SessionStatusKey
-import cn.vectory.ocdroid.service.status.StatusAggregator
-import cn.vectory.ocdroid.service.status.StatusAggregatorInput
-import cn.vectory.ocdroid.service.status.StatusSnapshot
+
 import cn.vectory.ocdroid.ui.SharedEffectBus
 import cn.vectory.ocdroid.ui.SharedStateStore
 import cn.vectory.ocdroid.util.DebugLog
@@ -67,7 +62,6 @@ class ServiceSseConnectionOwnerResyncTest {
     private lateinit var stream: SseEventStream
     private lateinit var store: SharedStateStore
     private lateinit var effects: SharedEffectBus
-    private lateinit var aggregator: FakeAggregator
     private lateinit var runtimeStore: SseTransportRuntimeStore
     private lateinit var owner: ServiceSseConnectionOwner
     private val resyncInvocations = AtomicInteger(0)
@@ -91,7 +85,6 @@ class ServiceSseConnectionOwnerResyncTest {
         stream = SseEventStream()
         store = SharedStateStore()
         effects = SharedEffectBus()
-        aggregator = FakeAggregator()
         runtimeStore = SseTransportRuntimeStore()
         resyncInvocations.set(0)
         DebugLog.clear()
@@ -144,7 +137,7 @@ class ServiceSseConnectionOwnerResyncTest {
     @Test
     fun `first successful frame triggers onResync once (P2_5 cold start)`() = runTest {
         val identity = bindIdentity()
-        aggregator.nextState = GlobalBusyState.Busy
+
         val feed = MutableSharedFlow<Result<SSEEvent>>(extraBufferCapacity = 8)
         stubFeed(feed)
 
@@ -166,7 +159,7 @@ class ServiceSseConnectionOwnerResyncTest {
     @Test
     fun `resync after first-frame cold start RE-FIRES in same generation (B2 regression)`() = runTest {
         val identity = bindIdentity()
-        aggregator.nextState = GlobalBusyState.Busy
+
         val feed = MutableSharedFlow<Result<SSEEvent>>(extraBufferCapacity = 8)
         stubFeed(feed)
 
@@ -197,7 +190,7 @@ class ServiceSseConnectionOwnerResyncTest {
     @Test
     fun `non-first non-resync frames do not re-trigger onResync`() = runTest {
         val identity = bindIdentity()
-        aggregator.nextState = GlobalBusyState.Busy
+
         val feed = MutableSharedFlow<Result<SSEEvent>>(extraBufferCapacity = 8)
         stubFeed(feed)
 
@@ -223,7 +216,7 @@ class ServiceSseConnectionOwnerResyncTest {
     @Test
     fun `resync after a new generation fires again`() = runTest {
         val identity = bindIdentity()
-        aggregator.nextState = GlobalBusyState.Busy
+
         val feed = MutableSharedFlow<Result<SSEEvent>>(extraBufferCapacity = 8)
         stubFeed(feed)
 
@@ -252,7 +245,7 @@ class ServiceSseConnectionOwnerResyncTest {
     @Test
     fun `first frame that IS type=resync fires cold-start exactly once`() = runTest {
         val identity = bindIdentity()
-        aggregator.nextState = GlobalBusyState.Busy
+
         val feed = MutableSharedFlow<Result<SSEEvent>>(extraBufferCapacity = 8)
         stubFeed(feed)
 
@@ -293,7 +286,7 @@ class ServiceSseConnectionOwnerResyncTest {
             onResync = { error("cold-start refetch blew up") },
         )
         val identity = bindIdentity()
-        aggregator.nextState = GlobalBusyState.Busy
+
         val feed = MutableSharedFlow<Result<SSEEvent>>(extraBufferCapacity = 8)
         stubFeed(feed)
 
@@ -348,7 +341,7 @@ class ServiceSseConnectionOwnerResyncTest {
     fun `resync reason = reconnect_no_replay triggers onResync (T10-C3)`() = runTest {
         val feed = MutableSharedFlow<Result<SSEEvent>>(extraBufferCapacity = 8)
         stubFeed(feed)
-        aggregator.nextState = GlobalBusyState.Busy
+
         connectAndFireFirstFrame(feed)
 
         feed.tryEmit(Result.success(sseResyncEvent("reconnect_no_replay")))
@@ -360,7 +353,7 @@ class ServiceSseConnectionOwnerResyncTest {
     fun `resync reason = subscriber_backpressure triggers onResync (T10-C3)`() = runTest {
         val feed = MutableSharedFlow<Result<SSEEvent>>(extraBufferCapacity = 8)
         stubFeed(feed)
-        aggregator.nextState = GlobalBusyState.Busy
+
         connectAndFireFirstFrame(feed)
 
         feed.tryEmit(Result.success(sseResyncEvent("subscriber_backpressure")))
@@ -372,7 +365,7 @@ class ServiceSseConnectionOwnerResyncTest {
     fun `resync reason = implicit triggers onResync (T10-C3)`() = runTest {
         val feed = MutableSharedFlow<Result<SSEEvent>>(extraBufferCapacity = 8)
         stubFeed(feed)
-        aggregator.nextState = GlobalBusyState.Busy
+
         connectAndFireFirstFrame(feed)
 
         feed.tryEmit(Result.success(sseResyncEvent("implicit")))
@@ -384,7 +377,7 @@ class ServiceSseConnectionOwnerResyncTest {
     fun `resync with UNKNOWN reason string still triggers onResync (T10-C2 unknown)`() = runTest {
         val feed = MutableSharedFlow<Result<SSEEvent>>(extraBufferCapacity = 8)
         stubFeed(feed)
-        aggregator.nextState = GlobalBusyState.Busy
+
         connectAndFireFirstFrame(feed)
 
         feed.tryEmit(Result.success(sseResyncEvent("some-future-reason-v2")))
@@ -396,7 +389,7 @@ class ServiceSseConnectionOwnerResyncTest {
     fun `resync with NULL reason field still triggers onResync (T10-C2 null)`() = runTest {
         val feed = MutableSharedFlow<Result<SSEEvent>>(extraBufferCapacity = 8)
         stubFeed(feed)
-        aggregator.nextState = GlobalBusyState.Busy
+
         connectAndFireFirstFrame(feed)
 
         feed.tryEmit(Result.success(sseResyncEvent(reason = null)))
@@ -412,7 +405,7 @@ class ServiceSseConnectionOwnerResyncTest {
     fun `resync reason is parsed via JsonPrimitive content and logged via SlimapiResyncReason fromRaw (T10-C1)`() = runTest {
         val feed = MutableSharedFlow<Result<SSEEvent>>(extraBufferCapacity = 8)
         stubFeed(feed)
-        aggregator.nextState = GlobalBusyState.Busy
+
         connectAndFireFirstFrame(feed)
         DebugLog.clear()
 
@@ -437,7 +430,7 @@ class ServiceSseConnectionOwnerResyncTest {
     fun `resync UNKNOWN reason logs null typed reason but still records raw wire value (T10-C1 forward-compat)`() = runTest {
         val feed = MutableSharedFlow<Result<SSEEvent>>(extraBufferCapacity = 8)
         stubFeed(feed)
-        aggregator.nextState = GlobalBusyState.Busy
+
         connectAndFireFirstFrame(feed)
         DebugLog.clear()
 
@@ -456,42 +449,4 @@ class ServiceSseConnectionOwnerResyncTest {
             firstMsg.contains("typed=null"))
     }
 
-    // ── Helper fakes ────────────────────────────────────────────────────────
-
-    private class FakeAggregator : StatusAggregator, StatusAggregatorInput {
-        var nextState: GlobalBusyState = GlobalBusyState.Busy
-        private val _globalState = MutableStateFlow(GlobalBusyState.Busy)
-        private val _globalBusy = MutableStateFlow(true)
-        private val _statusByKey =
-            MutableStateFlow<Map<SessionStatusKey, SessionBusyStatus>>(emptyMap())
-
-        override val globalState = _globalState.asStateFlow()
-        override val globalBusy = _globalBusy.asStateFlow()
-        override val statusByKey = _statusByKey.asStateFlow()
-
-        override fun stateAtNow(): GlobalBusyState = _globalState.value
-
-        override suspend fun refresh(
-            identity: ConnectionIdentity,
-            snapshot: StatusSnapshot,
-        ) {
-            _globalState.value = nextState
-            _globalBusy.value = nextState == GlobalBusyState.Busy
-        }
-
-        override fun applySseStatus(
-            key: SessionStatusKey,
-            status: SessionBusyStatus,
-            sourceTimeMs: Long,
-        ) = Unit
-
-        override fun markRequestFailed(
-            identity: ConnectionIdentity,
-            snapshot: StatusSnapshot,
-            sourceTimeMs: Long,
-        ) {
-            _globalState.value = GlobalBusyState.Unknown
-            _globalBusy.value = false
-        }
-    }
 }

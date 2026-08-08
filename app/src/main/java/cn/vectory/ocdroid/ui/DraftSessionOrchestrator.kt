@@ -84,7 +84,7 @@ class DraftSessionOrchestrator @Inject constructor(
      * boundary). If the user typed more, the newer content is PRESERVED.
      *
      * # Adoption success (routeInstance != null) — post-CAS strict ordering:
-     *  A. settingsManager.lastRoute = "chat/$sid"   (persistence side-effect)
+     *  A. (F2: persistence side-effect deleted — lastRoute write was redundant)
      *  B. persistSessionCache(...)
      *  C. startMaterializedRouteHydration(adoption)  (DIRECT call, NOT effect bus)
      *  D. dispatchCapturedSend(sid, payload, token)  OR  commandPost(sid)
@@ -118,8 +118,7 @@ class DraftSessionOrchestrator @Inject constructor(
                     val adoption = adoptMaterializedSessionRoute(session, now, origin)
                     if (adoption.adopted) {
                         val token = adoption.routeInstance!!
-                        // A. persistence side-effect.
-                        settingsManager.lastRoute = "chat/${session.id}"
+                        // A. (F2: persistence side-effect deleted — lastRoute write was redundant)
                         // B. persist the session cache.
                         persistSessionCache(
                             settingsManager = settingsManager,

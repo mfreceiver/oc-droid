@@ -1,20 +1,14 @@
 package cn.vectory.ocdroid.service.status
 
-import cn.vectory.ocdroid.data.state.AuthorityOp
 import cn.vectory.ocdroid.data.state.EntryOrigin
-import cn.vectory.ocdroid.data.state.RequestToken
 import cn.vectory.ocdroid.data.state.ScopeKey
 import cn.vectory.ocdroid.data.state.scopeKeyOf
 import cn.vectory.ocdroid.di.UiApplicationScope
-import cn.vectory.ocdroid.service.identity.ConnectionIdentity
 import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
-import cn.vectory.ocdroid.ui.AppAction
 import cn.vectory.ocdroid.ui.SharedStateStore
 import cn.vectory.ocdroid.ui.StoreState
-import cn.vectory.ocdroid.ui.buildAuthorityApplySnapshot
 import cn.vectory.ocdroid.util.DebugLog
 import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -28,25 +22,22 @@ import javax.inject.Singleton
 /**
  * Authoritative global busy-source implementation (FGS spec §3 / §3.1, dev-design P0.4).
  *
- * # §P0-A Lane 2 — DERIVED over authority (双投影同源 / R3 真根治)
+ * # DERIVED over authority (双投影同源 / R3 真根治)
  *
- * Pre-Lane-2 this class held its OWN writable `Aggregate` (a second source of
- * truth alongside [StoreState.authority]) and its `refresh` / `applySseStatus` /
- * `markRequestFailed` mutation API mutated that private map directly. That was
- * the R3 dual-source: the UI `sessionStatuses` projection (driven by authority)
- * and the lifecycle `globalState` / `statusByKey` projection (driven by this
- * class's own `Aggregate`) could drift apart.
+ * The READ side (`globalState` / `globalBusy` / `statusByKey` / `stateAtNow`) is a
+ * PURE DERIVATION over `store.state.authority` via [authorityToAggregate]. A
+ * coroutine launched in `init` `collect`s `store.stateFlow`; on every emission
+ * [publishFromState] re-derives the [Aggregate] via [authorityToAggregate] and
+ * feeds it into the [publishLocked] / [project] / [rescheduleFreshnessLocked]
+ * pipeline.
  *
- * Lane 2 collapses them into ONE source. The READ side (`globalState` /
- * `globalBusy` / `statusByKey` / `stateAtNow`) is now a PURE DERIVATION over
- * `store.state.authority` (the SAME slice the UI's `sessionStatuses` projects
- * from) via [authorityToAggregate]. The mutation API (`refresh` /
- * `applySseStatus` / `markRequestFailed`) is preserved VERBATIM in signature
- * (the 6 call sites + ~13 test files are unchanged) but each method is now a
- * THIN ADAPTER that dispatches an [AuthorityOp] into the store's single CAS and
- * then SYNCHRONOUSLY re-derives + publishes so the B4-b synchronous read
- * (`SessionStreamingController` reads `globalState.value` immediately after
- * `refresh` returns) still sees the fresh verdict.
+ * **F1 (archdebt follow-up)**: the input side (`StatusAggregatorInput` interface +
+ * adapters) was **retired** — all callers were deliberately rerouted to direct
+ * authority dispatch (`applyStatusViaAuthority`) in Lane 2. The interface
+ * `StatusFetchService` / `SlimStatusFetchCache` that served only the dead
+ * `refresh` adapter were deleted. The `refresh` / `applySseStatus` /
+ * `markRequestFailed` adapter methods and the `: StatusAggregatorInput`
+ * implements-clause are gone.
  *
  * ## How the derivation works
  *
@@ -54,20 +45,16 @@ import javax.inject.Singleton
  *    emission [publishFromState] re-derives the [Aggregate] via
  *    [authorityToAggregate] and feeds it into the UNCHANGED
  *    [publishLocked] / [project] / [rescheduleFreshnessLocked] pipeline.
- *  - The adapters dispatch an [AppAction.AuthorityEvent] (which lands in the
- *    store's single CAS) and THEN call [publishFromState]`(
- *    store.stateFlow.value)` directly — NOT via the collect — so the B4-b
- *    synchronous read sees the fresh verdict before the collect coroutine even
- *    observes the emission. The collect handles SSE / other-driven authority
- *    changes that do not pass through this adapter.
+ *  - The `init` collect handles SSE / other-driven authority changes
+ *    (SseDispatchHost applies SSE status via [applyStatusViaAuthority] dispatch
+ *    directly, NOT through a dead adapter).
  *
  * ## Semantics preserved EXACTLY (the金钟 gate)
  *
  * [project] is UNCHANGED — it encodes the SAME freshness boundary, unmapped-
- * active rule, and registered-workdir coverage predicate. The ONLY change is
- * the data source (authority → Aggregate instead of mutation → Aggregate). The
- * [GlobalBusyState] / TTL / freshness / coverage verdicts are byte-for-byte
- * identical for every case the FGS lifecycle coordinator depends on.
+ * active rule, and registered-workdir coverage predicate. The [GlobalBusyState] /
+ * TTL / freshness / coverage verdicts are byte-for-byte identical for every case
+ * the FGS lifecycle coordinator depends on.
  *
  * **`Unknown` after failure**: authority has no `Unknown` [SessionStatus]
  * (the transport model is `idle`/`busy`/`retry` only). A REST failure dispatches
@@ -80,21 +67,20 @@ import javax.inject.Singleton
  *
  * ## Authoritativeness rules (FGS spec §3 / §3.1 / §2) — preserved
  *
- * See [StatusAggregator] / [StatusAggregatorInput] kdocs for the full contract.
- * The rules below are unchanged from pre-Lane-2; only the data flow changed.
+ * See [StatusAggregator] kdoc for the full contract. The rules below are unchanged
+ * from pre-Lane-2; only the data flow changed.
  *
  * **One clock domain**: the injected [clock] is the SOLE source of "now" for
  * the freshness verdict. SSE arrival time is supplied by the caller via
- * [StatusAggregatorInput.applySseStatus]'s `sourceTimeMs`.
+ * [applyStatusViaAuthority]'s `connectionTimeMs`.
  */
 @Singleton
 class StatusAggregatorImpl internal constructor(
     private val identityStore: ConnectionIdentityStore,
     private val store: SharedStateStore,
-    private val statusFetchService: StatusFetchService,
     @UiApplicationScope private val scope: CoroutineScope,
     private val clock: () -> Long,
-) : StatusAggregator, StatusAggregatorInput {
+) : StatusAggregator {
 
     // NOTE: the `init` collect is declared AFTER all mutable properties below
     // (Kotlin initializes properties + init blocks strictly top-to-bottom; the
@@ -329,203 +315,6 @@ class StatusAggregatorImpl internal constructor(
      */
     override fun stateAtNow(): GlobalBusyState =
         project(authorityToAggregate(store.stateFlow.value), clock())
-
-    // ── StatusAggregatorInput → authority-dispatch adapters ─────────────────
-
-    /**
-     * REST-driven refresh — now a THIN ADAPTER (FGS spec §3 «Phase 0 主路径»,
-     * §3.1 merge timing, §2 epoch guard). Same signature as pre-Lane-2 (call
-     * sites unchanged).
-     *
-     *  1. Capture `requestStartMs` + `epochAtRequestStart` BEFORE the fetch.
-     *  2. [StatusFetchService] fetches the REST/slim merged status map (the
-     *     network work extracted out of this class).
-     *  3. CP4 §2 epoch guard: drop if a reconfigure invalidated this request.
-     *  4. On success → [buildAuthorityApplySnapshot] + `dispatch(
-     *     AuthorityEvent(ApplySnapshot))` (the pure authority reducer does the
-     *     binning / merge-timing / coverage / in-flight protection). On failure
-     *     → `dispatch(AuthorityEvent(MarkSourceFailed))`.
-     *  5. SYNCHRONOUS [publishFromState] so the B4-b synchronous read at
-     *     `SessionStreamingController:183` (`globalState.value` immediately
-     *     after `refresh` returns) sees the fresh verdict.
-     */
-    override suspend fun refresh(identity: ConnectionIdentity, snapshot: StatusSnapshot) {
-        val requestStartMs = clock()
-        val epochAtRequestStart = identityStore.currentEpoch()
-        // §P0-A rev-gpt #2 (kill TOCTOU): capture hostProfileId + identityEpoch
-        // at request START (before the fetch), NOT after — so a host switch
-        // landing mid-fetch is detected by the reducer's epoch guard inside
-        // the CAS. The dispatch-side identityStore.currentEpoch() check below
-        // additionally catches endpoint/workdir-only reconfigures.
-        val stateAtStart = store.stateFlow.value
-        val hostAtStart = stateAtStart.host.currentHostProfileId
-        val identityEpochAtStart = stateAtStart.identityEpoch
-        // §3.1 merge timing (B4-b adapter-side): localBefore captures the
-        // projection of entries that are NOT fresher than the REST request
-        // start. Entries with `updatedAtMs > requestStartMs` (a fresher
-        // SSE observation landed before this REST started) are EXCLUDED so the
-        // reducer's REST in-flight protection (mergeStatusSnapshotInFlight)
-        // treats them as "changed during the round-trip" → SSE-wins overrides
-        // the stale REST snapshot.
-        val authorityAtStart = stateAtStart.authority
-        val localBefore = authorityAtStart.bySid
-            .filterValues { it.updatedAtMs <= requestStartMs }
-            .mapValues { it.value.status }
-        val result = statusFetchService.fetch(snapshot, hostAtStart ?: StatusFetchService.DEFAULT_CACHE_KEY)
-        // CP4 §2 epoch guard: drop the response if a reconfigure invalidated
-        // this request mid-flight (checked AFTER the suspend, BEFORE dispatch).
-        if (identityStore.currentEpoch() != epochAtRequestStart) return
-        val scopeKey = scopeKeyOf(identity.profileId, identity.endpointFp)
-        // §U-MN10 (分歧3) rev-gpt gate r1: NO runtime check() here. The
-        // currentEpoch() read above + currentScope()'s currentIdentity read are
-        // TWO independent lock-free reads (AtomicLong + AtomicReference-backed
-        // StateFlow). A concurrent beginReconfigure() on another thread
-        // (ProcessStatusPoller runs on Dispatchers.Default; reconfigure is
-        // initiated from controller/UI) can interleave: epoch reads X (guard
-        // passes) → other thread bumps to X+1 + nulls identity → currentScope()
-        // reads null → a check() would throw IllegalStateException across a
-        // LEGITIMATE reconfigure race, mis-routing a successful fetch as Unknown.
-        // The steady-state invariant (scopeKey == currentScope()) is pinned at
-        // TEST level (StatusAggregatorImplTest `scope derivation is consistent`).
-        // U-MN10's production value is the scopeKeyOf() SSOT convergence, not
-        // this assertion.
-        val token = RequestToken(
-            hostProfileId = hostAtStart,
-            requestStartMs = requestStartMs,
-            identityEpoch = identityEpochAtStart,
-        )
-        result.fold(
-            onSuccess = { fetch ->
-                // D1 gate #5: ids returned by /session/status that are NOT in
-                // sessionsById are positively known active → forces Busy. They
-                // are tracked in [unmappedActiveIds] (coverage) and do NOT enter
-                // bySid (no workdir mapping → no composite key). The reducer's
-                // `normalizeAuthoritativeStatusSnapshot` keeps any id present in
-                // the snapshot, so we filter to MAPPED sids only to prevent
-                // ghosts from materializing a bySid entry.
-                val unmappedActiveIds = fetch.statuses.keys - snapshot.sessionsById.keys
-                val mappedStatuses = fetch.statuses.filterKeys { it in snapshot.sessionsById }
-                // §P0-A rev-gpt #6 (fail-closed for failed-dir sessions): a
-                // session in a FAILED workdir must NOT be idle-normalized (it
-                // was not authoritatively fetched). Exclude failed-dir session
-                // ids from authoritativeNodeIds so the reducer does NOT
-                // idle-fill them → they stay ABSENT (fail-closed unknown).
-                val failedDirSessionIds = snapshot.sessionsById.values
-                    .filter { it.directory.isNotBlank() && it.directory in fetch.failedWorkdirs }
-                    .map { it.id }
-                    .toSet()
-                val op = buildAuthorityApplySnapshot(
-                    snapshot = mappedStatuses,
-                    authoritativeSessions = snapshot.sessionsById,
-                    authoritativeNodeIds = snapshot.sessionsById.keys - failedDirSessionIds,
-                    // 方案A Issue2: exclude failed workdirs from coverage so the
-                    // registered-workdir coverage predicate independently
-                    // refuses AllIdleFresh on a partial slim failure.
-                    coveredWorkdirs = snapshot.registeredWorkdirs - fetch.failedWorkdirs,
-                    partialFailureWorkdirs = fetch.failedWorkdirs,
-                    unmappedActiveIds = unmappedActiveIds,
-                    lastSuccessTimeMs = requestStartMs,
-                    scopeKey = scopeKey,
-                    requestToken = token,
-                    localBefore = localBefore,
-                )
-                store.dispatch(AppAction.AuthorityEvent(op))
-                publishFromState(store.stateFlow.value)
-            },
-            onFailure = {
-                // §U-MN10 rev-gpt gate r1: NO runtime check() here (same
-                // cross-thread non-atomic read hazard as the success path —
-                // see comment at the scopeKey derivation above). The steady-state
-                // invariant is pinned at TEST level.
-                markRequestFailedInternal(identity, snapshot, requestStartMs, token)
-            },
-        )
-    }
-
-    /**
-     * Apply a single SSE-driven status update — now a THIN ADAPTER (FGS spec
-     * §3.1 merge timing). Same signature as pre-Lane-2 (call sites unchanged).
-     *
-     * §3.1 merge timing (adapter-side): a strictly-OLDER SSE frame
-     * (`sourceTimeMs < ` the current authority entry's `updatedAtMs`) is
-     * DROPPED — defensive against out-of-order SSE replay during reconnect
-     * (the pre-Lane-2 aggregator did the same `sourceTimeMs >= prev.sourceTimeMs`
-     * gate). Equal timestamps overwrite (matches the legacy `>=` rule). The
-     * authority reducer's [ApplyEvent] is pure + lenient for P0-A (no causal
-     * fence for legacy SSE without serverRound); the adapter supplies the
-     * source-time merge-timing gate.
-     *
-     * Then dispatches [AuthorityOp.ApplyEvent] + synchronous [publishFromState]
-     * for any sync reader. [SessionBusyStatus]→[SessionStatus] reverse mapping
-     * via [toSessionStatus] (Busy/Retry/Idle only — SSE never emits Unknown).
-     */
-    override fun applySseStatus(key: SessionStatusKey, status: SessionBusyStatus, sourceTimeMs: Long) {
-        // §3.1 merge timing: drop a strictly-older SSE frame (out-of-order replay).
-        val current = store.stateFlow.value.authority.bySid[key.sessionId]
-        if (current != null && sourceTimeMs < current.updatedAtMs) return
-        val op = AuthorityOp.ApplyEvent(
-            sid = key.sessionId,
-            status = status.toSessionStatus(),
-            origin = EntryOrigin.SSE_LEGACY,
-            scopeKey = currentScope(),
-            connectionTimeMs = sourceTimeMs,
-            workdir = key.workdir,
-        )
-        store.dispatch(AppAction.AuthorityEvent(op))
-        publishFromState(store.stateFlow.value)
-    }
-
-    /**
-     * Explicit failure entry — now a THIN ADAPTER (FGS spec §3 «请求失败 → 全局
-     * Unknown»). Same signature as pre-Lane-2 (call sites unchanged).
-     *
-     * Dispatches [AuthorityOp.MarkSourceFailed] (the reducer merge-times bySid
-     * — keeps fresher SSE Busy/Retry, removes older → absence ≡ unknown — and
-     * sets coverage.lastSuccessTimeMs = -1 so the derived [project] returns
-     * [GlobalBusyState.Unknown] via the cold-start / stale-success coverage
-     * gate). Then synchronous [publishFromState].
-     */
-    override fun markRequestFailed(
-        identity: ConnectionIdentity,
-        snapshot: StatusSnapshot,
-        sourceTimeMs: Long,
-    ) {
-        // §P0-A rev-gpt #2: capture host/epoch at call time (the public entry
-        // is NOT suspend — no mid-call reconfigure window; the token reflects
-        // the current state at the instant of the failure call).
-        val currentState = store.stateFlow.value
-        val token = RequestToken(
-            hostProfileId = currentState.host.currentHostProfileId,
-            requestStartMs = sourceTimeMs,
-            identityEpoch = currentState.identityEpoch,
-        )
-        markRequestFailedInternal(identity, snapshot, sourceTimeMs, token)
-    }
-
-    private fun markRequestFailedInternal(
-        identity: ConnectionIdentity,
-        snapshot: StatusSnapshot,
-        sourceTimeMs: Long,
-        token: RequestToken,
-    ) {
-        val scopeKey = scopeKeyOf(identity.profileId, identity.endpointFp)
-        // §U-MN10 (分歧3): NO consistency assertion here. This internal helper
-        // is reached from TWO callers: (1) refresh()'s onFailure (the epoch
-        // guard at refresh():368 precedes it — safe to assert there) and
-        // (2) the public markRequestFailed() entry (NO epoch guard — callers
-        // like ProcessStatusPoller.runRefresh:478 pass an identity captured at
-        // poll start, which may be stale after a reconfigure; asserting here
-        // would fire IllegalStateException across a legitimate reconfigure
-        // window). The assertion lives at the refresh() onFailure site only.
-        val op = AuthorityOp.MarkSourceFailed(
-            scopeKey = scopeKey,
-            requestToken = token,
-            monotonic = sourceTimeMs,
-            registeredWorkdirs = snapshot.registeredWorkdirs,
-        )
-        store.dispatch(AppAction.AuthorityEvent(op))
-        publishFromState(store.stateFlow.value)
-    }
 
     // ── Internal: projection publication (UNCHANGED logic) ──────────────────
 

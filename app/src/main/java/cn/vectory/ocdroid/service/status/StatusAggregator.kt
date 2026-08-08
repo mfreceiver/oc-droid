@@ -1,6 +1,5 @@
 package cn.vectory.ocdroid.service.status
 
-import cn.vectory.ocdroid.service.identity.ConnectionIdentity
 import kotlinx.coroutines.flow.StateFlow
 
 /**
@@ -45,7 +44,7 @@ interface StatusAggregator {
      *    alive / retries).
      *
      * Empty state (no entries under the current identity — cold start before the
-     * first [StatusAggregatorInput.refresh]) is [GlobalBusyState.Unknown]: the
+     * first successful snapshot) is [GlobalBusyState.Unknown]: the
      * aggregator refuses to authoritatively label the host idle until it has
      * observed at least one fresh successful snapshot.
      *
@@ -139,82 +138,4 @@ enum class GlobalBusyState {
  */
 val GlobalBusyState.isKeepAlive: Boolean get() = this != GlobalBusyState.AllIdleFresh
 
-/**
- * Input surface for the [StatusAggregator] (FGS spec §3 + §3.1, CP4).
- *
- * Separated from the read-only [StatusAggregator] outputs so injectors
- * (`SessionSyncCoordinator`, the bootstrap coordinator, AppCore, …) can feed
- * the aggregator without depending on the concrete `StatusAggregatorImpl`.
- * `StatusAggregatorImpl` implements BOTH interfaces; Hilt binds both to the
- * same `@Singleton` instance (see `StatusModule`).
- *
- * Authoring rules enforced inside the impl:
- *  - [refresh] captures the request-start clock AND `identityStore.currentEpoch()`
- *    BEFORE the REST call, and DROPS the response if the epoch changed mid-
- *    request (host reconfigure, FGS spec §2 + §3.1).
- *  - [applySseStatus] applies merge timing (source-time wins) and does NOT
- *    require an epoch check (the SSE collector / bridge validates identity
- *    upstream — only current-identity frames reach this method).
- *  - [markRequestFailed] is the explicit failure entry for callers that did
- *    not route their REST load through [refresh] — every known session becomes
- *    `Unknown` (subject to merge timing so a fresher `Busy`/`Retry` survives).
- */
-interface StatusAggregatorInput {
-    /**
-     * REST-driven refresh of the global busy source (FGS spec §3 «Phase 0 主路径»,
-     * §3.1 merge timing, §2 epoch guard).
-     *
-     * Captures `requestStartMs = clock()` AND `epochAtRequestStart =
-     * identityStore.currentEpoch()` BEFORE the REST call. On commit the
-     * response is DROPPED if the epoch has changed mid-request (host
-     * reconfigure invalidated the in-flight request).
-     *
-     * See `StatusAggregatorImpl.refresh` for the full success / failure
-     * semantics (binning, merge-timing, Unknown-on-failure).
-     *
-     * @param identity The current connection identity — its `serverGroupFp`
-     *  scopes the composite keys and the [StatusAggregator.globalState]
-     *  projection.
-     * @param snapshot The merged 3-source `id → Session` snapshot (produced
-     *  upstream by `SessionTree.allSessionsById` via
-     *  [SessionSnapshotProvider]) AND the registered-workdir coverage set.
-     *  Used to resolve `sessionId → directory` AND to enforce the
-     *  `AllIdleFresh` coverage predicate (FGS spec §3 «只有所有已登记 workdir
-     *  都取得新鲜+成功 idle 才进停流宽限期»).
-     */
-    suspend fun refresh(identity: ConnectionIdentity, snapshot: StatusSnapshot)
 
-    /**
-     * Apply a single SSE-driven status update (FGS spec §3.1 merge timing).
-     * See `StatusAggregatorImpl.applySseStatus` for the full contract.
-     *
-     * @param key Composite key — `serverGroupFp` must match the current
-     *  connection (validated upstream by the bridge / SSC identity check).
-     * @param status The SSE-observed status.
-     * @param sourceTimeMs Monotonic arrival time of the SSE event; the
-     *  merge-timing arbiter. The caller and the impl share one clock domain
-     *  (the impl's injected `clock: () -> Long`).
-     */
-    fun applySseStatus(key: SessionStatusKey, status: SessionBusyStatus, sourceTimeMs: Long)
-
-    /**
-     * Explicit failure entry — every known session under [identity] becomes
-     * [SessionBusyStatus.Unknown], subject to merge timing so a fresher prior
-     * `Busy`/`Retry` survives (FGS spec §3 «请求失败 → 全局 Unknown»). Used by
-     * callers that did NOT route their REST load through [refresh] (e.g. a
-     * future poller failure path).
-     *
-     * @param identity The current connection identity.
-     * @param snapshot The merged `id → Session` snapshot + registered-workdir
-     *  coverage set (same shape as [refresh] takes — the coverage set is
-     *  preserved across the failure so `AllIdleFresh` cannot falsely pass on
-     *  the post-failure `Unknown` entries).
-     * @param sourceTimeMs The failure's effective time — merge-timed against
-     *  each entry's existing source time so a fresher observation wins.
-     */
-    fun markRequestFailed(
-        identity: ConnectionIdentity,
-        snapshot: StatusSnapshot,
-        sourceTimeMs: Long,
-    )
-}

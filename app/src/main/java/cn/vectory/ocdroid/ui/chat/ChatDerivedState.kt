@@ -11,7 +11,7 @@
 //    / chromeSessionId          (:231-258)
 //  • sessionsById / curSession / effectiveBusy / curCutoff / curRevertMessageId
 //    / curSessionStatus         (:454-483)
-//  • computedContextUsage / cachedContextUsageState + write-through (:531-539)
+//  • computedContextUsage / cachedContextUsageState + SideEffect write-through (:531-539)
 //  • visibleAgents / effectiveAgent / effectiveModel                  (:556-600)
 //  • currentSessionIsRunning / isCurrentSessionSending / currentActivity /
 //    matchingQuestions / pendingQuestion / pendingPermission          (:601-660)
@@ -25,6 +25,7 @@ import androidx.compose.runtime.State
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.SideEffect
 import cn.vectory.ocdroid.data.model.HostProfile
 import cn.vectory.ocdroid.data.model.Message
 import cn.vectory.ocdroid.data.model.Part
@@ -61,8 +62,8 @@ import cn.vectory.ocdroid.ui.visibleMessages
  * Non-negotiable invariants (§5.3):
  * 1. Every `remember`/`derivedStateOf` keeps its EXACT current key list.
  * 2. Per-field granularity (NOT one bundled `derivedStateOf`).
- * 3. `cachedContextUsageState` write-during-composition (:537-539) is
- *    preserved verbatim (smell F2 logged but not fixed).
+ * 3. `cachedContextUsageState` write-through runs in SideEffect (apply-phase);
+ *    sticky last-non-null semantics preserved.
  *
  * @property onChatFileClick Callback (not a State) — recomposed via
  *   `remember(curSession, onOpenChatFilePreview)`.
@@ -95,7 +96,7 @@ internal class ChatDerivedState(
     val curRevertMessageId: State<String?>,
     /** Current session status badge. */
     val curSessionStatus: State<SessionStatus?>,
-    // ── Context usage (write-during-composition preserved verbatim) ────────
+    // ── Context usage (SideEffect write-through, apply-phase; bF2 redesign) ──
     /** Snapshot-backed handle for context usage, fed to rememberChatTopBarState. */
     val cachedContextUsageState: State<ContextUsage?>,
     // ── Agent / Model ─────────────────────────────────────────────────────
@@ -253,20 +254,22 @@ internal fun rememberChatDerivedState(
         }
     }
 
-    // ── Context usage (:531-539) — write-during-composition preserved ─────
-    // Recompute every composition (matches 45dfe0db:ChatScaffold.kt:531 —
-    // freshness over memoization: computeContextUsage reads both renderedMessages
-    // AND providers, so a host-switch / provider refresh updates context usage
-    // even when messages are unchanged). The write-through into
-    // cachedContextUsageState below is the pre-existing §L5a smell preserved
-    // verbatim (follow-up F2).
+    // ── Context usage — Compose-safe redesign (bF2) ─────────────────────────
+    // computeContextUsage is PURE over (renderedMessages, providers) — both
+    // snapshot-backed — and is still evaluated EVERY composition (freshness over
+    // memoization: a host-switch/provider refresh updates usage even when
+    // messages are unchanged; kept per the pre-bF2 intent). The write-through
+    // into the snapshot-backed cache handle moves from the composition phase
+    // into SideEffect (apply phase): writing a MutableState mid-composition can
+    // invalidate readers of the same pass; SideEffect runs once per APPLIED
+    // composition, off-phase. Sticky semantics preserved VERBATIM: a null
+    // computation NEVER overwrites the last non-null usage (`?.let`).
     val computedContextUsage: ContextUsage? =
         computeContextUsage(renderedMessages.value, settingsState.value.providers)
-    // §L5a: cachedContextUsage is a MUTABLE State handle fed to
-    // rememberChatTopBarState. The write-through below is the pre-existing
-    // smell (:537-539) — preserved verbatim (follow-up F2).
     val cachedContextUsageState = remember { mutableStateOf(computedContextUsage) }
-    computedContextUsage?.let { cachedContextUsageState.value = it }
+    SideEffect {
+        computedContextUsage?.let { cachedContextUsageState.value = it }
+    }
 
     // ── Agent / Model group (:556-600) ────────────────────────────────────
     // `visibleAgents` EXACT remember keys: (settings.agents).

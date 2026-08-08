@@ -305,7 +305,8 @@ class SessionViewModel @Inject constructor(
      * that VM (SessionViewModel must stay AppCore-free).
      */
     private fun forceNavigateToSessionsInternal() {
-        settingsManager.lastRoute = NavRoute.Sessions.route
+        // F2: settingsManager.lastRoute write was redundant here (mutateNav
+        // below is the authoritative NavState write); persistence deleted.
         store.mutateNav {
             it.copy(
                 lastRoute = NavRoute.Sessions.route,

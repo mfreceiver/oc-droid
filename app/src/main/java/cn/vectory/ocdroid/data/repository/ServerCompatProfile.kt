@@ -190,7 +190,7 @@ class ServerCompatProfile @Inject constructor() {
      *
      * 默认 `false`（= per-session 不可用 / delegated to bulk）。
      * [StreamingModule] 的 slimFanOutRunner 据此短路 fan-out：status 数据流由 bulk
-     * runRefresh（`StatusAggregatorImpl.refresh` → `getSlimapiSessionsStatus`）完整覆盖，
+     * runRefresh（the deleted `refresh` adapter → `getSlimapiSessionsStatus`）完整覆盖，
      * stale session 清理由 `session.deleted` digest SSE 事件独立驱动
      * （→ [SessionSyncCoordinator.handleSessionDigest] → `EvictSession`），
      * 不依赖 per-session fan-out（注：`/since` 404 的 `MarkDeleted` reconcile 路径在

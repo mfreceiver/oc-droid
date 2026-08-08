@@ -159,9 +159,9 @@ class SettingsManager @Inject constructor(
         get() = navigationPrefs.currentSessionId
         set(value) { navigationPrefs.currentSessionId = value }
 
-    var lastRoute: String
+    /** F2: read-only migration source; production authority is [NavState.lastRoute]. */
+    val lastRoute: String
         get() = navigationPrefs.lastRoute
-        set(value) { navigationPrefs.lastRoute = value }
 
     // ── Workdir domain (WorkdirPrefs) ───────────────────────────────────────
 

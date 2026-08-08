@@ -213,7 +213,6 @@ object ControllerModule {
         effectBus: SharedEffectBus,
         @Named("currentProfileId") currentProfileId: () -> String,
         identityStore: cn.vectory.ocdroid.service.identity.ConnectionIdentityStore,
-        statusAggregatorInput: cn.vectory.ocdroid.service.status.StatusAggregatorInput,
         repository: OpenCodeRepository,
         skeletonReloadCoordinator: SkeletonReloadCoordinator,
     ): SessionSyncCoordinator = SessionSyncCoordinator(
@@ -230,11 +229,6 @@ object ControllerModule {
         // (ControllerEffect.AppendMessageToCache → AppCore).
         // CP1 (notify Phase-0): single connection-identity store.
         identityStore = identityStore,
-        // CP4 (notify Phase-0): feed the authoritative status aggregator on
-        // every `session.status` SSE event (the SSE branch resolves
-        // sessionId→workdir via SessionTree.allSessionsById, builds the
-        // composite key, and calls applySseStatus with clock()).
-        statusAggregatorInput = statusAggregatorInput,
         // Cluster A / Phase 2: runtime watermark-resync capability + repository
         // for session.digest / slim questions / cold-start snapshot fold.
         // supportsWatermarkResync is a thunk so host-profile switches that flip
@@ -286,9 +280,9 @@ object ControllerModule {
         // its sslConfigFor() fell back to SystemDefault → "Trust anchor not found"
         // under mTLS + slim. The repository owns the mTLS-loaded clientFactory (same
         // one REST/SSE use); route the token stream through it via the new
-        // [OpenCodeRepository.tokenStreamClient]. (The @Singleton OkHttpClientFactory /
-        // SslConfigFactory bindings are now orphaned here — left in place for the
-        // Option A follow-up that unifies ownership; do NOT delete.)
+        // [OpenCodeRepository.tokenStreamClient]. OkHttpClientFactory / SslConfigFactory
+        // are owned by `RepositoryNetworkGraph` (no Hilt bindings exist); the historical
+        // "orphaned bindings" remark was removed in the archdebt follow-up batch as stale.
         repository: OpenCodeRepository,
         @Suppress("UNUSED_PARAMETER") sessionSyncCoordinator: SessionSyncCoordinator,
         bundleEndpointResolver: cn.vectory.ocdroid.service.streaming.BundleEndpointResolver,

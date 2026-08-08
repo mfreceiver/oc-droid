@@ -4,10 +4,8 @@ import cn.vectory.ocdroid.service.status.StatusSnapshot
 
 /**
  * FGS spec §3 — read access to the merged `id → Session` map + the
- * registered-workdir coverage set for the global status refresh. The poller
- * and the §5 bootstrap both call
- * [StatusAggregatorInput.refresh][cn.vectory.ocdroid.service.status.StatusAggregatorInput.refresh]
- * which bins each sessionId to its workdir via `sessionsById[sessionId].directory`
+ * registered-workdir coverage set for the global status refresh. The caller
+ * bins each sessionId to its workdir via `sessionsById[sessionId].directory`
  * AND uses [StatusSnapshot.registeredWorkdirs] as the all-idle coverage
  * predicate (FGS spec §3 «只有所有已登记 workdir 都取得新鲜+成功 idle 才进停流宽限期»).
  *

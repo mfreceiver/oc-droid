@@ -6,8 +6,8 @@ import cn.vectory.ocdroid.data.model.Session
  * D1 (gate #5): merged session snapshot **+ registered-workdir coverage** for
  * the authoritative busy source (FGS spec §3).
  *
- * Carries everything [StatusAggregatorImpl.refresh] / [StatusAggregatorImpl.markRequestFailed]
- * needs to produce a coverage-complete [StatusAggregator.globalState] verdict:
+ * Carried the deleted [StatusAggregatorInput] feed surface (retired in F1);
+ * retained for the read-side derivation pipeline ([StatusAggregatorImpl.publishFromState]):
  *
  *  - [sessionsById] — the merged 3-source `id → Session` map (sessions +
  *    directorySessions + childSessions, deduped by id). Same shape as
@@ -31,7 +31,7 @@ import cn.vectory.ocdroid.data.model.Session
  * **Identity scope**: both fields are scoped to the current connection's
  * `serverGroupFp` (the snapshot provider reads the bound identity's fp to
  * compute `recentWorkdirs(fp)`). Callers MUST pass a snapshot consistent
- * with the identity they pair it with in [StatusAggregatorInput.refresh].
+ * with the identity they pair it with in the deleted [StatusAggregatorInput] feed surface.
  */
 data class StatusSnapshot(
     val sessionsById: Map<String, Session>,

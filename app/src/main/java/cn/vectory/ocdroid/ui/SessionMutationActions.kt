@@ -194,7 +194,7 @@ internal fun launchSetSessionArchived(
                         slices.store.dispatch(AppAction.ChatCleared)
                         slices.store.dispatch(AppAction.CloseDetail)
                         settingsManager.currentSessionId = null
-                        settingsManager.lastRoute = NavRoute.Sessions.route
+                        // F2: settingsManager.lastRoute write was redundant; deleted.
                         slices.store.mutateNav {
                             it.copy(
                                 lastRoute = NavRoute.Sessions.route,
@@ -282,7 +282,7 @@ internal fun launchDeleteSession(
                     slices.store.dispatch(AppAction.ChatCleared)
                     slices.store.dispatch(AppAction.CloseDetail)
                     settingsManager.currentSessionId = null
-                    settingsManager.lastRoute = NavRoute.Sessions.route
+                    // F2: settingsManager.lastRoute write was redundant; deleted.
                     slices.store.mutateNav {
                         it.copy(
                             lastRoute = NavRoute.Sessions.route,

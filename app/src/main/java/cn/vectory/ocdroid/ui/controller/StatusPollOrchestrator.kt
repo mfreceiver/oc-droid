@@ -1,7 +1,8 @@
 package cn.vectory.ocdroid.ui.controller
 
 import cn.vectory.ocdroid.data.model.SessionStatus
-import cn.vectory.ocdroid.data.repository.OpenCodeRepository
+import cn.vectory.ocdroid.data.repository.ConnectionRepository
+import cn.vectory.ocdroid.data.repository.SessionRepository
 import cn.vectory.ocdroid.ui.ConnectionPhase
 import cn.vectory.ocdroid.ui.SessionStatusLoadTrigger
 import cn.vectory.ocdroid.ui.SliceFlows
@@ -28,17 +29,15 @@ import kotlinx.coroutines.launch
  * the slim SWEEP short-circuit MUST execute BEFORE
  * `statusLoadEpoch.incrementAndGet()` (see the in-method comment for the full rationale).
  *
- * §Wave2.3 nit#2 — DI deferral note (verified, NOT migrated):
- * The `repository` param is typed [OpenCodeRepository] (concrete), but the method set
- * actually touched here is interface-clean — `usesSlimStatusFanOut` (ConnectionRepository)
- * + `getSessionStatus` / `getActiveSessionIds` / `getSlimapiSessionsStatus` (SessionRepository),
- * i.e. a dual (Connection + Session) seam would suffice. Migration is DEFERRED: these are
- * per-call params threaded in by RefreshOrchestrator (via SessionListActions wrappers; AppCore
- * COLD_START also calls directly with its own OCR concrete), and RefreshOrchestrator itself
- * holds OCR concrete, transitively blocked by the slim-token shim via launchLoadMessages /
- * launchCatchUp. Narrowing the param type here would force a dual-param split at every caller
- * now, before the caller chain is unblocked. Revisit after B3 (slim-token retirement) — see
- * oracle wave2.3 §3.4.
+ * §archdebt-followup F4b: param narrowed to dual seam — [ConnectionRepository]
+ * for `usesSlimStatusFanOut` gates, [SessionRepository] for `getSessionStatus` /
+ * `getActiveSessionIds` / `getSlimapiSessionsStatus`. The
+ * [SessionListActions.launchLoadSessionStatus] wrapper KEEPS the concrete
+ * [cn.vectory.ocdroid.data.repository.OpenCodeRepository] param (zero caller /
+ * test churn — ~45 positional call sites + AppCore.kt:632/:636 +
+ * RefreshOrchestrator.kt:188 pass the same Hilt singleton bound to both
+ * interfaces). No combined interface introduced (YAGNI — one consumer,
+ * internal object).
  */
 internal object StatusPollOrchestrator {
 
@@ -101,7 +100,8 @@ internal object StatusPollOrchestrator {
 
     internal fun launchLoadSessionStatus(
         scope: CoroutineScope,
-        repository: OpenCodeRepository,
+        connectionRepository: ConnectionRepository,
+        sessionRepository: SessionRepository,
         slices: SliceFlows,
         trigger: SessionStatusLoadTrigger = SessionStatusLoadTrigger.SWEEP,
         onComplete: (Boolean) -> Unit = {},
@@ -144,7 +144,7 @@ internal object StatusPollOrchestrator {
         // fall through to REST naturally; the explicit phase guard is
         // defensive. The epoch-order landmine is preserved verbatim: the no-op
         // still runs BEFORE the epoch bump on the SSE-healthy path.
-        if (repository.usesSlimStatusFanOut &&
+        if (connectionRepository.usesSlimStatusFanOut &&
             trigger == SessionStatusLoadTrigger.SWEEP &&
             sseDigestRelayEffective(slices)
         ) {
@@ -167,8 +167,8 @@ internal object StatusPollOrchestrator {
         // status (SSE-healthy) arrives via the slim digest `status` relay
         // (SessionSyncCoordinator.handleSessionDigest → applySessionStatus).
         // Legacy transport behavior remains byte-for-byte unchanged.
-        if (repository.usesSlimStatusFanOut) {
-            launchLoadSessionStatusSlim(scope, repository, slices, myEpoch, hostAtRequestStart, completenessEpochAtStart, onComplete)
+        if (connectionRepository.usesSlimStatusFanOut) {
+            launchLoadSessionStatusSlim(scope, sessionRepository, slices, myEpoch, hostAtRequestStart, completenessEpochAtStart, onComplete)
             return
         }
         scope.launch {
@@ -201,8 +201,8 @@ internal object StatusPollOrchestrator {
                 // §toctou-identity: capture identityEpoch BEFORE the network
                 // suspend so a mid-flight identity switch invalidates the response.
                 val identityEpochAtStart = slices.store.stateFlow.value.identityEpoch
-                val statusResult = repository.getSessionStatus()
-                val activeResult = repository.getActiveSessionIds()
+                val statusResult = sessionRepository.getSessionStatus()
+                val activeResult = sessionRepository.getActiveSessionIds()
                 val statuses = statusResult.getOrNull()
                 var applied = false
                 slices.store.mutateState { snapshot ->
@@ -335,7 +335,7 @@ internal object StatusPollOrchestrator {
      */
     private fun launchLoadSessionStatusSlim(
         scope: CoroutineScope,
-        repository: OpenCodeRepository,
+        sessionRepository: SessionRepository,
         slices: SliceFlows,
         myEpoch: Long,
         hostAtRequestStart: String?,
@@ -387,7 +387,7 @@ internal object StatusPollOrchestrator {
                 // §toctou-identity: capture identityEpoch BEFORE the fetch
                 // suspend so a mid-flight identity switch invalidates the response.
                 val identityEpochAtStart = slices.store.stateFlow.value.identityEpoch
-                val result = repository.getSlimapiSessionsStatus(directories.first())
+                val result = sessionRepository.getSlimapiSessionsStatus(directories.first())
                 // §11.1 fix-10 P0-2: if the single call failed, do NOT apply
                 // the empty map as authoritative — preserve the prior snapshot
                 // and signal failure so the caller can retry / fall back.

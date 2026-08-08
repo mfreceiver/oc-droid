@@ -4,7 +4,6 @@ import cn.vectory.ocdroid.data.model.MessageWithParts
 import cn.vectory.ocdroid.data.model.Part
 import cn.vectory.ocdroid.data.repository.ExpandOutcome
 import cn.vectory.ocdroid.data.repository.MessageRepository
-import cn.vectory.ocdroid.data.repository.OpenCodeRepository
 import cn.vectory.ocdroid.data.repository.isThinPlaceholder
 import cn.vectory.ocdroid.data.repository.mergeFullBatchIntoLocal
 import cn.vectory.ocdroid.util.DebugLog
@@ -155,7 +154,7 @@ data class ExpandPartsOutcome(
  *    on message ids — a part without one cannot be batch-expanded).
  * 2. **Collect** the deduped set of requested message ids (LinkedHashSet
  *    for deterministic ordering).
- * 3. **Call** T3's [OpenCodeRepository.expandMessagesFullBatch]
+ * 3. **Call** T3's [MessageRepository.expandMessagesFullBatch]
  *    (consume-only — unchanged).
  * 4. **Branch** on the outcome:
  *    - [ExpandOutcome.Ok] — expose raw `items` as
@@ -190,7 +189,7 @@ data class ExpandPartsOutcome(
  *
  * Construction: plain Kotlin class (no Hilt — wired by the chat layer in
  * T16), matching the SlimStatusFanOut pattern. Tests construct it
- * directly with a mockk `OpenCodeRepository`.
+ * directly with a mockk `MessageRepository`.
  *
  * @param repository T3's `expandMessagesFullBatch` is consume-only.
  *

@@ -110,9 +110,10 @@ internal fun <T> aggregationOutcome(
  * slimapi-only `directory` + `routeToken`) to the legacy [PermissionRequest]
  * model that the UI / VM consumers expect.
  *
- * **Preserves [SlimapiPermissionEntry.routeToken]** (Phase 3b): the slimapi
- * respond path ([OpenCodeRepository.respondSlimapiPermission]) requires the
- * sidecar HMAC to validate the response POST (§2/B2). The upper-layer
+ * **Preserves [SlimapiPermissionEntry.routeToken]** (Phase 3b): F4a: the slim
+ * respond path was collapsed into [InteractionRepository.respondPermission];
+ * the token is retained for call-site stability (client-side provenance
+ * signal only — upstream spec §7:231 deleted it from the wire). The upper-layer
  * [ChatScaffold] reads [PermissionRequest.routeToken] off the
  * `pendingPermissions` entry and forwards it to
  * [OrchestratorViewModel.respondPermission]; if this mapping drops the

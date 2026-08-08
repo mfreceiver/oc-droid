@@ -5,9 +5,6 @@ import cn.vectory.ocdroid.data.model.Session
 import cn.vectory.ocdroid.data.model.SSEEvent
 import cn.vectory.ocdroid.data.model.SSEPayload
 import cn.vectory.ocdroid.service.identity.ConnectionIdentityStore
-import cn.vectory.ocdroid.service.status.SessionBusyStatus
-import cn.vectory.ocdroid.service.status.SessionStatusKey
-import cn.vectory.ocdroid.service.status.StatusAggregatorInput
 import cn.vectory.ocdroid.ui.SessionListState
 import cn.vectory.ocdroid.ui.SharedEffectBus
 import cn.vectory.ocdroid.ui.SliceFlows
@@ -26,27 +23,24 @@ import kotlinx.serialization.json.put
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 
 /**
  * CP4 (notify Phase-0) — focused unit coverage for the `session.status` SSE
- * branch's feed into the authoritative [StatusAggregatorInput].
+ * branch's feed into authority [cn.vectory.ocdroid.data.state.AuthorityState].
  *
  * Verifies that on every `session.status` event:
  *  - the sessionId is resolved to its workdir via `SessionTree.allSessionsById`
  *    (sessions + directorySessions + childSessions);
- *  - the composite [SessionStatusKey] is built with the current host's
- *    `profileId` (the provider) and that workdir;
- *  - the SSE status is mapped to [SessionBusyStatus] via
- *    `SessionBusyStatusMapping.toSessionBusyStatus`;
- *  - `applySseStatus` is called with the resolved key + the clock's arrival time;
+ *  - the authority entry receives the resolved workdir + status + clock arrival time;
  *  - unknown sessionIds (not in the merged map) are skipped silently;
  *  - the existing fold (badge / unread / reload) is unchanged.
  *
- * The aggregator input is a fake that records every `applySseStatus` call.
+ * The `StatusAggregatorInput` feed surface was retired in the archdebt follow-up (F1);
+ * the status feed now flows exclusively through authority dispatch
+ * (`applyStatusViaAuthority`).
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class SessionSyncCoordinatorStatusFeedTest {
@@ -56,7 +50,6 @@ class SessionSyncCoordinatorStatusFeedTest {
     private lateinit var effects: SharedEffectBus
     private lateinit var scope: TestScope
     private lateinit var identityStore: ConnectionIdentityStore
-    private lateinit var aggregatorInput: RecordingStatusAggregatorInput
     private lateinit var coordinator: SessionSyncCoordinator
     private var clockNow: Long = 1_000L
 
@@ -70,7 +63,6 @@ class SessionSyncCoordinatorStatusFeedTest {
         effects = SharedEffectBus()
         scope = TestScope(UnconfinedTestDispatcher())
         identityStore = ConnectionIdentityStore()
-        aggregatorInput = RecordingStatusAggregatorInput()
         coordinator = SessionSyncCoordinator(
             scope = scope,
             slices = slices,
@@ -78,7 +70,6 @@ class SessionSyncCoordinatorStatusFeedTest {
             effects = effects,
             currentProfileId = { profileId },
             identityStore = identityStore,
-            statusAggregatorInput = aggregatorInput,
             clock = { clockNow })
     }
 
@@ -92,10 +83,6 @@ class SessionSyncCoordinatorStatusFeedTest {
 
     private fun seedSessions(sessions: List<Session>) {
         slices.mutateSessionList {
-            // §P0-A rev-gpt #8 B10 r2: sessionStatuses is no longer a public
-            // factory param (sole-writer gate). emptyMap() was the default, so
-            // the line is simply removed; seed non-empty statuses via
-            // withProjection when needed.
             SessionListState(
                 sessions = sessions,
                 expandedSessionIds = emptySet(),
@@ -188,7 +175,7 @@ class SessionSyncCoordinatorStatusFeedTest {
     }
 
     @Test
-    fun `session status for an unknown sessionId is skipped silently (no applySseStatus)`() {
+    fun `session status for an unknown sessionId creates authority entry with null workdir`() {
         seedSessions(listOf(Session(id = "known", directory = "/work")))
 
         coordinator.handleEvent(event("session.status") {
@@ -196,9 +183,11 @@ class SessionSyncCoordinatorStatusFeedTest {
             put("status", buildJsonObject { put("type", JsonPrimitive("busy")) })
         })
 
-        assertTrue(
-            "unknown sessionId must NOT reach the aggregator (no composite key without workdir)",
-            aggregatorInput.applyCalls.isEmpty())
+        val entry = slices.store.stateFlow.value.authority.bySid["ghost"]
+        assertNotNull("unknown sessionId reaches authority (applyStatusViaAuthority dispatches regardless of workdir)",
+            entry)
+        assertEquals("workdir is null for unknown sessionId (no session tree mapping)",
+            null, entry!!.workdir)
     }
 
     @Test
@@ -225,8 +214,8 @@ class SessionSyncCoordinatorStatusFeedTest {
     }
 
     @Test
-    fun `existing badge fold is unchanged when aggregator input is present`() {
-        // Belt-and-suspenders: feeding the aggregator must NOT regress the existing
+    fun `existing badge fold is unchanged by the authority feed path`() {
+        // Belt-and-suspenders: the authority-write path must NOT regress the
         // sessionStatuses slice mutation (badge / reload trigger).
         seedSessions(listOf(Session(id = "s1", directory = "/work-a")))
 
@@ -236,57 +225,5 @@ class SessionSyncCoordinatorStatusFeedTest {
         })
 
         assertTrue(slices.sessionList.value.sessionStatuses["s1"]?.isBusy == true)
-    }
-
-    @Test
-    fun `no statusAggregatorInput wired - session status branch skips feed without breaking`() {
-        // Legacy / test construction with statusAggregatorInput = null — the session.status
-        // branch must simply skip the aggregator feed (no NPE, badge fold unchanged).
-        val legacyCoordinator = SessionSyncCoordinator(
-            scope = scope,
-            slices = slices,
-            settingsManager = mockk(relaxed = true),
-            effects = effects,
-            currentProfileId = { profileId },
-            identityStore = identityStore,
-            statusAggregatorInput = null,
-            clock = { clockNow })
-        seedSessions(listOf(Session(id = "s1", directory = "/work-a")))
-
-        legacyCoordinator.handleEvent(event("session.status") {
-            put("sessionID", JsonPrimitive("s1"))
-            put("status", buildJsonObject { put("type", JsonPrimitive("busy")) })
-        })
-
-        assertTrue(slices.sessionList.value.sessionStatuses["s1"]?.isBusy == true)
-        assertNull(aggregatorInput.lastApply())
-    }
-
-    private data class ApplyCall(
-        val key: SessionStatusKey,
-        val status: SessionBusyStatus,
-        val sourceTimeMs: Long)
-
-    private class RecordingStatusAggregatorInput : StatusAggregatorInput {
-        val applyCalls = mutableListOf<ApplyCall>()
-
-        fun lastApply(): ApplyCall? = applyCalls.lastOrNull()
-
-        override suspend fun refresh(
-            identity: cn.vectory.ocdroid.service.identity.ConnectionIdentity,
-            snapshot: cn.vectory.ocdroid.service.status.StatusSnapshot) {
-            // Unused by these tests (they exercise the SSE feed path only).
-        }
-
-        override fun applySseStatus(key: SessionStatusKey, status: SessionBusyStatus, sourceTimeMs: Long) {
-            applyCalls.add(ApplyCall(key, status, sourceTimeMs))
-        }
-
-        override fun markRequestFailed(
-            identity: cn.vectory.ocdroid.service.identity.ConnectionIdentity,
-            snapshot: cn.vectory.ocdroid.service.status.StatusSnapshot,
-            sourceTimeMs: Long) {
-            // Unused by these tests.
-        }
     }
 }

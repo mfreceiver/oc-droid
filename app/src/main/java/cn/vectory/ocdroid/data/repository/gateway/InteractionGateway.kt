@@ -109,7 +109,14 @@ internal class InteractionGateway(
         permissionId: String,
         response: PermissionResponse,
     ): Result<Unit> = runSuspendCatching {
-        mutationApi.respondPermission(sessionId, permissionId, PermissionResponseRequest(response.value))
+        val resp = mutationApi.respondPermission(sessionId, permissionId, PermissionResponseRequest(response.value))
+        // F4a micro-fix: align with the (now-collapsed) slim variant — check
+        // isSuccessful so a failed respond no longer silently removes the
+        // pending chip (legacy path was silently swallowing HTTP errors).
+        if (!resp.isSuccessful) {
+            val errorBody = resp.errorBody()?.string() ?: resp.message()
+            throw Exception("Permission respond failed ${resp.code()}: $errorBody")
+        }
     }
 
     suspend fun getPendingQuestions(directory: String?): Result<List<QuestionRequest>> =
@@ -248,59 +255,7 @@ internal class InteractionGateway(
         )
     }
 
-    /**
-     * §slimapi-questions: reply to a question fetched via `/slimapi/questions`.
-     *
-     * Threads the originating [directory] through to the legacy write endpoint
-     * (`/question/{id}/reply`) so the upstream opencode InstanceState that
-     * owns the pending question is correctly routed — even though the question
-     * arrived via the sidecar's cross-directory aggregate. The sidecar also
-     * re-validates the [routeToken] HMAC for write-side authentication.
-     *
-     * [directory] is sourced from [SlimapiQuestionEntry.directory] at the call
-     * site; null only when the triggering UI genuinely cannot know it.
-     */
-    suspend fun replySlimapiQuestion(
-        questionId: String,
-        answers: List<List<String>>,
-        routeToken: String?,
-        directory: String? = null,
-    ): Result<Unit> = runSuspendCatching {
-        val response = mutationApi.replyQuestion(
-            questionId, QuestionReplyRequest(answers = answers), directory,
-        )
-        if (!response.isSuccessful) {
-            val errorBody = response.errorBody()?.string() ?: response.message()
-            throw Exception("Reply failed ${response.code()}: $errorBody")
-        }
-    }
-
-    /** §slimapi-questions: reject a question fetched via `/slimapi/questions`.
-     *  See [replySlimapiQuestion] for the [directory] / [routeToken] contract. */
-    suspend fun rejectSlimapiQuestion(
-        questionId: String,
-        routeToken: String?,
-        directory: String? = null,
-    ): Result<Unit> = runSuspendCatching {
-        val response = mutationApi.rejectQuestion(questionId, directory)
-        if (!response.isSuccessful) {
-            val errorBody = response.errorBody()?.string() ?: response.message()
-            throw Exception("Reject failed ${response.code()}: $errorBody")
-        }
-    }
-
-    suspend fun respondSlimapiPermission(
-        sessionId: String,
-        permissionId: String,
-        response: PermissionResponse,
-        routeToken: String?,
-    ): Result<Unit> = runSuspendCatching {
-        val resp = mutationApi.respondPermission(
-            sessionId, permissionId, PermissionResponseRequest(response.value),
-        )
-        if (!resp.isSuccessful) {
-            val errorBody = resp.errorBody()?.string() ?: resp.message()
-            throw Exception("Permission respond failed ${resp.code()}: $errorBody")
-        }
-    }
+    // F4a: replySlimapiQuestion / rejectSlimapiQuestion / respondSlimapiPermission
+    // were identity-equivalent to the legacy methods (routeToken unused on wire
+    // per upstream spec §7:231). Collapsed into the legacy variants above.
 }
