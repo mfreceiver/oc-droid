@@ -237,13 +237,20 @@ internal fun bumpSessionUpdated(sessions: List<Session>, sessionId: String, upda
  * id is in [pendingCreateIds] (the "just created, not yet confirmed by the
  * server" set). This is STRICTER than the legacy `currentSessionId ||
  * open-tabs-list` rule: a session that was opened locally but is NOT in the
- * server's authoritative listing AND is NOT pending-create will now drop
- * naturally on refresh (the "ghost after server-side cleanup" fix). The final
- * list is `authoritative ∪ local.filter { id in pendingCreateIds }`.
+ * server's authoritative listing AND is neither pending-create NOR the
+ * currently-viewed session will now drop naturally on refresh (the "ghost
+ * after server-side cleanup" fix). The final list is:
+ *   `authoritative ∪ local.filter { id in pendingCreateIds || id == currentSessionId }`.
  *
  * §B4: [open-tabs-list] removed from the signature. [currentSessionId] is
- * retained for call-site compatibility but is NO LONGER used in the preserve
- * filter — pendingCreateIds is the sole authority.
+ * restored to the preserve filter (pre-Q4 behavior) so a viewed child
+ * session whose id is absent from the server's refreshed roots list
+ * survives the merge and keeps its real title visible. Regression from
+ * commit 4ae375328: removing currentSessionId from the preserve broke
+ * navigating into busy subagents whose session isn't in the server's
+ * top-level listing (flat project scoping). Server-deleted sessions are
+ * still bounded — they are evicted via [EvictSession] → [SessionDeletedLocal],
+ * NOT by this merge.
  */
 internal fun mergeRefreshedSessionsPreservingLocalActivity(
     refreshed: List<Session>,
@@ -251,8 +258,6 @@ internal fun mergeRefreshedSessionsPreservingLocalActivity(
     currentSessionId: String? = null,
     pendingCreateIds: Set<String> = emptySet(),
 ): List<Session> {
-    @Suppress("UNUSED_VARIABLE", "UNUSED_PARAMETER")
-    val unusedCurrent = currentSessionId
     val localById = local.associateBy { it.id }
     val refreshedIds = refreshed.map { it.id }.toSet()
     val base = refreshed.map { remote ->
@@ -270,7 +275,7 @@ internal fun mergeRefreshedSessionsPreservingLocalActivity(
             //
             // This does NOT re-introduce ghosts: ghosts are sessions the server
             // DELETED (absent from the refreshed list entirely). Those are
-            // governed by the preserve pass below (pendingCreateIds only).
+            // governed by the preserve pass below (pendingCreateIds + currentSessionId).
             // Semantic 2 only applies to ids the server DID return (in-refreshed);
             // it just picks the fresher OBJECT for each such id.
             //
@@ -303,12 +308,19 @@ internal fun mergeRefreshedSessionsPreservingLocalActivity(
             remote
         }
     }
-    // §Q4-strict-sync semantic 1 (strict ghost removal): preserve ONLY
-    // pending-create ids not in the refreshed (authoritative) set. This is
-    // the formula:
-    //   final = authoritative ∪ local.filter { id in pendingCreateIds }
+    // §Q4-strict-sync semantic 1 (strict ghost removal) + currentSessionId
+    // restoration: preserve pending-create ids AND the currently-viewed
+    // session (route id) that are absent from the refreshed (authoritative)
+    // set. This is the formula:
+    //   final = authoritative ∪ local.filter { id in pendingCreateIds || id == currentSessionId }
+    // §currentSessionId-backstop: re-enabling currentSessionId (pre-Q4) so a
+    // viewed child session (parentId != null) whose id doesn't appear in the
+    // server's flat roots list survives the merge — without this the title
+    // lookup fails and reverts to home fallback. Server-deleted sessions are
+    // bounded via the explicit eviction path (EvictSession → SessionDeletedLocal),
+    // NOT this merge, so ghosts cannot accumulate.
     val preserve = local.filter {
-        it.id !in refreshedIds && it.id in pendingCreateIds
+        it.id !in refreshedIds && (it.id in pendingCreateIds || it.id == currentSessionId)
     }
     return base + preserve
 }

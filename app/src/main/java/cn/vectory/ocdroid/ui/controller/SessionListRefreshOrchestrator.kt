@@ -129,13 +129,13 @@ internal class SessionListRefreshOrchestrator(
                     val currentSessions = currentSessionList.sessions
                     val currentPendingCreateIds = currentSessionList.pendingCreateIds
                     val currentPendingCreatedAt = currentSessionList.pendingCreatedAt
-                    // §B4: open-tabs-list gone — merge only needs pendingCreateIds
-                    // for local-activity preserve (currentSessionId retained for
-                    // call-site compatibility; unused in preserve filter).
+                    // §B4 + currentSessionId-backstop: merge preserves pendingCreateIds
+                    // AND the currently-viewed session (route id) so a child session
+                    // absent from the server's refreshed roots list survives the merge.
                     val mergedSessions = mergeRefreshedSessionsPreservingLocalActivity(
                         sessions,
                         currentSessions,
-                        currentSessionId,
+                        currentSessionId = routeChatSessionId(slices.store.stateFlow.value.nav.lastRoute) ?: currentSessionId,
                         pendingCreateIds = currentPendingCreateIds,
                     )
                     val newHasMore = false
@@ -318,7 +318,7 @@ internal class SessionListRefreshOrchestrator(
                     val mergedSessions = mergeRefreshedSessionsPreservingLocalActivity(
                         sessions,
                         currentSessions,
-                        currentSessionId,
+                        currentSessionId = routeChatSessionId(slices.store.stateFlow.value.nav.lastRoute) ?: currentSessionId,
                         pendingCreateIds = currentPendingCreateIds,
                     )
                     val sweepNow = clockMs()

@@ -19,11 +19,35 @@ import cn.vectory.ocdroid.ui.controller.subtreeIds
 
 // ── T1c sessionList ownership reduce ───────────────────────────────────
 
-internal fun reduceSessionUpserted(state: StoreState, action: AppAction.SessionUpserted): StoreState = state.copy(
-    sessionList = state.sessionList.copy(
-        sessions = upsertSession(state.sessionList.sessions, action.session),
-    ),
-)
+/**
+ * Keep child sessions durable in their parent's [childSessions] bucket so the
+ * title/union lookup survives a [AppAction.SessionsRefreshedLocal] that drops
+ * them from the flat [sessions] list. Mirrors the two-store maintenance pattern
+ * in [reduceSessionArchivedLocal] (lines 69-71). No-op for root sessions
+ * (parentId == null). The next [reduceSessionTreeHydrated] overwrites with
+ * server truth.
+ */
+internal fun reduceSessionUpserted(state: StoreState, action: AppAction.SessionUpserted): StoreState {
+    val session = action.session
+    val pid = session.parentId
+    val newChildSessions = if (pid != null) {
+        val bucket = state.sessionList.childSessions[pid].orEmpty()
+        val updated = if (bucket.any { it.id == session.id }) {
+            bucket.map { if (it.id == session.id) session else it }
+        } else {
+            bucket + session
+        }
+        state.sessionList.childSessions + (pid to updated)
+    } else {
+        state.sessionList.childSessions
+    }
+    return state.copy(
+        sessionList = state.sessionList.copy(
+            sessions = upsertSession(state.sessionList.sessions, session),
+            childSessions = newChildSessions,
+        ),
+    )
+}
 
 internal fun reduceSessionCreatedLocal(state: StoreState, action: AppAction.SessionCreatedLocal): StoreState = state.copy(
     sessionList = state.sessionList.copy(

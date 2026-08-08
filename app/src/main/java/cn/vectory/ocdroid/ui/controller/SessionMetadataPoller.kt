@@ -9,6 +9,7 @@ import cn.vectory.ocdroid.ui.MainViewModelTimings
 import cn.vectory.ocdroid.ui.SharedStateStore
 import cn.vectory.ocdroid.ui.isSseDown
 import cn.vectory.ocdroid.ui.mergeRefreshedSessionsPreservingLocalActivity
+import cn.vectory.ocdroid.ui.routeChatSessionId
 import cn.vectory.ocdroid.ui.preserveSessionsAddedDuringRequest
 import cn.vectory.ocdroid.util.DebugLog
 import kotlinx.coroutines.CoroutineScope
@@ -176,7 +177,7 @@ class SessionMetadataPoller @Inject constructor(
                 val mergedSessions = mergeRefreshedSessionsPreservingLocalActivity(
                     refreshed = refreshed,
                     local = current.sessions,
-                    currentSessionId = store.chatFlow.value.currentSessionId,
+                    currentSessionId = routeChatSessionId(store.navFlow.value.lastRoute) ?: store.chatFlow.value.currentSessionId,
                     pendingCreateIds = current.pendingCreateIds,
                 )
                 // §需求10 C2: preserve sessions that were added by SSE during the

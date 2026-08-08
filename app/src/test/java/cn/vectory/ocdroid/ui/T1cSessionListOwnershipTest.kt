@@ -1,12 +1,14 @@
 package cn.vectory.ocdroid.ui
 
 import cn.vectory.ocdroid.data.model.Session
+import cn.vectory.ocdroid.ui.controller.allSessionsById
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -142,6 +144,99 @@ class T1cSessionListOwnershipTest {
         // Non-target fields MUST survive.
         assertTrue("hasMoreSessions untouched", out.hasMoreSessions)
         assertTrue("hasCompletedInitialLoad untouched", out.hasCompletedInitialLoad)
+    }
+
+    @Test
+    fun `SessionUpserted child also lands in childSessions(parent)`() = runTest {
+        val store = SharedStateStore().apply {
+            mutateSessionList { it.copy(sessions = listOf(Session(id = "p1", directory = "/parent"))) }
+        }
+        val child = Session(id = "c1", parentId = "p1", title = "Child", directory = "/x")
+        store.dispatch(AppAction.SessionUpserted(child))
+
+        val out = store.stateFlow.value.sessionList
+        // child is in the flat sessions list.
+        assertTrue("child in sessions", out.sessions.any { it.id == "c1" })
+        // child is also in the childSessions bucket for parent "p1".
+        val bucket = out.childSessions["p1"]
+        assertNotNull("childSessions[p1] is not null", bucket)
+        assertEquals("childSessions[p1] contains c1", "c1", bucket!!.first().id)
+        assertEquals("title preserved in childSessions", "Child", bucket.first().title)
+    }
+
+    @Test
+    fun `re-upserting a child replaces it in its parent bucket (no duplicate)`() = runTest {
+        val store = SharedStateStore()
+        val child = Session(id = "c1", parentId = "p1", title = "Original", directory = "/x")
+        store.dispatch(AppAction.SessionUpserted(child))
+
+        // Re-upsert with a different title.
+        val updated = child.copy(title = "Updated")
+        store.dispatch(AppAction.SessionUpserted(updated))
+
+        val bucket = store.stateFlow.value.sessionList.childSessions["p1"]
+        assertNotNull("childSessions[p1] must exist", bucket)
+        assertEquals("exactly 1 entry in bucket (no duplicate)", 1, bucket!!.size)
+        assertEquals("title is the updated value", "Updated", bucket.first().title)
+    }
+
+    @Test
+    fun `SessionUpserted root session does not pollute childSessions`() {
+        val prior = StoreState.initial().copy(
+            sessionList = SessionListState(
+                childSessions = mapOf("existing" to listOf(Session(id = "eco", parentId = "existing", directory = "/e"))),
+            ),
+        )
+        val store = SharedStateStore().apply { mutateState { prior } }
+
+        store.dispatch(AppAction.SessionUpserted(Session(id = "root1", parentId = null, directory = "/x")))
+
+        val childSessions = store.stateFlow.value.sessionList.childSessions
+        // No new key added for the root.
+        assertFalse("root session did not add a key to childSessions", childSessions.containsKey("root1"))
+        // Existing entries are untouched.
+        assertTrue("existing childSessions entry survives", childSessions.containsKey("existing"))
+        assertEquals("existing bucket size unchanged", 1, childSessions["existing"]!!.size)
+    }
+
+    @Test
+    fun `child survives a SessionsRefreshedLocal via childSessions (end-to-end title resolvability)`() = runTest {
+        // Start: upsert a child session.
+        val store = SharedStateStore().apply {
+            mutateSessionList {
+                it.copy(sessions = listOf(Session(id = "p1", directory = "/parent")))
+            }
+        }
+        val child = Session(id = "c1", parentId = "p1", title = "Real", directory = "/x")
+        store.dispatch(AppAction.SessionUpserted(child))
+        // Confirm child is in both stores before refresh.
+        assertTrue(store.stateFlow.value.sessionList.sessions.any { it.id == "c1" })
+        assertEquals("Real", store.stateFlow.value.sessionList.childSessions["p1"]!!.first().title)
+
+        // Simulate a refresh that drops c1 from the flat list.
+        store.dispatch(
+            AppAction.SessionsRefreshedLocal(
+                sessions = listOf(Session(id = "p1", directory = "/parent")),
+                hasMoreSessions = false,
+                pendingCreateIds = emptySet(),
+                pendingCreatedAt = emptyMap(),
+            ),
+        )
+
+        // After the refresh, c1 is gone from the flat sessions list (dropped by
+        // the refresh) but is still resolvable via the childSessions union.
+        assertFalse(
+            "c1 is gone from flat sessions after refresh that omits it",
+            store.stateFlow.value.sessionList.sessions.any { it.id == "c1" },
+        )
+        val byId = allSessionsById(
+            store.stateFlow.value.sessionList.sessions,
+            store.stateFlow.value.sessionList.directorySessions,
+            store.stateFlow.value.sessionList.childSessions,
+        )
+        val resolved = byId["c1"]
+        assertNotNull("c1 is still resolvable via allSessionsById", resolved)
+        assertEquals("title Real preserved through refresh", "Real", resolved!!.title)
     }
 
     // ═══════════════════════════════════════════════════════════════════════

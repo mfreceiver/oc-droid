@@ -182,25 +182,25 @@ class SessionMergeTest {
     }
 
     @Test
-    fun `preserve drops a current-or-open session when it is NOT in pendingCreateIds`() {
-        // §Q4-strict-sync (strict ghost removal): the defining behavior change.
-        // A session that WAS current/open locally but is NOT in the server's
-        // refreshed list AND is NOT pending-create is now DROPPED. Pre-Q4 the
-        // currentSessionId / open-tabs-list check kept it alive indefinitely
-        // (ghost). Now only pendingCreateIds can preserve it.
+    fun `non-current session absent from refreshed is dropped`() {
+        // §Q4-strict-sync (strict ghost removal): a session that is NEITHER
+        // the currently-viewed session NOR in pendingCreateIds is DROPPED on
+        // refresh. Only currentSessionId and pendingCreateIds survive.
+        // This test guards against ghost accumulation: a stale local session
+        // that is not being viewed and is not pending-create must not linger.
         val refreshed = listOf(
             Session(id = "s1", directory = "/tmp/project", title = "Refreshed")
         )
         val local = listOf(
-            Session(id = "s2", directory = "/tmp/project", title = "Current but not pending (should drop)")
+            Session(id = "s2", directory = "/tmp/project", title = "Not current, not pending (should drop)")
         )
 
         val merged = mergeRefreshedSessionsPreservingLocalActivity(
             refreshed, local,
-            currentSessionId = "s2",
+            currentSessionId = "s3",  // s2 is NOT the current session
             pendingCreateIds = emptySet())
 
-        // s2 is current AND open, but NOT pending-create → dropped (strict-sync).
+        // s2 is neither current nor pending-create → dropped (strict-sync).
         assertEquals(listOf("s1"), merged.map { it.id })
     }
 
@@ -256,5 +256,84 @@ class SessionMergeTest {
             currentSessionId = null)
 
         assertEquals(revertX, merged.single().revert)
+    }
+
+    @Test
+    fun `current child session is preserved when absent from refreshed`() {
+        // §currentSessionId-backstop: a viewed child session (parentId != null)
+        // absent from the server's refreshed roots list MUST survive the merge.
+        // Without currentSessionId in the preserve filter this child is dropped
+        // and the title lookup falls back to home ("ocdroid v...").
+        val refreshed = emptyList<Session>() // server's flat roots list
+        val local = listOf(
+            Session(
+                id = "c1",
+                directory = "/tmp/project",
+                parentId = "p1",
+                title = "Real Subagent Title",
+                time = Session.TimeInfo(updated = 1_000)
+            )
+        )
+        val merged = mergeRefreshedSessionsPreservingLocalActivity(
+            refreshed, local,
+            currentSessionId = "c1",
+            pendingCreateIds = emptySet()
+        )
+        val byId = merged.associateBy { it.id }
+        assertTrue("current child session c1 must be preserved", byId.containsKey("c1"))
+        assertEquals("Real Subagent Title", byId["c1"]?.title)
+    }
+
+    @Test
+    fun `current session preserved even alongside pending-create`() {
+        // Both preserve paths active in the same call: a pending-create session
+        // AND the currently-viewed session (which is NOT pending-create) both
+        // survive when absent from refreshed.
+        val refreshed = emptyList<Session>()
+        val local = listOf(
+            Session(id = "p1", directory = "/tmp/project", title = "Pending Create", time = Session.TimeInfo(updated = 1_000)),
+            Session(id = "c1", directory = "/tmp/project", parentId = "p1", title = "Current View", time = Session.TimeInfo(updated = 2_000))
+        )
+        val merged = mergeRefreshedSessionsPreservingLocalActivity(
+            refreshed, local,
+            currentSessionId = "c1",
+            pendingCreateIds = setOf("p1")
+        )
+        val byId = merged.associateBy { it.id }
+        assertTrue("pending-create p1 preserved", byId.containsKey("p1"))
+        assertEquals("Pending Create", byId["p1"]?.title)
+        assertTrue("current session c1 preserved", byId.containsKey("c1"))
+        assertEquals("Current View", byId["c1"]?.title)
+    }
+
+    @Test
+    fun `current session NOT duplicated when also in refreshed`() {
+        // When the currently-viewed session IS in the refreshed set, the base
+        // pass adds it (fresher-wins) and the preserve pass must NOT double it.
+        // The guard `it.id !in refreshedIds` prevents the duplicate.
+        val refreshed = listOf(
+            Session(
+                id = "s1",
+                directory = "/tmp/project",
+                title = "Remote Server",
+                time = Session.TimeInfo(updated = 2_000)
+            )
+        )
+        val local = listOf(
+            Session(
+                id = "s1",
+                directory = "/tmp/project",
+                title = "Local Old",
+                time = Session.TimeInfo(updated = 1_000)
+            )
+        )
+        val merged = mergeRefreshedSessionsPreservingLocalActivity(
+            refreshed, local,
+            currentSessionId = "s1",
+            pendingCreateIds = emptySet()
+        )
+        assertEquals("exactly one s1 in result", 1, merged.count { it.id == "s1" })
+        // Base pass wins (remote has newer time) — title is server's.
+        assertEquals("Remote Server", merged.single { it.id == "s1" }.title)
     }
 }
